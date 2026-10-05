@@ -14,7 +14,11 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 import jam;
+
+auto const page_bytes = static_cast<std::uint64_t>(::getpagesize());
 
 struct payload {
   std::uint64_t bits;
@@ -89,7 +93,7 @@ static_assert(sizeof(jam::heap::ptr<incomplete>) == 4);
 static_assert(accepts_ptr<untraced>);
 static_assert(accepts_ptr<throwing_trace>);
 template<class T>
-concept allocatable = requires(jam::heap & heap) { heap.template make<T>(); };
+concept allocatable = requires(jam::heap & heap) { heap.template make_ptr<T>(); };
 static_assert(allocatable<untraced> && !allocatable<throwing_trace>);
 static_assert(accepts_root<jam::heap, jam::ptr<untraced>>);
 static_assert(!accepts_root<jam::heap, jam::ptr<throwing_trace>>);
@@ -149,13 +153,13 @@ void mixed_graph() noexcept {
   static_assert(std::is_same_v<R, jam::ptr<N>>);
   static_assert(sizeof(R) == sizeof(std::uint32_t));
   static_assert(std::is_standard_layout_v<R> && std::is_trivially_copyable_v<R>);
-  H heap{jam::options{.capacity = 8, .reserve = 2,
+  H heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes,
                      .workers = 4}};
   static_cast<void>(heap.allocate(23));
-  auto const data = heap.template make<payload>(payload{1, 7});
-  auto const a = heap.template make<N>(N{{}, data, 101});
+  auto const data = heap.template make_ptr<payload>(payload{1, 7});
+  auto const a = heap.template make_ptr<N>(N{{}, data, 101});
   static_cast<void>(heap.allocate(5));
-  auto const b = heap.template make<N>(N{a, data, 202});
+  auto const b = heap.template make_ptr<N>(N{a, data, 202});
   heap.store(a, N{b, data, 101});
   auto root = heap.root(a);
   static_assert(std::is_same_v<decltype(root.get()), R>);
@@ -193,16 +197,16 @@ void mixed_graph() noexcept {
 }
 
 void parallel_typed_discovery() noexcept {
-  jam::heap heap{jam::options{.capacity = 8, .reserve = 2,
+  jam::heap heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes,
                                        .workers = 4}};
   std::barrier rendezvous{2};
   aligned_branch::rendezvous = &rendezvous;
   aligned_branch::expected_heap = &heap;
   static_cast<void>(heap.allocate(31));
-  auto const data = heap.make<std::uint32_t>(77u);
-  auto const left = heap.make<aligned_branch>(aligned_branch{data});
-  auto const right = heap.make<aligned_branch>(aligned_branch{data});
-  auto root = heap.root(heap.make<fork_node>(fork_node{left, right}));
+  auto const data = heap.make_ptr<std::uint32_t>(77u);
+  auto const left = heap.make_ptr<aligned_branch>(aligned_branch{data});
+  auto const right = heap.make_ptr<aligned_branch>(aligned_branch{data});
+  auto root = heap.root(heap.make_ptr<fork_node>(fork_node{left, right}));
   static_assert(std::is_same_v<decltype(root), jam::root<fork_node>>);
   for (unsigned round = 0; round != 3; ++round) {
     heap.collect();
@@ -222,15 +226,15 @@ void composite_graph() noexcept {
   using E = typename C::edge;
   using A = std::array<E, 2>;
   using V = std::variant<std::uint32_t, E>;
-  jam::heap heap{jam::options{.capacity = 8, .reserve = 2,
+  jam::heap heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes,
                                 .workers = 3}};
   static_cast<void>(heap.allocate(17));
-  auto const first = heap.template make<payload>(payload{71, 11});
-  auto const second = heap.template make<payload>(payload{83, 13});
+  auto const first = heap.template make_ptr<payload>(payload{71, 11});
+  auto const second = heap.template make_ptr<payload>(payload{83, 13});
   using Part = std::variant<std::uint32_t, E, embedded>;
-  auto root = heap.root(heap.template make<C>(C{{Part{first}, Part{std::uint32_t{1}}, Part{embedded{second, 1}}}, 1}));
-  auto array_root = heap.root(heap.template make<A>(A{first, {}}));
-  auto variant_root = heap.root(heap.template make<V>(V{second}));
+  auto root = heap.root(heap.template make_ptr<C>(C{{Part{first}, Part{std::uint32_t{1}}, Part{embedded{second, 1}}}, 1}));
+  auto array_root = heap.root(heap.template make_ptr<A>(A{first, {}}));
+  auto variant_root = heap.root(heap.template make_ptr<V>(V{second}));
   for (unsigned round = 0; round != 3; ++round) {
     heap.collect();
     auto value = heap.load(root.get());
@@ -259,7 +263,7 @@ void composite_graph() noexcept {
   check(std::get<std::uint32_t>(value.entries[0]) == 1 && !std::get<E>(value.entries[2]),
         "changing a variant alternative clears the old pointer declaration");
   check(heap.used() == 1 + (sizeof(C) + 7) / 8, "inactive alternatives retain no targets");
-  auto const replacement = heap.template make<payload>(payload{97, 17});
+  auto const replacement = heap.template make_ptr<payload>(payload{97, 17});
   value.entries[0] = replacement;
   heap.store(root.get(), value);
   heap.collect();

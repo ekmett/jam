@@ -8,12 +8,16 @@
 #include <thread>
 #include <type_traits>
 
-import jam;
+#include <unistd.h>
+
+import jam.unqualified;
+
+auto const page_bytes = static_cast<std::uint64_t>(::getpagesize());
 
 struct node {
-  jam::ptr<node> next;
+  ptr<node> next;
   std::uint64_t value;
-  constexpr auto trace(jam::visitor auto & visit) const noexcept { return visit(next); }
+  constexpr auto trace(visitor auto & visit) const noexcept { return visit(next); }
 };
 
 void check(bool value) noexcept { if (!value) std::abort(); }
@@ -29,21 +33,21 @@ static_assert(std::is_convertible_v<jam::ptr<node>, jam::root<node>>);
 static_assert(std::is_nothrow_convertible_v<jam::root<node> const &, jam::ptr<node>>);
 
 void nested_scopes() {
-  jam::heap first{jam::options{.capacity = 8, .reserve = 2}};
-  jam::heap second{jam::options{.capacity = 8, .reserve = 2}};
+  jam::heap first{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
+  jam::heap second{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
   jam::root<node> a, b;
   auto const previous = jam::current_heap();
   {
     jam::heap_scope scope{first};
     check(jam::current_heap() == &first);
-    a = jam::make<node>(nullptr, std::uint64_t{41});
-    a = jam::make<node>(a, std::uint64_t{99});
+    a = jam::make_ptr<node>(nullptr, std::uint64_t{41});
+    a = jam::make_ptr<node>(a, std::uint64_t{99});
     a->value += 1;
     check((*a).value == 100 && a->next->value == 41);
     {
       jam::heap_scope nested{second};
       check(jam::current_heap() == &second);
-      b = jam::make<node>(nullptr, std::uint64_t{200});
+      b = jam::make_ptr<node>(nullptr, std::uint64_t{200});
       auto copy = a; // Registration uses the root's owner, not the current heap.
       copy = {};
       jam::collect();
@@ -74,15 +78,15 @@ void nested_scopes() {
 }
 
 void const_root() {
-  jam::heap heap{jam::options{.capacity = 8, .reserve = 2}};
-  jam::heap_scope scope{heap};
-  static_cast<void>(jam::make<node>());
-  jam::root<node> const root = jam::make<node>(nullptr, std::uint64_t{23});
+  heap heap{{.capacity = 1_MiB, .reserve = 256_KiB}};
+  heap_scope scope{heap};
+  static_cast<void>(make_ptr<node>());
+  root<node> const root = make_ptr<node>(nullptr, std::uint64_t{23});
   auto copy = root; // Linking another root also updates the const root's hook.
   auto const before = root.get().get();
-  jam::collect();
+  collect();
   check(root.get().get() < before && root->value == 23);
-  jam::ptr<node> p = root;
+  ptr<node> p = root;
   check(copy.get() == p && p->value == 23);
 }
 
@@ -96,13 +100,13 @@ struct alignas(Alignment) ordered_node {
 template<std::size_t Alignment>
 void collection_boundary(std::size_t workers) {
   using node_t = ordered_node<Alignment>;
-  jam::heap heap{jam::options{.capacity = 8, .reserve = 2,
+  jam::heap heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes,
                              .workers = workers}};
   jam::heap_scope scope{heap};
   static_cast<void>(heap.allocate(heap.page_words()));
-  jam::root const first = jam::make<node_t>(nullptr, std::uint64_t{11});
+  jam::root const first = jam::make_ptr<node_t>(nullptr, std::uint64_t{11});
   static_cast<void>(heap.allocate(heap.page_words()));
-  jam::root const second = jam::make<node_t>(first, std::uint64_t{22});
+  jam::root const second = jam::make_ptr<node_t>(first, std::uint64_t{22});
   check(first.get() < second.get() && nullptr < first.get());
   check(first.get() <= second.get() && second.get() > first.get());
   check((first.get() <=> first.get()) == 0);
@@ -131,9 +135,9 @@ void collection_boundary(std::size_t workers) {
 void thread_scopes() {
   std::barrier gate{2};
   auto work = [&](std::uint64_t value) {
-    jam::heap heap{jam::options{.capacity = 8, .reserve = 2}};
+    jam::heap heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
     jam::heap_scope scope{heap};
-    jam::root<node> root = jam::make<node>(nullptr, value);
+    jam::root<node> root = jam::make_ptr<node>(nullptr, value);
     gate.arrive_and_wait();
     check(jam::current_heap() == &heap && root->value == value);
     jam::collect();

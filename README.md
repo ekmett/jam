@@ -16,36 +16,39 @@ leaves: scalars and ordinary reference-free records need no boilerplate.
 ```cpp
 #include <cassert>
 #include <cstdint>
-import jam;
+import jam.unqualified;
 
 struct node {
-  jam::ptr<node> next;
+  ptr<node> next;
   std::uint64_t data;
 
-  constexpr auto trace(jam::visitor auto & visit) const noexcept {
+  constexpr auto trace(visitor auto & visit) const noexcept {
     return visit(next);
   }
 };
 
 int main() {
-  jam::heap heap{jam::options{.capacity = 256, .reserve = 64, .workers = 4}};
-  jam::heap_scope scope{heap};
+  heap heap{{.capacity = 1_MiB, .reserve = 256_KiB, .workers = 4}};
+  heap_scope scope{heap};
 
-  static_cast<void>(jam::make<node>()); // Unreachable.
-  auto const a = jam::make<node>(nullptr, 42u);
-  auto const b = jam::make<node>(a, 99u);
-  a->next = b;                         // A cycle with inline data.
-  jam::root answer = a;           // Implicit root registration.
-  auto copy = answer;                  // An independent root hook.
+  static_cast<void>(make_ptr<node>());        // Unreachable.
+  auto const a = make_ptr<node>(nullptr, 42u);
+  auto const b = make_ptr<node>(a, 99u);
+  a->next = b;                           // A cycle with inline data.
+  root answer = a;                       // Implicit root registration.
+  auto copy = answer;                    // An independent root hook.
 
-  jam::collect();                      // a and b are now stale; use the roots.
+  collect();                             // a and b are now stale; use the roots.
 
   assert(answer->next->next == answer.get());
   assert(answer->data == 42 && answer->next->data == 99);
   assert(copy.get() == answer.get());
-  assert(heap.used() == 5);             // One null cell plus two two-cell nodes.
+  assert(heap.used() == 5);              // One null cell plus two two-cell nodes.
 }
 ```
+
+`import jam.unqualified;` makes jam's public names and byte literals available
+unqualified. Use `import jam;` to keep names in `jam`.
 
 `ptr<T>` can name an incomplete type, so recursive records need only their
 member `trace` function. Typed heap operations check `jam::traceable<T>` once
@@ -79,7 +82,7 @@ those marks to rewrite pointers; other live bytes remain data. Every edge to a r
 must agree on its complete type. Base-subobject and interior references require
 the raw API.
 
-`jam::make<T>(args...)` forwards constructor arguments or aggregate fields into
+`jam::make_ptr<T>(args...)` forwards constructor arguments or aggregate fields into
 `T{args...}`, then copies the value into the heap and returns an unrooted
 `ptr<T>`. No preconstructed `T` is needed. Braced initialization rejects narrowing
 conversions; use `42u` for the node's unsigned data field. `nullptr` implicitly
@@ -111,7 +114,7 @@ Compact pointers are plain field values: copying one does not register a root.
 Initializing a `jam::root` from a ptr deduces its target type and registers it
 with the current heap.
 `heap.root(ptr)` provides the same operation with an explicit heap. `auto p =
-jam::make<T>()` still deduces a ptr; use `jam::root` when retention is needed.
+jam::make_ptr<T>()` still deduces a ptr; use `jam::root` when retention is needed.
 A root implicitly converts to its current ptr; `get()` returns the same value.
 Both types provide `*` and `->`.
 Their stored offsets are mutable so forwarding can update const handles.
@@ -167,16 +170,25 @@ alignment. Marking and compaction retain alignment groups as needed, and retaine
 neighboring cells count toward the used size.
 
 Constructor options set initial capacity, reserve `N`, and one `workers` limit
-shared by marking and compaction. Capacity and `N` are measured in native OS pages, not
-rank blocks; capacity must be a power of two holding at least twice the reserve.
+shared by marking and compaction. Capacity and reserve are byte counts;
+`_KiB`, `_MiB` and `_GiB` in `jam::literals` multiply by powers of 1024 at compile
+time and return `std::size_t`. Defaults are 1 MiB capacity
+and 256 KiB reserve. Construction rounds each size up to a native OS page and
+requires the rounded capacity to hold at least twice the rounded reserve.
+Any whole-page capacity is supported. `configuration()` reports the rounded
+initial sizes; the low-level `capacity()` and `reserved()` accessors use cells.
 `workers` must be positive and includes the calling thread. One persistent
 pool serves both collection phases.
-Compaction advances at most `N` source pages past its earliest unfinished page.
+Compaction advances at most the reserved number of source pages past its earliest
+unfinished page.
 Ordinary collections step backward into the reserve through coherent virtual
-aliases. Allocation grows the power-of-two backing when needed; sparse
+aliases. Allocation doubles the backing when needed, capped at 32 GiB; sparse
 collections can shrink it. `shrink_shift` selects the occupancy threshold:
 the default `2` shrinks below 1/4 full, `3` below 1/8, and `0` disables automatic
-shrinking. One collection can halve capacity once when its live cells and reserve fit.
+shrinking. One collection can shrink once toward half capacity, rounded down to whole pages
+and bounded below by twice the reserve, when its live cells and reserve fit.
+Payload accesses use the contiguous double mapping. Only the collection view
+rotation and mapping setup/resizing wrap explicitly with modulo.
 
 The lower-level `clear_marks`, `claim`, `mark`, `pointer` and `compact` operations
 remain available for clients that provide their own tracing schedule. These

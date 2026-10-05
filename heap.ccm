@@ -396,13 +396,38 @@ struct tracer<std::variant<Ts...>> {
   }
 };
 
+namespace detail {
+template<std::uint64_t Scale>
+consteval std::size_t byte_literal(unsigned long long value) noexcept {
+  if (value > std::numeric_limits<std::size_t>::max() / Scale)
+    heap_failure("byte literal overflow");
+  return value * Scale;
+}
+}
+
+/// \brief Binary byte-size literals, independent of the OS page size.
+export inline namespace literals {
+/// \brief Kibibytes: 1024 bytes each.
+consteval std::size_t operator""_KiB(unsigned long long value) noexcept {
+  return detail::byte_literal<1ull << 10>(value);
+}
+/// \brief Mebibytes: 1048576 bytes each.
+consteval std::size_t operator""_MiB(unsigned long long value) noexcept {
+  return detail::byte_literal<1ull << 20>(value);
+}
+/// \brief Gibibytes: 1073741824 bytes each.
+consteval std::size_t operator""_GiB(unsigned long long value) noexcept {
+  return detail::byte_literal<1ull << 30>(value);
+}
+}
+
 /// \brief Construction and collection policy. The worker count includes the caller.
 /// \ingroup jam_heap
-export struct options {
-  /// \brief Initial capacity, including the reserve, in native OS pages.
-  std::size_t capacity = 64;
-  /// \brief N native pages reserved for the bounded compaction window.
-  std::size_t reserve = 32;
+export struct heap_options {
+  /// \brief Initial byte capacity, including the reserve; rounded up to pages.
+  std::size_t capacity = 1_MiB;
+  /// \brief Byte reserve for bounded compaction; rounded up to pages.
+  std::size_t reserve = 256_KiB;
   /// \brief Maximum workers for both collection phases, including the caller.
   std::size_t workers = 1;
   /// \brief Shrink below 1/2^shift occupancy; two means 1/4, zero disables it.
@@ -660,8 +685,8 @@ private:
     }
   }
 
-  struct settings { std::size_t page_words, reserved, minimum, bytes; options policy; };
-  options const policy;
+  struct settings { std::size_t page_words, reserved, minimum, bytes; heap_options policy; };
+  heap_options const policy;
   detail::work_pool workers;
   std::size_t const page_word_count;
   std::size_t const reserve_word_count;
@@ -683,20 +708,23 @@ private:
   static constexpr unsigned block_shift = 5;
   static constexpr std::size_t maximum_bytes = std::size_t{1} << 35;
 
-  static constexpr bool valid_options(options const & config) noexcept {
-    return std::has_single_bit(config.capacity) && config.reserve != 0
-        && config.reserve <= config.capacity / 2
+  static constexpr bool valid_options(heap_options const & config) noexcept {
+    return config.capacity != 0 && config.capacity <= maximum_bytes
+        && config.reserve != 0 && config.reserve <= maximum_bytes / 2
         && config.workers != 0
         && config.shrink_shift < std::numeric_limits<std::size_t>::digits;
   }
-  static settings configure(options config) noexcept {
-    auto const pages = config.capacity;
-    auto const reserve = config.reserve;
-    auto const bytes = detail::heap_mapping::page_size();
-    if (!valid_options(config) || bytes < 512 || !std::has_single_bit(bytes) || !std::has_single_bit(pages)
-        || reserve == 0 || pages > maximum_bytes / bytes || reserve > pages / 2)
-      detail::heap_failure("power-of-two capacity must hold twice the page reserve; workers must be positive");
-    return {bytes / 8, reserve * (bytes / 8), std::bit_ceil(2 * reserve) * (bytes / 8), pages * bytes, config};
+  static settings configure(heap_options config) noexcept {
+    auto const page = detail::heap_mapping::page_size();
+    if (!valid_options(config) || page < 512 || page > maximum_bytes || !std::has_single_bit(page))
+      detail::heap_failure("invalid byte sizes, page size or worker count");
+    auto const round = [=](std::uint64_t value) noexcept { return ((value - 1) / page + 1) * page; };
+    config.capacity = round(config.capacity);
+    config.reserve = round(config.reserve);
+    if (config.reserve > config.capacity / 2)
+      detail::heap_failure("page-rounded capacity must hold twice the reserve");
+    return {page / 8, config.reserve / 8, 2 * config.reserve / 8,
+            config.capacity, config};
   }
   explicit heap(settings s) noexcept
       : policy(s.policy), workers(policy.workers),
@@ -786,7 +814,7 @@ private:
     return base(item) + static_cast<offset>(std::popcount(static_cast<bitmap>(item.live & (bit - 1))));
   }
   void resize(std::size_t words) noexcept {
-    assert(std::has_single_bit(words) && words >= minimum_capacity);
+    assert(words % page_word_count == 0 && words >= minimum_capacity && words <= maximum_bytes / 8);
     assert(cursor <= words - reserve_word_count);
     std::vector<block> next_metadata(words / block_words);
     std::copy_n(metadata.begin(), (cursor + block_words - 1) / block_words, next_metadata.begin());
@@ -801,13 +829,13 @@ private:
 public:
   /// \brief Construct a heap and one persistent pool sized for both collection phases.
   /// \ingroup jam_heap
-  /// \pre Capacity is a power of two, holding at least twice N; workers are positive.
+  /// \pre Rounded capacity holds at least twice the rounded reserve; workers are positive.
   /// Mapping/allocation/thread creation failures terminate; collection never unwinds.
-  explicit heap(options config = {}) noexcept
+  explicit heap(heap_options config = {}) noexcept
       native_diagnose_if(!valid_options(config), "invalid jam heap construction options")
       : heap(configure(config)) {}
-  /// \brief Read the immutable construction policy. \ingroup jam_heap
-  native_nodiscard options configuration() const noexcept { return policy; }
+  /// \brief Read the immutable construction policy with page-rounded byte sizes. \ingroup jam_heap
+  native_nodiscard heap_options configuration() const noexcept { return policy; }
   heap(heap const &) = delete;
   heap & operator=(heap const &) = delete;
   /// @brief Release the arena; every attached root must already be destroyed.
@@ -890,7 +918,7 @@ public:
   /// Construct T from the arguments. Register a root before collecting; copies
   /// of the returned ptr do not keep the target alive. Allocation preserves pointers.
   template<class T, class... Args>
-  native_nodiscard ptr<T> make(Args &&... args) noexcept requires traceable<T> {
+  native_nodiscard ptr<T> make_ptr(Args &&... args) noexcept requires traceable<T> {
     require_record<T>();
     static_assert(noexcept(T{std::forward<Args>(args)...}), "record construction must be noexcept");
     T const value{std::forward<Args>(args)...};
@@ -990,7 +1018,7 @@ public:
    * @ingroup jam_heap
    * @param words Extent, including any padding within the record.
    * @param alignment_bytes Alignment: 8, 16, 32 or 64 bytes.
-   * Grows by powers of two without copying payloads. Allocations preserve offsets.
+   * Grows by doubling without copying payloads, capped at 32 GiB. Allocations preserve offsets.
    * Cell zero is reserved for null; leading alignment padding is initialized.
    * Resource failures terminate.
    */
@@ -1001,10 +1029,11 @@ public:
     auto const k = exponent(alignment_bytes);
     auto const aligned = (cursor + (std::size_t{1} << k) - 1) & ~((std::size_t{1} << k) - 1);
     if (!words) detail::heap_failure("zero-word allocation");
-    if (words > maximum_bytes / 8 - reserve_word_count - aligned)
+    auto const limit = maximum_bytes / 8 - reserve_word_count;
+    if (aligned > limit || words > limit - aligned)
       detail::heap_failure("capacity overflow");
     while (words > capacity() - reserve_word_count - std::min(aligned, capacity() - reserve_word_count))
-      resize(capacity() * 2);
+      resize(std::min(capacity() * 2, maximum_bytes / 8));
     std::fill(data() + cursor, data() + aligned, word{0});
     cursor = aligned + words;
     return static_cast<offset>(aligned);
@@ -1111,7 +1140,7 @@ private:
     auto const padded = std::min(capacity() - reserve_word_count, (cursor + 7) & ~std::size_t{7});
     std::fill(data() + cursor, data() + padded, word{0});
 
-    auto const next_origin = (origin - reserve_word_count) & (capacity() - 1);
+    auto const next_origin = (origin + capacity() - reserve_word_count) % capacity();
     auto const source = data();
     auto const target = reinterpret_cast<word *>(storage.data()) + next_origin;
     auto const source_pages = (cursor + page_word_count - 1) / page_word_count;
@@ -1215,9 +1244,10 @@ private:
     }
     std::fill(alignment.begin(), alignment.end(), 0);
     cursor = live_words; origin = next_origin; view_base = target;
-    if (policy.shrink_shift && capacity() > minimum_capacity
+    auto const smaller = std::max(minimum_capacity, (capacity() / page_word_count / 2) * page_word_count);
+    if (policy.shrink_shift && smaller < capacity()
         && cursor < (capacity() >> policy.shrink_shift)
-        && cursor <= capacity() / 2 - reserve_word_count) resize(capacity() / 2);
+        && cursor <= smaller - reserve_word_count) resize(smaller);
   }
 };
 
@@ -1250,8 +1280,8 @@ public:
 
 /// \brief Allocate a record in the current heap; register a root before collection.
 export template<traceable T, class... Args>
-native_nodiscard ptr<T> make(Args &&... args) noexcept {
-  return current_heap()->make<T>(std::forward<Args>(args)...);
+native_nodiscard ptr<T> make_ptr(Args &&... args) noexcept {
+  return current_heap()->make_ptr<T>(std::forward<Args>(args)...);
 }
 
 /// \brief Collect the current heap; only registered roots remain meaningful outside it.

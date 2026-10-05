@@ -132,8 +132,8 @@ sample trial(options const & config) noexcept {
   auto const page_bytes = static_cast<std::size_t>(::getpagesize());
   auto const words = (config.bytes / 8 / cluster_words) * cluster_words;
   auto const pages = (words * 8 + page_bytes - 1) / page_bytes;
-  auto const capacity_pages = std::bit_ceil(std::max(pages + config.reserve, 2 * config.reserve));
-  H heap{jam::options{.capacity = capacity_pages, .reserve = config.reserve,
+  auto const capacity_pages = std::max(pages + config.reserve, 2 * config.reserve);
+  H heap{jam::heap_options{.capacity = capacity_pages * page_bytes, .reserve = config.reserve * page_bytes,
                       .workers = config.workers}};
   auto const first = heap.allocate(words, config.alignment);
   // Pre-touch backing through the first alias, including the copy reserve.
