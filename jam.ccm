@@ -4,3 +4,4 @@
 /// \brief A double-mapped compacting heap with intrusive tracing roots.
 export module jam;
 export import :heap;
+export import :simd;

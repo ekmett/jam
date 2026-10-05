@@ -102,7 +102,7 @@ target_compile_features(jam PUBLIC cxx_std_26)
 set_target_properties(jam PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
 target_sources(jam PUBLIC FILE_SET modules TYPE CXX_MODULES
   BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
-  FILES jam.ccm jam_unqualified.ccm heap.ccm compact.ccm work.ccm units.ccm)
+  FILES jam.ccm jam_unqualified.ccm heap.ccm compact.ccm work.ccm units.ccm simd.ccm)
 target_link_libraries(jam PUBLIC Threads::Threads native::native)
 target_compile_definitions(jam PUBLIC JAM_PAGE_BYTES=${JAM_PAGE_BYTES})
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -193,6 +193,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_MACRO_EXPANSION YES)
   set(DOXYGEN_EXPAND_ONLY_PREDEF YES)
   set(DOXYGEN_PREDEFINED
+    "JAM_DOXYGEN=1" "native_const="
     "native_nodiscard=" "native_pure=" "native_inline=inline" "native_cold=" "native_noreturn="
     "native_lifetimebound=" "native_diagnose_if(condition,message)=")
   set(DOXYGEN_EXCLUDE_SYMBOLS "jam::detail" "jam::detail::*")
@@ -213,7 +214,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
   set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
   set(DOXYGEN_QUIET YES)
-  doxygen_add_docs(jam-docs jam.ccm jam_unqualified.ccm heap.ccm units.ccm README.md LICENSE.md
+  doxygen_add_docs(jam-docs jam.ccm jam_unqualified.ccm heap.ccm units.ccm simd.ccm README.md LICENSE.md
     COMMENT "Build jam API documentation")
   # Removed declarations must not leave stale pages in the generated reference.
   add_custom_target(jam-docs-clean

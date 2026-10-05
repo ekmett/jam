@@ -378,6 +378,64 @@ The lower-level `clear_marks`, `claim`, `mark`, `pointer` and `compact` operatio
 remain available for clients that provide their own tracing schedule. These
 operations have the same frozen-heap requirements as `collect`.
 
+## Pointer vectors and gathers
+
+`native::simd<ptr<T>, N, A>` stores `N` compressed pointers. Its lanes are actual
+`ptr<T>` subobjects: declaring the vector in a manifest traces and forwards those
+fields in place. `native::wide<V, K>` similarly visits each register. Numeric SIMD
+lanes remain ordinary data. Both forms can be heap records or embedded members.
+Pointer vectors provide lane access, typed `load`/`store`, `to_native()` for raw
+cell offsets, and lane-wise `==`/`!=` comparisons against vectors or `nullptr`.
+
+Gathers are free functions found through ADL. The explicit-mask overload lets
+several field reads share one null check; the two-argument overload supplies
+`nodes != nullptr`:
+
+```cpp
+struct point {
+  ptr<point> next;
+  float x, y;
+  static constexpr auto manifest = make_manifest<point>(&point::next);
+};
+
+using P = native::simd<ptr<point>, 4>;
+P nodes{std::array<ptr<point>, 4>{a, b, nullptr, a}};
+auto active = nodes != nullptr;
+auto xs = gather(nodes, &point::x, active);
+auto ys = gather(nodes, &point::y, active);
+auto next = gather(nodes, &point::next); // P, with null in inactive lanes.
+
+native::wide<P, 4> packets{nodes};
+auto packed_xs = gather(packets, &point::x);
+```
+
+Here `a` and `b` belong to the heap bound by the current `heap_scope`. The wide
+convenience overload forms all register masks before calling the explicit-mask
+overload. The compiler remains free to interleave comparisons and gathers.
+An explicit `wide` of masks can be supplied as the third argument for reuse across
+fields. Register order and lane order are preserved. Each selected lane must name
+a valid, nonnull `T`; inactive lanes are not accessed and return zero or null.
+Gathering a pointer member does not guarantee that the resulting child is nonnull.
+
+Fields may be 32/64-bit integers, `float`, `double`, or `ptr<U>`, provided native
+supports the result's lane count and architecture. A wider field may require fewer
+lanes per register; use `wide` to retain the desired batch size. The ISA tag chooses
+the implementation, not runtime dispatch: call from a kernel compiled for that
+ISA and admitted on the current CPU. AVX2/AVX-512 use masked gathers for supported
+shapes; baseline and NEON read active lanes individually.
+
+On x86, member displacement is folded into the scalar base and unsigned cell
+offsets are rebased about 16 GiB, preserving the heap's full 32-GiB address range
+with signed gather indices scaled by eight. The member displacement uses Clang's
+flat data-member-pointer ABI for standard-layout records (Itanium on Unix and the
+flat MS representation on Windows); extended MS member-pointer representations
+are rejected. No member pointer is applied to a fabricated object, and finding
+the field offset does not require extracting the active mask.
+
+Outside the heap, pointer vectors and gathered pointer results obey the same
+lifetime rule as scalar `ptr`: **do not retain them across `collect()`**. Root a
+heap-resident vector or pack and obtain a fresh value from that root afterward.
+
 ## Build and use
 
 Jam requires macOS, Linux or Windows 10 version 1803+, CMake 4.4+, Ninja

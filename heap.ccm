@@ -1338,6 +1338,16 @@ private:
     metadata[0].live |= bitmap{1};
     metadata[0].pointers &= ~word{(1u << fields_per_word) - 1};
     auto const old_blocks = (cursor + block_words - 1) / block_words;
+    // A parallel prefix scan could compose joined groups' layout functions:
+    // F(x) = align_up(x, 1 << k) + retained_cells_after_dilation. Resolve group
+    // boundaries/k first; composing (max k, summed counts) loses padding.
+    // Eight input-residue displacements suffice (k <= 3), with associative
+    // composition c[r] = a[r] + b[(r + a[r]) & 7]. All destinations must be
+    // ready before workers forward arbitrary pointers into distant blocks.
+    // This whole pass measured only 0.5-1.7% of GC on eight-byte-aligned trees
+    // and chains with 1/4 workers, so scan overhead could erase the benefit.
+    // Sparse retention and higher alignments were not covered; reprofile those
+    // workloads before adding a parallel scan.
     std::size_t live_words = 0;
     for (std::size_t begin = 0; begin < old_blocks;) {
       auto end = begin + 1;
