@@ -8,13 +8,19 @@ module;
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <cstdio>
+#include <source_location>
 #include <thread>
 #include <vector>
 module jam;
 import :work;
 
 extern "C" void check_work_pushing() noexcept {
-  auto check = [](bool value) noexcept { if (!value) std::abort(); };
+  auto check = [](bool value, std::source_location at = std::source_location::current()) noexcept {
+    if (value) return;
+    std::fprintf(stderr, "work pushing check failed at %s:%u\n", at.file_name(), at.line());
+    std::abort();
+  };
   // The deadline is accumulated, not reset to the observation time.
   jam::detail::donation_clock timer{7};
   auto const start = timer.deadline;

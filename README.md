@@ -10,8 +10,9 @@ Records have no collector header or runtime type tag.
 `jam::ptr<T>` holds a four-byte object offset. Dereferencing it uses the heap
 bound by the current thread's `jam::heap_scope`. Visiting a field carries its
 target type into traversal, which invokes `jam::tracer<T>`. The default
-tracer supports ordinary member hooks and cooperative static hooks. Types without a hook are
-leaves: scalars and ordinary reference-free records need no boilerplate.
+tracer supports manifests, ordinary member hooks and cooperative static hooks.
+Types without a hook or manifest are leaves: scalars and ordinary reference-free
+records need no boilerplate.
 
 ```cpp
 #include <cassert>
@@ -22,10 +23,7 @@ struct node {
   ptr<node> next;
   std::uint64_t data;
 
-  static constexpr void trace(visitor auto & visit, ptr<node> at) noexcept {
-    for (auto const * p = visit.claim_target(at); p; p = visit.claim(p->next))
-      visit.poll();
-  }
+  static constexpr auto manifest = make_manifest<node>(&node::next);
 };
 
 int main() {
@@ -53,15 +51,44 @@ byte literals, `pages`, `bytes`, `space_cast` and `ceil`. Use `import jam;`
 to keep names qualified.
 
 `ptr<T>` can name an incomplete type. Typed heap operations check
-`jam::traceable<T>` once `T` is complete. The abbreviated parameter
-`jam::visitor auto & visit` constrains the hook to jam's visitor. No superclass or
-separate tracer registration is needed.
+`jam::traceable<T>` once `T` is complete. No superclass or separate tracer
+registration is needed.
+
+`make_manifest<T>(&T::left, &T::right, ...)` describes the members that may contain
+managed pointers. Members can be pointers or embedded values, including nested
+manifests, arrays, tuples and variants. Unlisted fields remain data. The
+descriptor is built at compile time and can be declared inside the incomplete
+class. Explicit tracing hooks and `tracer<T>` specializations take precedence.
+
+Jam generates the allocation walk. It claims the complete `sizeof(T)` extent
+with `alignof(T)`, batches pointer declarations into mask windows, and queues
+outgoing targets. One nonnull same-type child from structural enumeration is kept
+for the next loop iteration;
+the other children are queued. A list therefore walks directly, and a binary
+tree normally walks its right spine while donating the left branches. Cycles and
+sharing stop at an earlier claim. The walk polls the existing stochastic
+scheduler between records and does not grow the machine stack with graph depth.
+Embedded objects share the enclosing allocation's claim and pointer mask.
+
+Member offsets are computed from real subobject addresses and can fold to
+constants in optimized code. The descriptor does not reinterpret member pointers
+as integer offsets during constant evaluation. Dynamic hooks and active variant
+alternatives are still evaluated at runtime.
 
 The cooperative hook `static trace(visit, ptr<T>)` receives an unclaimed entry.
 It claims the complete record before reading its fields, then walks between
-records using raw pointers while marking is in progress. The example walks the
-list directly; its inline `std::uint64_t` data needs no visit. Nulls, cycles and
-sharing stop the walk when a claim returns null.
+records using raw pointers while marking is in progress. For manual control, the
+list's manifest can be replaced with:
+
+```cpp
+static constexpr void trace(visitor auto & visit, ptr<node> at) noexcept {
+  for (auto const * p = visit.claim_target(at); p; p = visit.claim(p->next))
+    visit.poll();
+}
+```
+
+The abbreviated parameter `jam::visitor auto & visit` constrains the hook to
+jam's visitor. Inline `std::uint64_t` data needs no visit.
 
 An ordinary member hook remains a field enumerator:
 
@@ -78,7 +105,7 @@ with `trace(Visitor &, T const &)` for ordinary enumeration or
 tracing chooses the cooperative form; embedded values use the ordinary form.
 Return types are unrestricted; collection currently uses the hook's effects.
 Deriving the specialization from `jam::leaf<T>` explicitly suppresses traversal.
-A record containing managed pointers must enumerate them: the default leaf
+A record containing managed pointers must enumerate them in a manifest or hook: the default leaf
 convention does not inspect arbitrary fields. Raw C++ pointers are data, not
 managed edges. Even a leaf allocation needs its complete extent marked live.
 

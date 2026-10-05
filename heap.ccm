@@ -320,6 +320,34 @@ concept cooperative_trace = requires(typename H::visitor & visit, ptr<T> at) {
 };
 template<class T>
 concept has_trace = requires { &T::trace; } || member_trace<T> || cooperative_trace<T>;
+
+struct structural_tracer {};
+template<class T, class... Members>
+struct member_manifest {
+  std::tuple<Members T::*...> members;
+  template<class Visitor>
+  static constexpr bool accepts = (requires(Visitor & visit, Members const & value) {
+    visit(value);
+  } && ...);
+};
+template<class T, class Descriptor> inline constexpr bool manifest_for = false;
+template<class T, class... Members>
+inline constexpr bool manifest_for<T, member_manifest<T, Members...>> = true;
+template<class T>
+concept has_manifest = requires {
+  requires manifest_for<T, std::remove_cvref_t<decltype(T::manifest)>>;
+};
+struct invalid_manifest {};
+}
+
+/// \brief Describe the pointer-bearing members of T, including embedded values.
+/// \ingroup jam_heap
+/// T may still be incomplete. Unlisted fields are data. Hooks take precedence;
+/// otherwise allocation tracing generates a cooperative walk from this descriptor.
+export template<class T, class... Members> requires (std::is_object_v<Members> && ...)
+consteval auto make_manifest(Members T::*... members) {
+  if (((members == nullptr) || ...)) throw "manifest members must not be null";
+  return detail::member_manifest<T, Members...>{{members...}};
 }
 
 /// \brief Bind an existing heap, restoring the previous binding on scope exit.
@@ -348,13 +376,14 @@ struct leaf {
   static constexpr void trace(Visitor &, T const &) noexcept {}
 };
 
-/// \brief Per-value tracing customization; values without a hook are leaves.
+/// \brief Per-value tracing customization; values without a hook or manifest are leaves.
 /// \ingroup jam_heap
-/// Scalars and ordinary records without a trace member contain no managed edges
-/// by convention. Records containing managed pointers must enumerate them in a trace member
-/// or a tracer specialization. Trivial copyability does not enumerate fields.
+/// Scalars and ordinary records without a trace member or manifest contain no
+/// managed edges by convention. Records containing managed pointers must enumerate
+/// them in a manifest, trace member or tracer specialization.
+/// Trivial copyability does not enumerate fields.
 export template<class T>
-struct tracer : leaf<T> {};
+struct tracer : std::conditional_t<requires { T::manifest; }, detail::invalid_manifest, leaf<T>> {};
 
 /// \brief Forward a value hook or a cooperative allocation hook.
 /// \ingroup jam_heap
@@ -483,7 +512,7 @@ constexpr void trace_parts(Visitor & visit, Ts const &... values) noexcept {
 /// \brief Visit each tuple element in the enclosing allocation.
 /// \ingroup jam_heap
 export template<class... Ts>
-struct tracer<std::tuple<Ts...>> {
+struct tracer<std::tuple<Ts...>> : detail::structural_tracer {
   /// \brief Tuple views retain their elements' original addresses.
   template<class Visitor>
   static constexpr void trace(Visitor & visit, std::tuple<Ts...> const & value)
@@ -497,7 +526,7 @@ struct tracer<std::tuple<Ts...>> {
 /// \brief Visit each array element in the enclosing allocation.
 /// \ingroup jam_heap
 export template<class T, std::size_t N>
-struct tracer<std::array<T, N>> {
+struct tracer<std::array<T, N>> : detail::structural_tracer {
   /// \brief Visit elements in order, preserving their original addresses.
   template<class Visitor>
   static constexpr void trace(Visitor & visit, std::array<T, N> const & value)
@@ -509,7 +538,7 @@ struct tracer<std::array<T, N>> {
 /// \brief Visit only the active variant alternative in the enclosing allocation.
 /// \ingroup jam_heap
 export template<class... Ts>
-struct tracer<std::variant<Ts...>> {
+struct tracer<std::variant<Ts...>> : detail::structural_tracer {
   /// \brief A valueless variant has no outgoing managed fields.
   template<class Visitor>
   static constexpr void trace(Visitor & visit, std::variant<Ts...> const & value)
@@ -518,6 +547,25 @@ struct tracer<std::variant<Ts...>> {
     std::visit([&](auto const & part) constexpr {
       detail::trace_parts(visit, part);
     }, value);
+  }
+};
+
+/// \brief Generate field enumeration and cooperative allocation tracing from a manifest.
+/// \ingroup jam_heap
+export template<class T> requires (!detail::has_trace<T>) && detail::has_manifest<T>
+struct tracer<T> : detail::structural_tracer {
+  /// \brief Visit listed subobjects in manifest order without claiming their storage.
+  template<class Visitor>
+  static native_inline constexpr void trace(Visitor & visit, T const & value) noexcept
+      requires std::remove_cvref_t<decltype(T::manifest)>::template accepts<Visitor> {
+    auto const & [...member] = T::manifest.members;
+    visit((value.*member)...);
+  }
+  /// \brief Claim records in a loop, queueing branches and walking one same-type edge locally.
+  template<class Visitor>
+  static void trace(Visitor & visit, ptr<T> at) noexcept
+      requires std::remove_cvref_t<decltype(T::manifest)>::template accepts<Visitor> {
+    visit.template trace_manifest<T>(at);
   }
 };
 
@@ -667,6 +715,7 @@ public:
    */
   class visitor {
     friend class heap;
+    template<class T> friend struct jam::tracer;
     heap & arena;
     detail::frontier<trace_job> & pending;
     std::size_t worker;
@@ -674,6 +723,69 @@ public:
     std::size_t record_bytes = 0;
     visitor(heap & h, detail::frontier<trace_job> & tasks, std::size_t id) noexcept
         : arena(h), pending(tasks), worker(id) {}
+
+    native_inline std::size_t pointer_slot(void const * field) const noexcept {
+      auto const address = reinterpret_cast<std::uintptr_t>(field);
+      auto const begin = reinterpret_cast<std::uintptr_t>(record);
+      auto const delta = address - begin;
+      if (!record || address < begin || record_bytes < sizeof(offset)
+          || delta > record_bytes - sizeof(offset) || delta % sizeof(offset))
+        detail::heap_failure("typed visitor requires a field in its tracing value");
+      return delta / sizeof(offset);
+    }
+    template<class T>
+    native_inline void enqueue(ptr<T> value) noexcept {
+      static_assert(traceable<T>, "reference target must support tracing");
+      if (value) pending.push(worker, {value.get(), &heap::template trace_record<T>});
+    }
+
+    // One mask window bounds stack use even for large, sparsely described records.
+    template<class T>
+    struct manifest_visit {
+      using heap_type = heap;
+      visitor & visit;
+      ptr<T> next;
+      word bits = 0;
+      std::size_t first_slot = 0;
+
+      native_inline void flush() noexcept {
+        visit.pointers(bits, first_slot);
+        bits = 0;
+      }
+      template<class U>
+      native_inline void operator()(ptr<U> const & value) noexcept {
+        auto const slot = visit.pointer_slot(&value);
+        auto const window = slot & ~std::size_t{63};
+        if (window != first_slot) { flush(); first_slot = window; }
+        bits |= word{1} << (slot - first_slot);
+        if constexpr (std::same_as<T, U>) {
+          if (value) { visit.enqueue(next); next = value; }
+        } else visit.enqueue(value);
+      }
+      template<class U>
+      native_inline void operator()(U const & value) noexcept
+          requires (!detail::is_ptr<U>) && detail::visits<U, visitor> {
+        if constexpr (std::derived_from<tracer<U>, detail::structural_tracer>)
+          tracer<U>::trace(*this, value);
+        else visit(value); // Custom hooks keep the actual heap visitor.
+      }
+      template<class... Us>
+      native_inline void operator()(Us const &... values) noexcept
+          requires (sizeof...(Us) != 1) && (detail::visits<Us, visitor> && ...) {
+        ((*this)(values), ...);
+      }
+    };
+
+    template<class T>
+    void trace_manifest(ptr<T> at) noexcept {
+      while (auto const * value = claim_target(at)) {
+        manifest_visit<T> fields{*this, {}};
+        tracer<T>::trace(fields, *value);
+        fields.flush();
+        at = fields.next;
+        poll();
+      }
+    }
 
   public:
     /// \brief Heap accepted by this visitor.
@@ -705,13 +817,8 @@ public:
     /// \pre The field is a subobject of the current successfully claimed record.
     template<class T>
     native_inline void pointer(ptr<T> const & value) noexcept {
-      auto const address = reinterpret_cast<std::uintptr_t>(&value);
-      auto const begin = reinterpret_cast<std::uintptr_t>(record);
-      auto const delta = address - begin;
-      if (!record || address < begin || record_bytes < sizeof(offset)
-          || delta > record_bytes - sizeof(offset) || delta % sizeof(offset))
-        detail::heap_failure("typed visitor requires a field in its tracing value");
-      auto const heap_delta = address - reinterpret_cast<std::uintptr_t>(arena.data());
+      auto const heap_delta = reinterpret_cast<std::uintptr_t>(record)
+          - reinterpret_cast<std::uintptr_t>(arena.data()) + pointer_slot(&value) * sizeof(offset);
       arena.pointer(static_cast<offset>(heap_delta / sizeof(word)),
                     static_cast<unsigned>((heap_delta % sizeof(word)) / sizeof(offset)));
     }
@@ -767,9 +874,8 @@ public:
     native_inline ptr<T> operator()(ptr<T> const & value) noexcept {
       // Defer target validation until use: deducing a recursive member hook's
       // return type must not require that hook's own traceable constraint.
-      static_assert(traceable<T>, "reference target must support tracing");
       pointer(value);
-      if (value) pending.push(worker, {value.get(), &heap::template trace_record<T>});
+      enqueue(value);
       return value;
     }
     /// \brief Visit parts in order, preserving their addresses; an empty pack does nothing.

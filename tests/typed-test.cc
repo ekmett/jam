@@ -4,6 +4,8 @@
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <bit>
+#include <cstring>
 #include <cstdint>
 #include <concepts>
 #include <cstdio>
@@ -17,6 +19,7 @@
 #include "../etc/page-size.h"
 
 import jam;
+import native;
 
 auto const page_bytes = static_cast<std::uint64_t>(system_page_size());
 
@@ -74,6 +77,21 @@ struct self_link {
   jam::ptr<self_link> next;
   constexpr auto trace(jam::visitor auto & visit) const noexcept { return visit(next); }
 };
+struct manifest_node {
+  jam::ptr<manifest_node> left, right;
+  std::uint64_t data;
+  static constexpr auto manifest = jam::make_manifest<manifest_node>(
+      &manifest_node::left, &manifest_node::right);
+};
+struct bad_manifest {
+  static constexpr auto manifest = 7;
+};
+struct bad_manifest_member {
+  invalid_trace value;
+  static constexpr auto manifest = jam::make_manifest<bad_manifest_member>(&bad_manifest_member::value);
+};
+static_assert(jam::traceable<manifest_node>);
+static_assert(!jam::traceable<bad_manifest> && !jam::traceable<bad_manifest_member>);
 static_assert(jam::traceable<self_link>);
 static_assert(jam::traceable<trace_result>);
 static_assert([] {
@@ -538,7 +556,183 @@ void cooperative_claims() noexcept {
   }
 }
 
+void manifest_graph() noexcept {
+  for (auto workers : {1u, 4u}) {
+    jam::heap heap{{.capacity = jam::units::pages{1024},
+                   .reserve = jam::units::pages{2}, .workers = workers}};
+    constexpr unsigned length = 100000;
+    jam::ptr<manifest_node> at;
+    for (unsigned i = 0; i != length; ++i) {
+      static_cast<void>(heap.mk<manifest_node>());
+      at = heap.mk<manifest_node>(at, at, i); // Shared child; one local edge.
+    }
+    auto root = heap.root(at);
+    for (unsigned round = 0; round != 3; ++round) {
+      heap.collect();
+      auto p = root.get();
+      for (unsigned i = length; i; --i) {
+        auto const value = heap.load(p);
+        check(value.data == i - 1 && value.left == value.right,
+              "manifest walk preserves fields and shared children");
+        p = value.right;
+      }
+      check(!p && heap.used() == 1 + length * 2,
+            "manifest walk retains the complete graph without garbage");
+    }
+    heap.store(root.get(), manifest_node{root.get(), root.get(), 17});
+    heap.collect();
+    auto const value = heap.load(root.get());
+    check(heap.used() == 3 && value.left == root.get() && value.right == root.get(),
+          "manifest cycles stop at an earlier claim and forward both slots");
+    auto build = [&](this auto const & self, unsigned depth) -> jam::ptr<manifest_node> {
+      if (!depth) return {};
+      auto const left = self(depth - 1), right = self(depth - 1);
+      return heap.mk<manifest_node>(left, right, depth);
+    };
+    auto tree = heap.root(build(12));
+    heap.collect();
+    std::vector<jam::ptr<manifest_node>> pending{tree.get()};
+    unsigned count = 0;
+    while (!pending.empty()) {
+      auto const current = heap.load(pending.back());
+      pending.pop_back();
+      ++count;
+      if (current.left) pending.push_back(current.left);
+      if (current.right) pending.push_back(current.right);
+    }
+    check(count == 4095 && heap.used() == 3 + 2 * count,
+          "generated traversal retains both distinct branches of a binary tree");
+  }
+}
+
+struct manifest_parts {
+  std::array<jam::ptr<payload>, 2> data;
+  static constexpr auto manifest = jam::make_manifest<manifest_parts>(&manifest_parts::data);
+};
+struct manifest_override {
+  jam::ptr<payload> data;
+  static constexpr auto manifest = jam::make_manifest<manifest_override>();
+  inline static std::atomic<unsigned> calls = 0;
+  void trace(jam::heap::visitor & visit) const noexcept {
+    ++calls;
+    visit(data);
+  }
+};
+struct alignas(64) manifest_record {
+  std::uint64_t scalar = 1;
+  manifest_parts parts;
+  std::array<jam::ptr<manifest_record>, 2> links;
+  tagged dynamic{0u};
+  manifest_override custom;
+  std::array<unsigned char, 280> padding{};
+  jam::ptr<payload> tail;
+  // Deliberately visit the high mask window before the low one.
+  static constexpr auto manifest = jam::make_manifest<manifest_record>(
+      &manifest_record::tail, &manifest_record::parts, &manifest_record::links,
+      &manifest_record::dynamic, &manifest_record::custom);
+};
+
+void nested_manifest_graph() noexcept {
+  for (auto workers : {1u, 4u}) {
+    jam::heap heap{{.capacity = jam::units::pages{32},
+                   .reserve = jam::units::pages{2}, .workers = workers}};
+    static_cast<void>(heap.allocate(13));
+    auto const a = heap.mk<payload>(71u, 83u);
+    auto const b = heap.mk<payload>(97u, 101u);
+    auto const c = heap.mk<payload>(107u, 109u);
+    auto const first = heap.mk<manifest_record>(manifest_record{
+        .parts = {{a, a}}, .links = {}, .dynamic = tagged(b), .custom = {c}, .tail = b});
+    static_cast<void>(heap.allocate(7));
+    auto const second = heap.mk<manifest_record>(manifest_record{
+        .parts = {{b, {}}}, .links = {first, first}, .dynamic = tagged(1u),
+        .custom = {c}, .tail = a});
+    heap.address(first)->links = {second, second};
+    auto root = heap.root(first);
+    for (unsigned round = 0; round != 3; ++round) {
+      manifest_override::calls = 0;
+      heap.collect();
+      auto const x = heap.load(root.get());
+      auto const y = heap.load(x.links[1]);
+      check(x.scalar == 1 && y.scalar == 1 && y.dynamic.scalar == 1,
+            "unlisted manifest fields and inactive alternatives remain data");
+      check(x.parts.data[0] == x.parts.data[1] && x.parts.data[0] == y.tail
+            && x.tail == y.parts.data[0] && x.tail == x.dynamic.pointer,
+            "nested manifests and dynamic hooks forward original subobject slots");
+      check(x.links[0] == x.links[1] && y.links[0] == root.get() && !y.parts.data[1],
+            "array edges preserve sharing, cycles and nulls");
+      check(heap.load(x.parts.data[0]).bits == 71 && heap.load(x.tail).bits == 97
+            && heap.load(x.custom.data).bits == 107 && manifest_override::calls == 2,
+            "explicit hooks override manifests and run once with the heap visitor");
+      check(reinterpret_cast<std::uintptr_t>(heap.address(root.get())) % 64 == 0
+            && reinterpret_cast<std::uintptr_t>(heap.address(x.links[0])) % 64 == 0,
+            "generated claims preserve the alignment of spanning records");
+    }
+  }
+}
+
+template<class T>
+struct native_record {
+  jam::ptr<T> next;
+  T value;
+  static constexpr auto manifest = jam::make_manifest<native_record>(
+      &native_record::next, &native_record::value);
+};
+
+template<class T>
+void native_storage() {
+  static_assert(std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>);
+  static_assert(jam::traceable<T>);
+  // Exercise representation transport without executing an unsupported ISA.
+  std::array<std::uint32_t, sizeof(T) / sizeof(std::uint32_t)> lanes;
+  for (unsigned i = 0; i != lanes.size(); ++i) lanes[i] = 0x3f800000u + i * 17;
+  T const expected = std::bit_cast<T>(lanes);
+  for (unsigned workers : {1u, 4u}) {
+    jam::heap heap{{.capacity = jam::units::pages{128},
+                   .reserve = jam::units::pages{2}, .workers = workers}};
+    for (unsigned i = 0; i != 97; ++i) static_cast<void>(heap.mk<std::uint64_t>(i));
+    auto direct = heap.root(heap.mk<T>(expected));
+    auto outer = heap.root(heap.mk<native_record<T>>(direct.get(), expected));
+    auto const before = direct.get().get();
+    for (unsigned round = 0; round != 3; ++round) {
+      heap.collect();
+      auto const * p = heap.address(direct.get());
+      auto const * q = heap.address(outer.get());
+      check(direct.get().get() < before, "native payload actually moves during collection");
+      check(reinterpret_cast<std::uintptr_t>(p) % alignof(T) == 0
+            && reinterpret_cast<std::uintptr_t>(&q->value) % alignof(T) == 0,
+            "native register and pack alignment survives compaction");
+      check(std::memcmp(p, &expected, sizeof(T)) == 0
+            && std::memcmp(&q->value, &expected, sizeof(T)) == 0,
+            "native numeric lanes remain data in direct and manifest records");
+      check(q->next == direct.get(), "pointer adjacent to native payload is forwarded");
+      auto const copy = heap.load(direct.get());
+      check(std::memcmp(&copy, &expected, sizeof(T)) == 0, "native payload can be loaded by value");
+    }
+  }
+}
+
+void native_heap_storage() {
+  using I = native::simd<std::uint32_t, 4>;
+  using F = native::simd<float, 4>;
+  native_storage<I>();
+  native_storage<F>();
+  native_storage<native::wide<I, 4>>();
+  native_storage<native::wide<F, 4>>();
+#if defined(__x86_64__) || defined(_M_X64)
+  using I8 = native::simd<std::uint32_t, 8, native::avx2>;
+  using I16 = native::simd<std::uint32_t, 16, native::avx512>;
+  native_storage<I8>();
+  native_storage<I16>();
+  native_storage<native::wide<I8, 2>>();
+  native_storage<native::wide<I16, 4>>();
+  native_storage<native::wide<I16, 8>>(); // Spans collector blocks.
+#endif
+}
+
 int main() {
+  native_heap_storage();
+  manifest_graph();
+  nested_manifest_graph();
   jam::ptr<incomplete>{}.prefetch();
   jam::ptr<incomplete>{}.prefetch_marks(); // Null needs no current heap or complete T.
   cooperative_tree<1, true>();
