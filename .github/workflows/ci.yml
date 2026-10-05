@@ -61,6 +61,10 @@ jobs:
   windows:
     runs-on: windows-2025
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -70,7 +74,7 @@ jobs:
         run: >-
           cmake -S . -B build -G Ninja
           -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_LINKER_TYPE=LLD
-          -DCMAKE_BUILD_TYPE=Release -DJAM_BUILD_TESTS=ON -DJAM_BUILD_BENCHMARKS=ON
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DJAM_BUILD_TESTS=ON -DJAM_BUILD_BENCHMARKS=ON
       - name: Build
         run: cmake --build build --parallel 2
       - name: Test

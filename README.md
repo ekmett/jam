@@ -372,7 +372,7 @@ cmake --install build --prefix /path/to/jam
 
 On Windows, use LLVM 23.1.1 `clang-cl`, its matching `clang-scan-deps` and
 LLD, and a Visual Studio developer shell with the MSVC C++ library and Windows
-SDK. CI uses CMake 4.4.3 and Ninja 1.13.2. Run:
+SDK. CI uses CMake 4.4.3 and Ninja 1.13.2 and tests both Debug and Release. Run:
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_LINKER_TYPE=LLD -DCMAKE_BUILD_TYPE=Release

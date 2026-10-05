@@ -13,6 +13,33 @@ module;
 #include <cstring>
 #include <span>
 
+#if NATIVE_HOST_X86
+#include <immintrin.h>
+#define NATIVE_TARGET_jam_avx2 "avx2,fma,bmi2"
+#define NATIVE_TARGET_jam_avx512 "avx2,fma,avx512f,avx512dq,avx512bw,avx512vl,bmi2"
+#define NATIVE_TARGET_jam_avx512_popcnt "avx2,fma,avx512f,avx512dq,avx512bw,avx512vl,avx512vpopcntdq,bmi2"
+
+// Temporary bridge until native exposes per-lane variable shifts.
+// Intrinsic calls are owned by the global module fragment.
+namespace {
+native_inline native_const native_target("avx2")
+__m256i shift_left(__m256i value, __m256i counts) noexcept {
+  return _mm256_sllv_epi32(value, counts);
+}
+native_inline native_const native_target("avx512f")
+__m512i shift_left(__m512i value, __m512i counts) noexcept {
+  return _mm512_sllv_epi32(value, counts);
+}
+// Native's AVX2 compress_store currently copies through a stack buffer.
+native_inline native_target("avx2")
+void store_prefix(std::uint32_t * target, __m256i value, unsigned count) noexcept {
+  auto const mask = _mm256_cmpgt_epi32(_mm256_set1_epi32(count),
+                                     _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
+  _mm256_maskstore_epi32(reinterpret_cast<int *>(target), mask, value);
+}
+}
+#endif
+
 export module jam:compact;
 import native;
 
@@ -136,9 +163,7 @@ void baseline_pack(heap_block * metadata, std::size_t old_blocks, std::size_t ne
 }
 
 #if NATIVE_HOST_X86
-#define NATIVE_TARGET_jam_avx2 "avx2,fma,bmi2"
-#define NATIVE_TARGET_jam_avx512 "avx2,fma,avx512f,avx512dq,avx512bw,avx512vl,bmi2"
-#define JAM_TARGETS jam_avx512, jam_avx2
+#define JAM_TARGETS jam_avx512_popcnt, jam_avx512, jam_avx2
 #define JAM_LANES(ISA) ((ISA).has(native::x86_feature::avx512f) ? 16 : 8)
 #define JAM_EXTRACT(ISA) native::pext<ISA>(item.pointers, pointer_cells(item.live))
 #elif NATIVE_HOST_NEON
@@ -147,6 +172,103 @@ void baseline_pack(heap_block * metadata, std::size_t old_blocks, std::size_t ne
 #define JAM_EXTRACT(ISA) portable_pack(item)
 #endif
 
+// Layout consumed by the intrinsic gathers: dword indices, sixteen-byte stride.
+static_assert(sizeof(heap_block) == 16 && offsetof(heap_block, live) == 0
+              && offsetof(heap_block, destination) == 4);
+#if NATIVE_HOST_X86
+// Avoid expanding native's scalar from_bitset loop before each AVX2 gather/store.
+template<class V>
+native_inline native_const native_target(NATIVE_TARGET_jam_avx2)
+typename V::mask vector_mask(bitmap bits) noexcept {
+  static_assert(V::lanes == 8);
+  constexpr std::array<bitmap, 8> positions{1, 2, 4, 8, 16, 32, 64, 128};
+  return (V(bits) & V::load(positions.data())) != V(0);
+}
+
+template<class V>
+native_inline native_target(NATIVE_TARGET_jam_avx2)
+bitmap pack_store(word * target, bitmap kept, V value) noexcept {
+  auto const packed = native::compress(vector_mask<V>(kept), value);
+  store_prefix(reinterpret_cast<bitmap *>(target), packed.value.to_native(),
+               static_cast<unsigned>(packed.count));
+  return static_cast<bitmap>(packed.count / 2);
+}
+
+#define JAM_GATHER_BLOCK(ISA) \
+if constexpr ((ISA).has(native::x86_feature::avx512vpopcntdq) \
+              || !(ISA).has(native::x86_feature::avx512f)) { \
+  constexpr unsigned batch = lanes == 16 ? 4 : 2; \
+  using W = native::wide<V, batch>; \
+  using I = native::simd<std::int32_t, lanes, ISA>; \
+  auto const live_fields = pointer_cells(item.live); \
+  auto const fields = item.pointers & live_fields; \
+  auto const * live_address = reinterpret_cast<bitmap const *>(metadata); \
+  auto const * base_address = reinterpret_cast<bitmap const *>( \
+      reinterpret_cast<char const *>(metadata) + offsetof(heap_block, destination)); \
+  for (unsigned chunk = 0; chunk != 64 / lanes; chunk += batch) { \
+    W values{V(0)}; \
+    native::wide<M, batch> masks{M::from_bitset(0)}; \
+    _Pragma("clang loop unroll(full)") \
+    for (unsigned j = 0; j != batch; ++j) { \
+      values.registers[j] = V::load(reinterpret_cast<bitmap const *>(source + i * 32) \
+                                   + lanes * (chunk + j)); \
+      if constexpr (lanes == 16) \
+        masks.registers[j] = M::from_bitset(fields >> (lanes * (chunk + j))); \
+      else \
+        masks.registers[j] = vector_mask<V>(fields >> (lanes * (chunk + j))); \
+    } \
+    if (fields) { \
+      native::wide<I, batch> indices{I(0)}; \
+      W live{V(0)}, bases{V(0)}, ranks{V(0)}; \
+      auto & [...v] = values; \
+      auto & [...m] = masks; \
+      auto & [...ix] = indices; \
+      auto & [...l] = live; \
+      auto & [...b] = bases; \
+      auto & [...r] = ranks; \
+      ((m &= v != V(0)), ...); \
+      ((ix = native::reinterpret_bits<std::int32_t>( \
+          (v >> native::imm<5>) << native::imm<2>)), ...); \
+      if constexpr (lanes == 16) { \
+        ((l = native::mask_vpgatherdd<4>(V(0), m, live_address, ix)), ...); \
+        ((b = native::mask_vpgatherdd<4>(v, m, base_address, ix)), ...); \
+      } else { \
+        ((l = native::mask_vpgatherdd<4>(V(0), \
+            native::reinterpret_bits<std::int32_t>(native::mask_bits(m)), live_address, ix)), ...); \
+        ((b = native::mask_vpgatherdd<4>(v, \
+            native::reinterpret_bits<std::int32_t>(native::mask_bits(m)), base_address, ix)), ...); \
+      } \
+      ((r = V::from_native(shift_left(V(1).to_native(), (v & V(31)).to_native()))), ...); \
+      ((assert(none(m & ((l & r) == V(0)))), static_cast<void>(m)), ...); \
+      ((r = l & (r - V(1))), ...); \
+      if constexpr ((ISA).has(native::x86_feature::avx512vpopcntdq)) \
+        ((r = native::vpopcntd(r)), ...); \
+      else \
+        ((r = native::popcount(r)), ...); \
+      ((v = native::masked_add(m, b, b, r)), ...); \
+    } \
+    _Pragma("clang loop unroll(full)") \
+    for (unsigned j = 0; j != batch; ++j) { \
+      auto const kept = live_fields >> (lanes * (chunk + j)); \
+      if constexpr (lanes == 16) { \
+        auto const written = native::compress_store(reinterpret_cast<bitmap *>(target + destination), \
+            lanes, M::from_bitset(kept), values.registers[j]); \
+        destination += static_cast<bitmap>(written / 2); \
+      } else if (kept & 255) { \
+        destination += pack_store(target + destination, static_cast<bitmap>(kept), values.registers[j]); \
+      } \
+    } \
+  } \
+  continue; \
+}
+
+#else
+#define JAM_GATHER_BLOCK(ISA)
+#endif
+
+// Keep AVX-512 compaction as register compression followed by a bounded store;
+// avoid memory-form compress-store (the Zen 4 performance constraint).
+// A full-width overstore can overwrite a neighboring worker's output.
 #define JAM_COMPACTOR(name, ISA, ...) \
   template<native::isa<> A> \
     requires (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
@@ -157,17 +279,19 @@ void baseline_pack(heap_block * metadata, std::size_t old_blocks, std::size_t ne
     using M = typename V::mask; \
     for (auto i = begin; i != end; ++i) { \
       auto const & item = metadata[i]; \
+      if (!item.live) continue; \
       auto destination = item.destination; \
       if (item.live == ~bitmap{0} && !item.pointers) { \
         std::memcpy(target + destination, source + i * 32, 256); \
         continue; \
       } \
+      JAM_GATHER_BLOCK(ISA) \
       for (unsigned cell = 0; cell != 32; cell += lanes / 2) { \
         auto const live = (item.live >> cell) & ((1u << (lanes / 2)) - 1); \
         if (!live) continue; \
         std::array<bitmap, lanes> values; \
         std::memcpy(values.data(), source + i * 32 + cell, sizeof(values)); \
-        auto fields = (item.pointers >> (cell * 2)) & ((1u << lanes) - 1); \
+        auto fields = (item.pointers >> (cell * 2)) & pointer_cells(live); \
         for (; fields; fields &= fields - 1) { \
           auto const lane = std::countr_zero(fields); \
           values[lane] = forward(metadata, values[lane]); \
@@ -184,6 +308,7 @@ void baseline_pack(heap_block * metadata, std::size_t old_blocks, std::size_t ne
     JAM_PACK_MASKS(JAM_EXTRACT(ISA)) \
   }
 NATIVE_TARGET_VARIANTS(vector, JAM_COMPACTOR, JAM_TARGETS)
+#undef JAM_GATHER_BLOCK
 #undef JAM_COMPACTOR
 #undef JAM_PACK_MASKS
 
