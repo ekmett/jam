@@ -259,6 +259,10 @@ managed fields after each trial.
 
 ## Documentation
 
+The [API reference](https://ekmett.github.io/jam/) is published from `main` after
+CI builds the library, passes the five tests, and builds Doxygen with warnings
+treated as errors. Pull requests run the same checks without publishing.
+
 With Doxygen 1.18+ and Graphviz installed, enable the API reference in an
 existing build:
 
