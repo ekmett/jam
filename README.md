@@ -7,67 +7,50 @@ A C++26 module for a double-mapped mark/compact heap. Typed references describe
 managed edges; external roots register the objects that must survive collection.
 Records have no collector header or runtime type tag.
 
-`jam::oo` accepts `std::uint32_t` and `std::uint64_t` as object-offset types.
-`heap<O>::ptr<T>` is exactly `jam::ptr<T, O>`. It holds one cell offset: four bytes
-for `std::uint32_t`, eight for `std::uint64_t`. Visiting a field
-carries its target type into the marking queue, which invokes `jam::tracer<T>`.
-The default tracer calls the target's `trace` member when present. Types without
-a hook are leaves: scalars and ordinary reference-free records need no boilerplate.
+`jam::ptr<T>` holds a four-byte object offset. Dereferencing it uses the heap
+bound by the current thread's `jam::heap_scope`. Visiting a field carries its
+target type into the marking queue, which invokes `jam::tracer<T>`. The default
+tracer calls the target's `trace` member when present. Types without a hook are
+leaves: scalars and ordinary reference-free records need no boilerplate.
 
 ```cpp
 #include <cassert>
-#include <concepts>
 #include <cstdint>
-#include <type_traits>
 import jam;
 
-template<jam::oo O>
 struct node {
-  jam::ptr<node, O> next;
+  jam::ptr<node> next;
   std::uint64_t data;
 
-  template<jam::visitor<O> V>
-  constexpr auto trace(V & visit) const noexcept {
+  constexpr auto trace(jam::visitor auto & visit) const noexcept {
     return visit(next);
   }
 };
 
-using heap_type = jam::heap<>; // std::uint32_t offsets by default.
-using node_t = node<heap_type::offset>;
-static_assert(std::is_same_v<heap_type::ptr<node_t>, jam::ptr<node_t, std::uint32_t>>);
-static_assert(sizeof(heap_type::ptr<node_t>) == 4);
-
 int main() {
-  heap_type heap{jam::options{
-    .capacity_pages = 256,
-    .reserve_pages = 64,
-    .marking_workers = 4,
-    .compaction_workers = 4
-  }};
+  jam::heap heap{jam::options{.capacity = 256, .reserve = 64, .workers = 4}};
+  jam::heap_scope scope{heap};
 
-  static_cast<void>(heap.make<node_t>()); // Unreachable.
-  auto const a = heap.make<node_t>(node_t{{}, 42});
-  auto const b = heap.make<node_t>(node_t{a, 99});
-  heap.store(a, node_t{b, 42});         // A cycle with inline data.
-  jam::root<node_t> answer = heap.root(a); // External intrusive root registration.
-  auto copy = answer;                    // An independent root hook.
+  static_cast<void>(jam::make<node>()); // Unreachable.
+  auto const a = jam::make<node>(nullptr, 42u);
+  auto const b = jam::make<node>(a, 99u);
+  a->next = b;                         // A cycle with inline data.
+  jam::root answer = a;           // Implicit root registration.
+  auto copy = answer;                  // An independent root hook.
 
-  heap.collect();                        // a and b are now stale; use the roots.
+  jam::collect();                      // a and b are now stale; use the roots.
 
-  auto const first = heap.load(answer.get());
-  auto const second = heap.load(first.next);
-  assert(second.next == answer.get());
-  assert(first.data == 42 && second.data == 99);
+  assert(answer->next->next == answer.get());
+  assert(answer->data == 42 && answer->next->data == 99);
   assert(copy.get() == answer.get());
-  assert(heap.used() == 5);               // One null cell plus two two-cell nodes.
+  assert(heap.used() == 5);             // One null cell plus two two-cell nodes.
 }
 ```
 
-`ptr<T, O>` can name an incomplete type, so recursive records need only their
-member `trace` function. Typed heap operations check `jam::traceable<T, O>` once
-`T` is complete: its tracer must be `noexcept` and support that offset type with
-either alignment policy. `template<jam::visitor<O> V>` accepts visitors using `O`.
-No superclass or separate tracer registration is needed for these records.
+`ptr<T>` can name an incomplete type, so recursive records need only their
+member `trace` function. Typed heap operations check `jam::traceable<T>` once
+`T` is complete: its tracer must be `noexcept`. The abbreviated parameter
+`jam::visitor auto & visit` constrains the hook to jam's visitor. No superclass or separate tracer registration is needed.
 
 The intrusive object hook is `node::trace`. It visits only `next`. The inline
 `std::uint64_t` data needs no visit and is never interpreted as a pointer.
@@ -88,18 +71,23 @@ visits each argument in order, by reference; `visit()` does nothing. It does not
 claim embedded values again. `std::tuple` and `std::array` visit each element;
 `std::variant` visits only its active alternative (none when valueless). These
 adapters compose recursively and require every element or alternative to support
-tracing with the visitor's offset type. Scalar visits do nothing.
+tracing with the visitor. Scalar visits do nothing.
 
-Visiting a `ptr<T, O>` tags its location in the enclosing allocation's pointer
+Visiting a `ptr<T>` tags its location in the enclosing allocation's pointer
 mask and queues its nonnull target for allocation tracing as `T`. Compaction uses
 those marks to rewrite pointers; other live bytes remain data. Every edge to a record
 must agree on its complete type. Base-subobject and interior references require
 the raw API.
 
-`make<T>(args...)` constructs and copies a value into the heap, returning an
-unrooted `ptr<T>`. `load(ptr)` returns a value snapshot; `store(ptr, value)` replaces
+`jam::make<T>(args...)` forwards constructor arguments or aggregate fields into
+`T{args...}`, then copies the value into the heap and returns an unrooted
+`ptr<T>`. No preconstructed `T` is needed. Braced initialization rejects narrowing
+conversions; use `42u` for the node's unsigned data field. `nullptr` implicitly
+constructs a null ptr. `heap.load(ptr)` returns a value snapshot;
+`heap.store(ptr, value)` replaces
 the record without changing its type or extent. Types must be unqualified,
-trivially copyable and standard-layout, with supported alignment. Construction
+trivially copyable, trivially copy constructible and standard-layout, with
+supported alignment. Construction
 must be `noexcept`; jam does not run payload destructors. Tracing support does
 not relax these storage requirements. In particular, standard-library tuples
 need not be trivially copyable or standard-layout. `std::tie` provides a tuple
@@ -113,18 +101,30 @@ members of nested subobjects. A copied ptr no longer identifies the field's
 location. The value and visitor must not escape the callback. Leaf records need
 no snapshot. Each traced non-leaf record is copied once for its hook.
 
+`jam::heap_scope scope{heap}` binds an existing heap until scope exit, then
+restores the previous binding. Scopes can nest, switch heaps and re-enter them.
+They neither own the heap nor synchronize access. The heap must outlive its
+scopes and roots. Implicit operations require a scope on the calling thread;
+collector workers establish their own binding before invoking tracer hooks.
+
 Compact pointers are plain field values: copying one does not register a root.
-`heap.root(ptr)` returns a `jam::root<T, O, may_dilate>` containing the intrusive
-registration links and the type-specific tracer. For the default heap, this is
-`jam::root<T>`. Its `get()` returns the current `heap::ptr<T>`.
+Initializing a `jam::root` from a ptr deduces its target type and registers it
+with the current heap.
+`heap.root(ptr)` provides the same operation with an explicit heap. `auto p =
+jam::make<T>()` still deduces a ptr; use `jam::root` when retention is needed.
+A root implicitly converts to its current ptr; `get()` returns the same value.
+Both types provide `*` and `->`.
+Their stored offsets are mutable so forwarding can update const handles.
+
 Copying a root registers another hook; moving it transfers the hook without
-allocating. The heap must outlive every attached root, including null roots.
-Keep root objects outside the moving heap, since their registration links use
-their addresses. The previous untyped root handle is named `heap::root_handle`.
+allocating. Roots retain their original heap for registration and destruction,
+even after a scope switches heaps. Dereferencing a root still requires its heap
+to be current. Keep roots outside the moving heap: their registration links use
+their addresses. The untyped root handle is named `heap::root_handle`.
 
 **Outside the managed heap, only registered roots retain their meaning across
 `heap.collect()`.** Do not keep a `ptr` on the stack or in an external container
-for use after collection. This includes copies obtained from `root.get()` and
+for use after collection. This includes implicit root-to-ptr conversions, copies obtained from `root.get()` and
 pointers inside snapshots returned by `heap.load()`. Keeping the target alive
 through a root does not update those copies. After collection, obtain a fresh
 pointer from the root and reload any snapshots before following their fields.
@@ -132,11 +132,25 @@ pointer from the root and reload any snapshots before following their fields.
 A default ptr is null, represented by zero. Cell zero is reserved across
 allocation and compaction, so no live object can have the null offset. `used()`
 includes this cell: an empty heap uses one cell. Null survives forwarding.
-Unrooted pointers and pointers in loaded snapshots expire at the next moving
-collection; retain a root when a value must survive. Allocation preserves offsets,
-but borrowed `data()` pointers and cell references expire when the heap grows.
-Pointers from different heaps must not mix. The offset type rejects mixing
-compressed and wide pointers in root registration or typed field visits at compile time.
+Allocation preserves offsets, but native `T*` and `T&` borrows obtained through
+`*`, `->` or `heap.address(ptr)` expire on growth or collection. Typed borrowing
+requires exclusive access to the record and cannot overlap collection. Borrow
+again through a current pointer after movement. `data()` pointers and cell
+references have the same mapping lifetime.
+
+`ptr<T>` provides equality and three-way comparison by offset within one heap.
+Compaction preserves the relative order of surviving objects, including alignment
+padding; null sorts first. Compare fresh pointers obtained from roots after each
+collection. Offset values themselves can change, so offset hashes are not stable.
+
+**Mixing pointers from different heaps is undefined behavior.** There are no
+owner tags in a ptr. Use the owning heap's scope when following a pointer or
+converting it to a root. Scopes do not make concurrent heap mutation safe.
+
+Collection is a compiler-fenced boundary: mutator stores precede tracing, and
+subsequent accesses observe forwarded roots, fields and the current mapping. The
+pool synchronizes worker completion before collection returns. These compiler
+fences add no hardware fence instructions and do not permit concurrent mutators.
 
 Mutation and changes to the root set stop during collection. Tracer hooks must
 be `noexcept` and safe for concurrent invocation. Marking finishes before
@@ -146,24 +160,16 @@ offset for those targets. That callback must claim each record and enumerate its
 fields. Both forms redeclare pointer fields each collection, so a conditional
 tracer can stop treating a field as a managed edge.
 
-`heap<O, may_dilate>` chooses the storage layout at compile time:
+The heap uses 32-bit offsets scaled by eight, permitting a 32 GiB heap and two
+managed fields in one cell. Each 256-byte rank block has 16 bytes of metadata;
+alignment adds one byte per 512 bytes. Records may have 8-, 16-, 32- or 64-byte
+alignment. Marking and compaction retain alignment groups as needed, and retained
+neighboring cells count toward the used size.
 
-| Template parameters | Managed reference | Rank block | Persistent metadata |
-|---|---|---|---|
-| `heap<std::uint32_t, false>` | 32 bits, scaled by eight | 256 bytes | 16 bytes per block |
-| `heap<std::uint32_t, true>` | 32 bits, scaled by eight | 256 bytes | 16 bytes per block + one byte per 512 bytes |
-| `heap<std::uint64_t, false>` | 64 bits, scaled by eight | 512 bytes | 24 bytes per block |
-| `heap<std::uint64_t, true>` | 64 bits, scaled by eight | 512 bytes | 24 bytes per block |
-
-Compressed pointers permit a 32 GiB heap and two managed fields in one cell. With
-`may_dilate=false`, records have eight-byte alignment. Enabling it permits
-16-, 32- and 64-byte alignment; marking and compaction retain alignment groups
-as needed, and retained neighboring cells count toward the used size.
-
-Constructor options set initial capacity, reserve `N`, marking parallelism and
-compaction parallelism. Capacity and `N` are measured in native OS pages, not
+Constructor options set initial capacity, reserve `N`, and one `workers` limit
+shared by marking and compaction. Capacity and `N` are measured in native OS pages, not
 rank blocks; capacity must be a power of two holding at least twice the reserve.
-Worker counts must be positive and include the calling thread. One persistent
+`workers` must be positive and includes the calling thread. One persistent
 pool serves both collection phases.
 Compaction advances at most `N` source pages past its earliest unfinished page.
 Ordinary collections step backward into the reserve through coherent virtual
@@ -211,13 +217,27 @@ The consumer's compiler, standard library, exception mode and language-extension
 mode must match its module build. `jam::jam` supplies C++26 and no exceptions;
 set `CMAKE_CXX_EXTENSIONS=OFF` for consumers as shown.
 
+The default carrier is `thread_local`. On AArch64, `JAM_CONTEXT_X28=ON` uses a
+reserved `x28` register instead. CMake probes support and propagates `-ffixed-x28`
+to consumers; all participating compilation must reserve it. The carrier holds
+a stable heap pointer, and dereference loads that heap's current mapping base.
+`jam::current_heap()` is a pure accessor; scope entry and exit use ordinary C++
+stores so the compiler can observe rebinding.
+
+The register carrier has no initial null guarantee: use implicit operations only
+inside a scope. Establish a scope at foreign callback entry using an explicitly
+saved heap identity, since foreign code may temporarily use `x28`. Worker threads
+need their own scopes. Other users of `x28` require distinct scoped regions or a
+shared carrier; they cannot hold separate active contexts in
+the same register.
+
 `JAM_USE_BMI2=ON` enables bit extraction on x86-64 and requires BMI2 support
 throughout the resulting application. There is no runtime ISA dispatch. The
 default uses a portable bit-packing table. Tests default on for a top-level build. Enable
 `JAM_BUILD_BENCHMARKS=ON` for `heap-bench`.
 
 ```sh
-build/heap-bench --mode compressed --bytes 16MiB --workers 4 \
+build/heap-bench --bytes 16MiB --workers 4 \
   --reserve-list 32,64,128 --repeats 11
 ```
 

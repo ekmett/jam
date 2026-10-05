@@ -18,7 +18,7 @@ import jam;
 
 namespace {
 
-using heap_type = jam::heap<>;
+using heap_type = jam::heap;
 using offset = heap_type::offset;
 using root_handle = heap_type::root_handle;
 
@@ -49,8 +49,8 @@ void trace_leaf(heap_type::visitor & visitor, offset start) noexcept {
 }
 
 void cycles_and_shared_children() noexcept {
-  heap_type heap{jam::options{.capacity_pages = 8, .reserve_pages = 2,
-                             .marking_workers = 4, .compaction_workers = 4}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2,
+                             .workers = 4}};
   static_cast<void>(heap.allocate(13));
   auto const a = leaf(heap, 1);
   static_cast<void>(heap.allocate(7));
@@ -95,8 +95,8 @@ void cycles_and_shared_children() noexcept {
 }
 
 void copied_and_moved_roots_survive_vector_relocation() noexcept {
-  heap_type heap{jam::options{.capacity_pages = 8, .reserve_pages = 2,
-                             .marking_workers = 2, .compaction_workers = 4}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2,
+                             .workers = 4}};
   static_cast<void>(heap.allocate(11));
   auto a = heap.root(leaf(heap, 101));
   auto b = a;
@@ -124,8 +124,8 @@ void copied_and_moved_roots_survive_vector_relocation() noexcept {
 }
 
 void assignment_changes_the_root_owner() noexcept {
-  heap_type first{jam::options{.capacity_pages = 8, .reserve_pages = 2}};
-  heap_type second{jam::options{.capacity_pages = 8, .reserve_pages = 2}};
+  heap_type first{jam::options{.capacity = 8, .reserve = 2}};
+  heap_type second{jam::options{.capacity = 8, .reserve = 2}};
   static_cast<void>(first.allocate(5));
   static_cast<void>(second.allocate(17));
   auto assigned = first.root(leaf(first, 111));
@@ -163,8 +163,8 @@ void assignment_changes_the_root_owner() noexcept {
 }
 
 void dropped_roots_reclaim_records() noexcept {
-  heap_type heap{jam::options{.capacity_pages = 8, .reserve_pages = 2,
-                             .marking_workers = 3, .compaction_workers = 2}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2,
+                             .workers = 3}};
   static_cast<void>(heap.allocate(23));
   auto kept = heap.root(leaf(heap, 444));
   {
@@ -185,8 +185,8 @@ void dropped_roots_reclaim_records() noexcept {
 }
 
 void empty_collections_ignore_null_roots() noexcept {
-  heap_type heap{jam::options{.capacity_pages = 8, .reserve_pages = 2,
-                             .marking_workers = 4, .compaction_workers = 3}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2,
+                             .workers = 4}};
   root_handle empty;
   auto attached = heap.root(heap_type::null);
   auto copy = attached;
@@ -204,10 +204,10 @@ void empty_collections_ignore_null_roots() noexcept {
 }
 
 void mixed_alignment_traces_preserve_records() noexcept {
-  using aligned_heap = jam::heap<std::uint32_t, true>;
+  using aligned_heap = jam::heap;
   using aligned_offset = aligned_heap::offset;
-  aligned_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 1,
-                                .marking_workers = 3, .compaction_workers = 4}};
+  aligned_heap heap{jam::options{.capacity = 8, .reserve = 1,
+                                .workers = 4}};
   static_cast<void>(heap.allocate(1));
   std::array<aligned_offset, 3> records{heap.allocate(1, 16), 0, 0};
   static_cast<void>(heap.allocate(3));
@@ -249,8 +249,8 @@ void mixed_alignment_traces_preserve_records() noexcept {
 }
 
 void a_single_root_discovers_parallel_branches() noexcept {
-  heap_type heap{jam::options{.capacity_pages = 8, .reserve_pages = 2,
-                             .marking_workers = 2, .compaction_workers = 1}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2,
+                             .workers = 2}};
   static_cast<void>(heap.allocate(9));
   auto const parent = leaf(heap, 0);
   auto const left = leaf(heap, 1);

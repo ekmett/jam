@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
-foreach(name IN ITEMS heap heap-mode root typed)
+foreach(name IN ITEMS heap heap-mode root typed scope)
   add_executable(${name}-test ${name}-test.cc)
   target_link_libraries(${name}-test PRIVATE jam::jam)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

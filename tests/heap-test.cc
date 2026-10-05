@@ -24,12 +24,12 @@ import jam;
 
 namespace {
 
-using wide_heap = jam::heap<std::uint64_t, false>;
+using heap_type = jam::heap;
 
-using word = wide_heap::word;
-using offset = wide_heap::offset;
-constexpr offset null = wide_heap::null;
-static_assert(sizeof(wide_heap::block) == 24);
+using word = heap_type::word;
+using offset = heap_type::offset;
+constexpr offset null = heap_type::null;
+static_assert(sizeof(heap_type::block) == 16);
 char const * executable = nullptr;
 
 void check(bool value, std::string_view message) noexcept {
@@ -47,7 +47,7 @@ struct expected {
   std::vector<offset> roots;
 };
 
-expected oracle(wide_heap const & heap,
+expected oracle(heap_type const & heap,
                 std::vector<unsigned char> const & live,
                 std::vector<unsigned char> const & pointers,
                 std::span<offset const> roots) noexcept {
@@ -69,7 +69,7 @@ expected oracle(wide_heap const & heap,
   return result;
 }
 
-void marks(wide_heap & heap, std::vector<unsigned char> const & live,
+void marks(heap_type & heap, std::vector<unsigned char> const & live,
            std::vector<unsigned char> const & pointers) noexcept {
   heap.clear_marks();
   for (std::size_t i = 1; i < live.size();) {
@@ -82,7 +82,7 @@ void marks(wide_heap & heap, std::vector<unsigned char> const & live,
     if (pointers[i]) heap.pointer(static_cast<offset>(i));
 }
 
-void verify(wide_heap const & heap, expected const & result,
+void verify(heap_type const & heap, expected const & result,
             std::vector<offset> const & roots) noexcept {
   check(heap.used() == result.words.size(), "compaction preserves exactly the live words");
   check(roots == result.roots, "external roots are forwarded exactly");
@@ -92,7 +92,7 @@ void verify(wide_heap const & heap, expected const & result,
   check(heap.used() <= heap.capacity() - heap.reserved(), "the reserved gap remains available");
 }
 
-void compact(wide_heap & heap, std::vector<unsigned char> const & live,
+void compact(heap_type & heap, std::vector<unsigned char> const & live,
              std::vector<unsigned char> const & pointers,
              std::vector<offset> & roots) noexcept {
   auto const result = oracle(heap, live, pointers, roots);
@@ -102,7 +102,7 @@ void compact(wide_heap & heap, std::vector<unsigned char> const & live,
 }
 
 void alias_and_layout() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 2}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2}};
   auto const page = heap.page_words();
   check(page != 0 && page % 64 == 0, "VM pages contain whole 512-byte mark blocks");
   check(heap.capacity() == 8 * page && heap.reserved() == 2 * page, "capacity and reserve use words");
@@ -113,12 +113,12 @@ void alias_and_layout() noexcept {
   check(data[heap.capacity() + 3] == 123, "the second view observes first-view writes");
   data[heap.capacity() + 7] = 456;
   check(data[7] == 456 && heap[7] == 456, "the first view observes second-view writes");
-  wide_heap const & view = heap;
+  heap_type const & view = heap;
   check(view.data()[3] == 123 && view[7] == 456, "const access uses the same backing");
 }
 
 void allocation_growth_preserves_reserve() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 2}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2}};
   auto const old_capacity = heap.capacity();
   auto const limit = old_capacity - heap.reserved();
   check(heap.allocate(limit - 1) == 1, "allocation can fill the nonreserved portion");
@@ -133,7 +133,7 @@ void allocation_growth_preserves_reserve() noexcept {
 }
 
 void cyclic_edges_and_roots() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 2}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2}};
   static_cast<void>(heap.allocate(3));
   auto const a = heap.allocate(5);
   static_cast<void>(heap.allocate(7));
@@ -159,7 +159,7 @@ void cyclic_edges_and_roots() noexcept {
 }
 
 void straddling_records_and_ring_wrap() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 1}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 1}};
   auto const page = heap.page_words();
   auto const capacity = heap.capacity();
   static_cast<void>(heap.allocate(61));
@@ -193,8 +193,8 @@ void straddling_records_and_ring_wrap() noexcept {
 }
 
 void parallel_matches_scalar() noexcept {
-  wide_heap scalar{jam::options{.capacity_pages = 16, .reserve_pages = 4}};
-  wide_heap parallel{jam::options{.capacity_pages = 16, .reserve_pages = 4, .compaction_workers = 4}};
+  heap_type scalar{jam::options{.capacity = 16, .reserve = 4}};
+  heap_type parallel{jam::options{.capacity = 16, .reserve = 4, .workers = 4}};
   auto const count = 8 * scalar.page_words() + 71;
   static_cast<void>(scalar.allocate(count - 1));
   static_cast<void>(parallel.allocate(count - 1));
@@ -225,7 +225,7 @@ void parallel_matches_scalar() noexcept {
 }
 
 void growth_of_a_wrapped_view() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 1}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 1}};
   auto const page = heap.page_words();
   auto const old_capacity = heap.capacity();
   auto const count = 2 * page + 137;
@@ -246,7 +246,7 @@ void growth_of_a_wrapped_view() noexcept {
 }
 
 void shrinking_preserves_records_and_gap() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 16, .reserve_pages = 2}};
+  heap_type heap{jam::options{.capacity = 16, .reserve = 2}};
   auto const page = heap.page_words();
   static_cast<void>(heap.allocate(page + 61));
   auto const a = heap.allocate(3);
@@ -277,7 +277,7 @@ void shrinking_preserves_records_and_gap() noexcept {
 }
 
 void full_parallel_waves_preserve_every_word() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 16, .reserve_pages = 2, .compaction_workers = 4}};
+  heap_type heap{jam::options{.capacity = 16, .reserve = 2, .workers = 4}};
   auto const capacity = heap.capacity();
   auto const count = capacity - heap.reserved();
   auto const page = heap.page_words();
@@ -309,7 +309,7 @@ void full_parallel_waves_preserve_every_word() noexcept {
 }
 
 void invalid_requests_leave_heap_unchanged() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 2, .compaction_workers = 4}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2, .workers = 4}};
   static_cast<void>(heap.allocate(67));
   for (std::size_t i = 1; i < heap.used(); ++i) heap[i] = payload(i);
   auto const capacity = heap.capacity();
@@ -350,16 +350,16 @@ void invalid_request(unsigned scenario) noexcept {
   if (scenario < 5) {
     volatile std::size_t pages = invalid[scenario].pages;
     volatile std::size_t reserve = invalid[scenario].reserve;
-    wide_heap rejected{jam::options{.capacity_pages = pages, .reserve_pages = reserve}};
+    heap_type rejected{jam::options{.capacity = pages, .reserve = reserve}};
   } else {
-    wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 2}};
+    heap_type heap{jam::options{.capacity = 8, .reserve = 2}};
     volatile std::size_t words = scenario == 5 ? 0 : std::numeric_limits<std::size_t>::max();
     static_cast<void>(heap.allocate(words));
   }
 }
 
 void concurrent_range_marks_preserve_the_union() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 2, .compaction_workers = 4}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2, .workers = 4}};
   auto const count = 4 * heap.page_words() + 137;
   static_cast<void>(heap.allocate(count - 1));
   for (std::size_t i = 1; i < count; ++i) heap[i] = payload(i);
@@ -407,17 +407,17 @@ void concurrent_range_marks_preserve_the_union() noexcept {
     });
   markers.clear(); // Join every marker before observing metadata or starting collection.
   for (std::size_t i = 0; i < count; ++i) {
-    auto const & block = heap.blocks()[i >> 6];
-    auto const bit = word{1} << (i & 63);
+    auto const & block = heap.blocks()[i / heap_type::block_words];
+    auto const bit = word{1} << (i % heap_type::block_words);
     check(((block.live & bit) != 0) == (live[i] != 0), "parallel overlapping marks lose no live bits");
-    check(((block.pointers & bit) != 0) == (pointers[i] != 0), "parallel pointer declarations lose no bits");
+    check(((block.pointers & (word{1} << (2 * (i % heap_type::block_words)))) != 0) == (pointers[i] != 0), "parallel pointer declarations lose no bits");
   }
   heap.compact(std::span<offset>{roots});
   verify(heap, result, roots);
 }
 
 void parallel_claim_traverses_each_cyclic_record_once() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 2, .compaction_workers = 4}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 2, .workers = 4}};
   std::vector<std::size_t> const widths{3, 67, heap.page_words() + 65, 5, 64, 73, 193, 4};
   std::vector<offset> records;
   for (auto const width : widths) {
@@ -434,7 +434,7 @@ void parallel_claim_traverses_each_cyclic_record_once() noexcept {
     std::fill_n(live.begin() + static_cast<std::size_t>(start), widths[i], 1);
     std::fill_n(pointers.begin() + static_cast<std::size_t>(start), 3, 1);
   }
-  std::vector<offset> roots{records[0], records[3], records.back() + widths.back() - 1, null};
+  std::vector<offset> roots{records[0], records[3], static_cast<offset>(records.back() + widths.back() - 1), null};
   auto const result = oracle(heap, live, pointers, roots);
   heap.clear_marks();
   std::vector<std::atomic<unsigned>> winners(records.size());
@@ -465,7 +465,7 @@ void parallel_claim_traverses_each_cyclic_record_once() noexcept {
     check(winners[i].load(std::memory_order_relaxed) == 1, "exactly one marker owns each cyclic record");
     for (std::size_t j = 0; j < widths[i]; ++j) {
       auto const offset = static_cast<std::size_t>(records[i]) + j;
-      check((heap.blocks()[offset >> 6].live & (word{1} << (offset & 63))) != 0,
+      check((heap.blocks()[offset / heap_type::block_words].live & (word{1} << (offset % heap_type::block_words))) != 0,
             "the winning claim marks the whole variable-width record");
     }
   }
@@ -474,7 +474,7 @@ void parallel_claim_traverses_each_cyclic_record_once() noexcept {
 }
 
 void empty_collection_preserves_null_roots() noexcept {
-  wide_heap heap{jam::options{.capacity_pages = 8, .reserve_pages = 1}};
+  heap_type heap{jam::options{.capacity = 8, .reserve = 1}};
   static_cast<void>(heap.allocate(73));
   std::vector<unsigned char> live(heap.used(), 0), pointers(heap.used(), 0);
   std::vector<offset> roots{null, null};

@@ -19,6 +19,8 @@ import jam;
 
 namespace {
 
+using H = jam::heap;
+
 void check(bool value, std::string_view message) noexcept {
   if (value) return;
   std::fprintf(stderr, "%.*s\n", static_cast<int>(message.size()), message.data());
@@ -29,17 +31,15 @@ std::uint64_t payload(std::size_t index) noexcept {
   return 0x9e3779b97f4a7c15ULL * (index + 1) ^ 0xd1b54a32d192ed03ULL;
 }
 
-template<class H> std::uint64_t replace(std::uint64_t word, unsigned slot, typename H::offset value) noexcept {
-  if constexpr (sizeof(typename H::offset) == 4) {
-    auto const shift = slot * 32;
-    return (word & ~(std::uint64_t{0xffffffff} << shift)) | (std::uint64_t{value} << shift);
-  } else return value;
+std::uint64_t replace(std::uint64_t word, unsigned slot, H::offset value) noexcept {
+  auto const shift = slot * 32;
+  return (word & ~(std::uint64_t{0xffffffff} << shift)) | (std::uint64_t{value} << shift);
 }
 
-template<class H> void exact_fields() noexcept {
-  using offset = typename H::offset;
-  static_assert(sizeof(typename H::block) == (sizeof(offset) == 4 ? 16 : 24));
-  H heap{jam::options{.capacity_pages = 8, .reserve_pages = 1, .compaction_workers = 4}};
+void exact_fields() noexcept {
+  using offset = H::offset;
+  static_assert(sizeof(H::block) == 16);
+  H heap{jam::options{.capacity = 8, .reserve = 1, .workers = 4}};
   static_cast<void>(heap.allocate(31));
   std::vector<offset> records{heap.allocate(4)};
   static_cast<void>(heap.allocate(28));
@@ -53,10 +53,8 @@ template<class H> void exact_fields() noexcept {
   for (std::size_t i = 0; i < records.size(); ++i) {
     auto const start = records[i];
     fields.push_back({start, 0, records[(i + 1) % records.size()]});
-    if constexpr (sizeof(offset) == 4) {
-      fields.push_back({start, 1, start});
-      heap.set_field(start + 2, std::numeric_limits<offset>::max(), 1); // The undeclared half must remain raw data.
-    } else fields.push_back({static_cast<offset>(start + 1), 0, start});
+    fields.push_back({start, 1, start});
+    heap.set_field(start + 2, std::numeric_limits<offset>::max(), 1); // The undeclared half must remain raw data.
     fields.push_back({static_cast<offset>(start + 2), 0, H::null});
   }
   for (auto const & f : fields) { heap.set_field(f.cell, f.target, f.slot); heap.pointer(f.cell, f.slot); }
@@ -69,7 +67,7 @@ template<class H> void exact_fields() noexcept {
   std::vector<std::uint64_t> expected{0};
   for (std::size_t i = 0; i < live.size(); ++i) if (live[i]) expected.push_back(heap[i]);
   for (auto const & f : fields)
-    expected[forwarded[f.cell]] = replace<H>(expected[forwarded[f.cell]], f.slot,
+    expected[forwarded[f.cell]] = replace(expected[forwarded[f.cell]], f.slot,
       f.target == H::null ? H::null : forwarded[f.target]);
   std::vector<offset> roots = records;
   roots.push_back(static_cast<offset>(records.back() + widths.back() - 1));
@@ -84,9 +82,9 @@ template<class H> void exact_fields() noexcept {
     check(heap[i] == expected[i], "both pointer halves and undeclared data survive packing");
 }
 
-template<class H> void aligned_neighbors_and_rotations() noexcept {
-  using offset = typename H::offset;
-  H heap{jam::options{.capacity_pages = 8, .reserve_pages = 1, .compaction_workers = 4}};
+void aligned_neighbors_and_rotations() noexcept {
+  using offset = H::offset;
+  H heap{jam::options{.capacity = 8, .reserve = 1, .workers = 4}};
   static_cast<void>(heap.allocate(H::block_words - 8));
   std::vector<offset> roots{heap.allocate(3, 64)};
   static_cast<void>(heap.allocate(5));
@@ -117,8 +115,8 @@ template<class H> void aligned_neighbors_and_rotations() noexcept {
       check((roots[i] * sizeof(std::uint64_t)) % 64 == 0, "odd-width records retain 64-byte alignment");
       for (std::size_t j = 0; j < widths[i]; ++j) {
         auto expected = originals[i][j];
-        if (j == 0) expected = replace<H>(expected, 0, roots[(i + 1) % roots.size()]);
-        if (j + 1 == widths[i]) expected = replace<H>(expected, 0, H::null);
+        if (j == 0) expected = replace(expected, 0, roots[(i + 1) % roots.size()]);
+        if (j + 1 == widths[i]) expected = replace(expected, 0, H::null);
         check(heap[roots[i] + j] == expected, "aligned records retain all payload cells and cyclic fields");
       }
       check(heap.field(static_cast<offset>(roots[i] + widths[i]), 0) == std::numeric_limits<offset>::max(),
@@ -129,9 +127,9 @@ template<class H> void aligned_neighbors_and_rotations() noexcept {
   }
 }
 
-template<class H> void aligned_parallel_claims() noexcept {
-  using offset = typename H::offset;
-  H heap{jam::options{.capacity_pages = 8, .reserve_pages = 2, .compaction_workers = 4}};
+void aligned_parallel_claims() noexcept {
+  using offset = H::offset;
+  H heap{jam::options{.capacity = 8, .reserve = 2, .workers = 4}};
   std::vector<std::size_t> const widths{3, 65, heap.page_words() + 3, 5};
   std::vector<offset> roots;
   for (auto const width : widths) {
@@ -170,16 +168,16 @@ template<class H> void aligned_parallel_claims() noexcept {
     check((roots[i] * 8) % 64 == 0, "parallel claims preserve requested alignment");
     for (std::size_t j = 0; j < widths[i]; ++j) {
       auto expected = originals[i][j];
-      if (j == 0) expected = replace<H>(expected, 0, roots[(i + 1) % roots.size()]);
-      if (j == 1) expected = replace<H>(expected, 0, roots[i]);
+      if (j == 0) expected = replace(expected, 0, roots[(i + 1) % roots.size()]);
+      if (j == 1) expected = replace(expected, 0, roots[i]);
       check(heap[roots[i] + j] == expected, "claimed extents and frozen cyclic payload survive compaction");
     }
   }
 }
 
-template<class H> void mixed_alignment_claims_share_one_rank_block() noexcept {
-  using offset = typename H::offset;
-  H heap{jam::options{.capacity_pages = 8, .reserve_pages = 1, .compaction_workers = 4}};
+void mixed_alignment_claims_share_one_rank_block() noexcept {
+  using offset = H::offset;
+  H heap{jam::options{.capacity = 8, .reserve = 1, .workers = 4}};
   static_cast<void>(heap.allocate(1));
   std::vector<offset> roots{heap.allocate(1, 16)};
   static_cast<void>(heap.allocate(3));
@@ -215,14 +213,14 @@ template<class H> void mixed_alignment_claims_share_one_rank_block() noexcept {
   for (std::size_t i = 0; i < roots.size(); ++i)
     for (std::size_t j = 0; j < widths[i]; ++j) {
       auto expected = original[i][j];
-      if (j == 0) expected = replace<H>(expected, 0, roots[(i + 1) % roots.size()]);
+      if (j == 0) expected = replace(expected, 0, roots[(i + 1) % roots.size()]);
       check(heap[roots[i] + j] == expected, "mixed alignment preserves records and fields");
     }
 }
 
-template<class H> void zero_is_reserved() noexcept {
+void zero_is_reserved() noexcept {
   static_assert(H::null == 0);
-  H heap{jam::options{.capacity_pages = 8, .reserve_pages = 1}};
+  H heap{jam::options{.capacity = 8, .reserve = 1}};
   for (unsigned round = 0; round != 3; ++round) {
     auto const at = heap.allocate(1);
     check(at != 0, "allocation never returns the null offset");
@@ -239,24 +237,14 @@ template<class H> void zero_is_reserved() noexcept {
   }
 }
 
-template<bool compressed, bool dilate> void mode() noexcept {
-  using H = jam::heap<std::conditional_t<compressed, std::uint32_t, std::uint64_t>, dilate>;
-  zero_is_reserved<H>();
-  exact_fields<H>();
-  if constexpr (dilate) {
-    aligned_neighbors_and_rotations<H>();
-    aligned_parallel_claims<H>();
-    mixed_alignment_claims_share_one_rank_block<H>();
-  }
-}
-
 } // namespace
 
 int main() noexcept {
-  mode<true, false>();
-  mode<false, false>();
-  mode<true, true>();
-  mode<false, true>();
-  std::puts("14 heap mode checks passed");
+  zero_is_reserved();
+  exact_fields();
+  aligned_neighbors_and_rotations();
+  aligned_parallel_claims();
+  mixed_alignment_claims_share_one_rank_block();
+  std::puts("5 heap layout checks passed");
   return 0;
 }

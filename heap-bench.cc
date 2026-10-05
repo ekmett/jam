@@ -36,8 +36,6 @@ template<class T> T number(std::string_view text) noexcept {
 }
 
 struct options {
-  bool compressed = true;
-  bool dilate = false;
   std::size_t bytes = 16 * 1024 * 1024;
   std::size_t reserve = 32;
   std::vector<std::size_t> reserve_list;
@@ -83,20 +81,14 @@ options parse(int argc, char ** argv) noexcept {
   for (int i = 1; i < argc; ++i) {
     std::string_view const key = argv[i];
     if (key == "--help") {
-      std::cout << "heap-bench --mode compressed|wide --dilate 0|1 --bytes 16MiB --reserve 32\n"
+      std::cout << "heap-bench --bytes 16MiB --reserve 32\n"
                    "           --workers 1 --live 0.75 --pointers 0.125 --repeats 7 --alignment 8 --cluster-words 32\n"
                    "           --reserve-list 32,64,128 interleaves trials; each heap owns its pool\n";
       std::exit(0);
     }
     if (++i == argc) failure("missing option value");
     std::string const value = argv[i];
-    if (key == "--mode") {
-      if (value != "compressed" && value != "wide") failure("unknown mode");
-      result.compressed = value == "compressed";
-    } else if (key == "--dilate") {
-      if (value != "0" && value != "1") failure("dilate must be 0 or 1");
-      result.dilate = value == "1";
-    } else if (key == "--bytes") result.bytes = byte_count(value);
+    if (key == "--bytes") result.bytes = byte_count(value);
     else if (key == "--reserve") result.reserve = byte_count(value);
     else if (key == "--reserve-list") result.reserve_list = reserve_counts(value);
     else if (key == "--workers") result.workers = byte_count(value);
@@ -111,7 +103,6 @@ options parse(int argc, char ** argv) noexcept {
       || result.bytes < 256 || !(result.live > 0 && result.live <= 1)
       || !(result.pointers >= 0 && result.pointers <= 1)
       || (result.alignment != 8 && result.alignment != 16 && result.alignment != 32 && result.alignment != 64)
-      || (!result.dilate && result.alignment != 8)
       || !std::has_single_bit(result.cluster_words) || result.cluster_words < result.alignment / 8
       || result.cluster_words > result.bytes / 8)
     failure("invalid benchmark geometry, fractions, or alignment");
@@ -134,16 +125,16 @@ struct sample {
   std::size_t input_bytes, live_bytes, pointer_fields, capacity_before, capacity_after, page_bytes;
 };
 
-template<bool compressed, bool dilate> sample trial(options const & config) noexcept {
-  using H = jam::heap<std::conditional_t<compressed, std::uint32_t, std::uint64_t>, dilate>;
+sample trial(options const & config) noexcept {
+  using H = jam::heap;
   using offset = typename H::offset;
   auto const cluster_words = config.cluster_words;
   auto const page_bytes = static_cast<std::size_t>(::getpagesize());
   auto const words = (config.bytes / 8 / cluster_words) * cluster_words;
   auto const pages = (words * 8 + page_bytes - 1) / page_bytes;
   auto const capacity_pages = std::bit_ceil(std::max(pages + config.reserve, 2 * config.reserve));
-  H heap{jam::options{.capacity_pages = capacity_pages, .reserve_pages = config.reserve,
-                      .compaction_workers = config.workers}};
+  H heap{jam::options{.capacity = capacity_pages, .reserve = config.reserve,
+                      .workers = config.workers}};
   auto const first = heap.allocate(words, config.alignment);
   // Pre-touch backing through the first alias, including the copy reserve.
   // The second alias may still incur page-table faults; pages are not locked.
@@ -167,8 +158,7 @@ template<bool compressed, bool dilate> sample trial(options const & config) noex
   };
   auto pointer_at = [&](std::size_t i) noexcept { return (mix(i + 0x54321) >> 11) < pointer_threshold; };
   auto slot_at = [&](std::size_t i) noexcept -> unsigned {
-    if constexpr (compressed) return static_cast<unsigned>(mix(i + 91) & 1);
-    else return 0;
+    return static_cast<unsigned>(mix(i + 91) & 1);
   };
   auto target_at = [&](std::size_t i) noexcept -> offset {
     auto const code = mix(i + 123);
@@ -191,10 +181,8 @@ template<bool compressed, bool dilate> sample trial(options const & config) noex
         heap.pointer(static_cast<offset>(index), slot);
         expected = heap[index];
         auto const forwarded = translate(target);
-        if constexpr (compressed) {
-          auto const shift = slot * 32;
-          expected = (expected & ~(std::uint64_t{0xffffffff} << shift)) | (std::uint64_t{forwarded} << shift);
-        } else expected = forwarded;
+        auto const shift = slot * 32;
+        expected = (expected & ~(std::uint64_t{0xffffffff} << shift)) | (std::uint64_t{forwarded} << shift);
         ++pointer_fields;
       }
       expected_checksum = checksum(expected_checksum, expected);
@@ -224,10 +212,9 @@ template<bool compressed, bool dilate> sample trial(options const & config) noex
 }
 
 void print_header() noexcept {
-  std::cout << "mode,dilate,alignment,cluster_words,resident,scheduler,arch,compiler,build,bmi2,avx2,workers,reserve_pages,page_bytes,requested_bytes,input_bytes,live_bytes,copied_bytes,pointer_fields,capacity_before,capacity_after,live_fraction,pointer_density,repeats,median_ns,p10_ns,p90_ns,min_ns,max_ns,samples_ns\n";
+  std::cout << "alignment,cluster_words,resident,scheduler,arch,compiler,build,bmi2,avx2,workers,reserve_pages,page_bytes,requested_bytes,input_bytes,live_bytes,copied_bytes,pointer_fields,capacity_before,capacity_after,live_fraction,pointer_density,repeats,median_ns,p10_ns,p90_ns,min_ns,max_ns,samples_ns\n";
 }
 
-template<bool compressed, bool dilate>
 void print_summary(options const & config, std::size_t workers, sample const & geometry, std::vector<double> const & times) noexcept {
   auto sorted = times;
   std::sort(sorted.begin(), sorted.end());
@@ -255,7 +242,7 @@ void print_summary(options const & config, std::size_t workers, sample const & g
   constexpr auto build = "debug";
 #endif
   std::cout << std::defaultfloat << std::setprecision(6)
-            << (compressed ? "compressed" : "wide") << ',' << dilate << ',' << config.alignment << ',' << config.cluster_words << ",1,"
+            << config.alignment << ',' << config.cluster_words << ",1,"
             << scheduler << ',' << arch << ",clang" << __clang_major__ << '.' << __clang_minor__ << '.' << __clang_patchlevel__
             << ',' << build << ',' << bmi2 << ',' << avx2 << ',' << workers << ',' << config.reserve << ','
             << geometry.page_bytes << ',' << config.bytes << ',' << geometry.input_bytes << ',' << geometry.live_bytes << ','
@@ -267,7 +254,7 @@ void print_summary(options const & config, std::size_t workers, sample const & g
   std::cout << "\"\n";
 }
 
-template<bool compressed, bool dilate> void run(options const & config) noexcept {
+void run(options const & config) noexcept {
   auto const reserves = config.reserve_list.empty() ? std::vector<std::size_t>{config.reserve} : config.reserve_list;
   std::vector<std::vector<double>> times(reserves.size());
   std::vector<sample> geometries(reserves.size());
@@ -276,7 +263,7 @@ template<bool compressed, bool dilate> void run(options const & config) noexcept
   for (std::size_t i = 0; i < reserves.size(); ++i) {
     current.reserve = reserves[i];
     times[i].reserve(config.repeats);
-    static_cast<void>(trial<compressed, dilate>(current)); // One verified warm-up per N.
+    static_cast<void>(trial(current)); // One verified warm-up per N.
   }
   for (std::size_t round = 0; round < config.repeats; ++round) {
     for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
@@ -288,14 +275,14 @@ template<bool compressed, bool dilate> void run(options const & config) noexcept
     }
     for (auto const i : order) {
       current.reserve = reserves[i];
-      geometries[i] = trial<compressed, dilate>(current);
+      geometries[i] = trial(current);
       times[i].push_back(geometries[i].ns);
     }
   }
   print_header();
   for (std::size_t i = 0; i < reserves.size(); ++i) {
     current.reserve = reserves[i];
-    print_summary<compressed, dilate>(current, config.workers, geometries[i], times[i]);
+    print_summary(current, config.workers, geometries[i], times[i]);
   }
 }
 
@@ -303,10 +290,5 @@ template<bool compressed, bool dilate> void run(options const & config) noexcept
 
 int main(int argc, char ** argv) noexcept {
   auto const config = parse(argc, argv);
-  if (config.compressed) {
-    if (config.dilate) run<true, true>(config); else run<true, false>(config);
-  } else {
-    if (config.dilate) run<false, true>(config); else run<false, false>(config);
-  }
-  return 0;
+  run(config);
 }

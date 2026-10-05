@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(JAM_BUILD_TESTS "Build heap and tracing checks" ${PROJECT_IS_TOP_LEVEL})
 option(JAM_BUILD_BENCHMARKS "Build the compaction benchmark" OFF)
 option(JAM_BUILD_DOCS "Build Doxygen documentation" OFF)
+option(JAM_CONTEXT_X28 "Reserve AArch64 x28 for the implicit heap instead of TLS" OFF)
 option(JAM_USE_BMI2 "Use BMI2 bit extraction; requires a compatible x86-64 CPU" OFF)
 
 if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Darwin|Linux)$")
@@ -97,6 +98,25 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 else()
   message(FATAL_ERROR "jam requires a compiler supporting C++26 modules and -fno-exceptions")
 endif()
+if(JAM_CONTEXT_X28)
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    message(FATAL_ERROR "JAM_CONTEXT_X28 requires AArch64")
+  endif()
+  block()
+    set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -ffixed-x28")
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+    check_cxx_source_compiles([=[
+      register void * active asm("x28");
+      __attribute__((pure)) void * current() noexcept { return active; }
+      void * bind(void * value) noexcept { auto old = current(); active = value; return old; }
+    ]=] JAM_HAS_CONTEXT_X28)
+    if(NOT JAM_HAS_CONTEXT_X28)
+      message(FATAL_ERROR "JAM_CONTEXT_X28 requires global register variables and -ffixed-x28")
+    endif()
+  endblock()
+  target_compile_options(jam PUBLIC -ffixed-x28)
+  target_compile_definitions(jam PUBLIC JAM_CONTEXT_X28=1)
+endif()
 if(JAM_USE_BMI2)
   if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     message(FATAL_ERROR "JAM_USE_BMI2 requires x86-64")
@@ -132,7 +152,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_MACRO_EXPANSION YES)
   set(DOXYGEN_EXPAND_ONLY_PREDEF YES)
   set(DOXYGEN_PREDEFINED
-    "native_nodiscard=" "native_cold=" "native_noreturn="
+    "native_nodiscard=" "native_pure=" "native_cold=" "native_noreturn="
     "native_lifetimebound=" "native_diagnose_if(condition,message)=")
   set(DOXYGEN_EXCLUDE_SYMBOLS "jam::detail" "jam::detail::*")
   set(DOXYGEN_MARKDOWN_ID_STYLE GITHUB)
