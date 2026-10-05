@@ -1,0 +1,1233 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+/** @file
+ * @brief A double-mapped word arena with bounded parallel compaction.
+ * @defgroup jam_heap Word heap
+ */
+module;
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+#include <native/attributes.h>
+#include <cstdio>
+#include <cstdlib>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <cerrno>
+#include <cstddef>
+#include <concepts>
+#include <limits>
+#include <memory>
+#include <tuple>
+#include <type_traits>
+#include <variant>
+#include <utility>
+#include <vector>
+#include <sys/mman.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#elif !defined(__linux__)
+#error "jam requires macOS or Linux virtual-memory aliases"
+#endif
+
+#include <bit>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <span>
+#if defined(__BMI2__) && defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
+
+export module jam:heap;
+import :work;
+
+namespace jam::detail {
+
+native_cold native_noreturn
+inline void heap_failure(char const * operation, int code = 0) noexcept {
+  std::fprintf(stderr, "jam: %s (%d)\n", operation, code);
+  std::abort();
+}
+
+/// \brief Two adjacent coherent views of one circular heap's backing pages.
+/// \details Resizing aliases surviving pages rather than copying their contents.
+class heap_mapping {
+  struct span { std::size_t begin, end; };
+  struct reservation {};
+  std::byte * address = nullptr;
+  std::size_t capacity = 0;
+  // Linux's zero-old-size mremap must remain within one original VMA/object.
+  std::vector<span> spans;
+
+  [[noreturn]] static void system_failure(char const * operation) noexcept {
+    heap_failure(operation, errno);
+  }
+  static void validate_size(std::size_t bytes) noexcept {
+    if (!bytes || bytes % page_size() || bytes > std::numeric_limits<std::size_t>::max() / 2)
+      heap_failure("capacity must be a nonzero whole-page size");
+  }
+  explicit heap_mapping(reservation, std::size_t bytes) noexcept {
+    validate_size(bytes);
+    auto const result = ::mmap(nullptr, bytes * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (result == MAP_FAILED) system_failure("jam: reserve virtual memory");
+    address = static_cast<std::byte *>(result);
+    capacity = bytes;
+  }
+  static void alias(std::byte * source, std::byte * target, std::size_t count) noexcept {
+#if defined(__APPLE__)
+    auto destination = reinterpret_cast<mach_vm_address_t>(target);
+    vm_prot_t current = 0, maximum = 0;
+    auto const result = ::mach_vm_remap(::mach_task_self(), &destination, count, 0,
+      VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, ::mach_task_self(),
+      reinterpret_cast<mach_vm_address_t>(source), false, &current, &maximum, VM_INHERIT_SHARE);
+    if (result != KERN_SUCCESS)
+      heap_failure("alias virtual memory", result);
+    assert(destination == reinterpret_cast<mach_vm_address_t>(target));
+#else
+    auto const result = ::mremap(source, 0, count, MREMAP_MAYMOVE | MREMAP_FIXED, target);
+    if (result == MAP_FAILED) system_failure("jam: alias virtual memory");
+    assert(result == target);
+#endif
+  }
+  void fresh(std::size_t begin, std::size_t count) noexcept {
+    if (!count) return;
+    auto const result = ::mmap(address + begin, count, PROT_READ | PROT_WRITE,
+      MAP_FIXED | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (result == MAP_FAILED) system_failure("jam: map fresh backing");
+    spans.push_back({begin, begin + count});
+  }
+  void finish_aliases() noexcept {
+    std::sort(spans.begin(), spans.end(), [](auto const & a, auto const & b) noexcept { return a.begin < b.begin; });
+    for (auto const & s : spans) alias(address + s.begin, address + capacity + s.begin, s.end - s.begin);
+  }
+  void discard_gap(std::size_t start, std::size_t live) const noexcept {
+    auto const begin = (start + live) % capacity;
+    auto const count = capacity - live;
+    auto const first = std::min(count, capacity - begin);
+#if defined(__APPLE__)
+    constexpr auto advice = MADV_FREE_REUSABLE;
+#else
+    constexpr auto advice = MADV_REMOVE;
+#endif
+    // dev: advisory release; kernels may retain dead pages until memory pressure.
+    if (first) static_cast<void>(::madvise(address + begin, first, advice));
+    if (count > first) static_cast<void>(::madvise(address, count - first, advice));
+  }
+
+public:
+  /// \brief Reserve \p bytes of backing and twice that amount of virtual space.
+  explicit heap_mapping(std::size_t bytes) noexcept : heap_mapping(reservation{}, bytes) {
+    spans.reserve(1);
+    fresh(0, bytes);
+    finish_aliases();
+  }
+  heap_mapping(heap_mapping const &) = delete;
+  heap_mapping & operator=(heap_mapping const &) = delete;
+  heap_mapping(heap_mapping && other) noexcept
+    : address(std::exchange(other.address, nullptr)), capacity(std::exchange(other.capacity, 0)),
+      spans(std::move(other.spans)) {}
+  heap_mapping & operator=(heap_mapping && other) noexcept { swap(other); return *this; }
+  /// \brief Release both virtual views.
+  ~heap_mapping() noexcept { if (address) static_cast<void>(::munmap(address, capacity * 2)); }
+  /// \brief The first of the two adjacent views.
+  std::byte * data() const noexcept { return address; }
+  /// \brief Capacity of one view, in bytes.
+  std::size_t bytes() const noexcept { return capacity; }
+  /// \brief Native OS page size, also the mapping granularity.
+  static std::size_t page_size() noexcept {
+    return static_cast<std::size_t>(::getpagesize());
+  }
+  /// \brief Exchange mappings without moving payload bytes.
+  void swap(heap_mapping & other) noexcept {
+    std::swap(address, other.address);
+    std::swap(capacity, other.capacity);
+    spans.swap(other.spans);
+  }
+  /// \brief Resize by remapping the live circular arc to a new logical start.
+  /// \details Starts must be page aligned. The final partial live page survives;
+  /// the remaining gap gets fresh backing. Both old views remain usable until
+  /// this object is destroyed; resizing may discard contents of its dead gap.
+  heap_mapping resized(std::size_t old_start_bytes, std::size_t live_bytes,
+                       std::size_t new_bytes, std::size_t new_start_bytes) const noexcept {
+    validate_size(new_bytes);
+    auto const page = page_size();
+    if (!address || old_start_bytes >= capacity || new_start_bytes >= new_bytes ||
+        old_start_bytes % page || new_start_bytes % page ||
+        live_bytes > capacity || live_bytes > new_bytes)
+      heap_failure("invalid circular remap range");
+    auto const live = ((live_bytes + page - 1) / page) * page;
+    heap_mapping result(reservation{}, new_bytes);
+    result.spans.reserve(spans.size() + 4);
+    auto source = old_start_bytes;
+    auto target = new_start_bytes;
+    auto remaining = live;
+    while (remaining) {
+      auto const where = std::lower_bound(spans.begin(), spans.end(), source,
+        [](span const & s, std::size_t value) noexcept { return s.end <= value; });
+      assert(where != spans.end() && where->begin <= source);
+      auto const count = std::min({remaining, where->end - source, new_bytes - target});
+      alias(address + source, result.address + target, count);
+      result.spans.push_back({target, target + count});
+      source = (source + count) % capacity;
+      target = (target + count) % new_bytes;
+      remaining -= count;
+    }
+    if (!live) result.fresh(0, new_bytes);
+    else if (new_start_bytes + live <= new_bytes) {
+      result.fresh(0, new_start_bytes);
+      result.fresh(new_start_bytes + live, new_bytes - new_start_bytes - live);
+    } else result.fresh(new_start_bytes + live - new_bytes, new_bytes - live);
+    result.finish_aliases();
+    discard_gap(old_start_bytes, live);
+    return result;
+  }
+};
+}
+
+namespace jam {
+
+/// \brief Object-offset representations supported by the heap.
+/// \ingroup jam_heap
+export template<class O>
+concept oo = std::same_as<O, std::uint32_t> || std::same_as<O, std::uint64_t>;
+
+/// \brief A visitor using object-offset representation O.
+/// \ingroup jam_heap
+/// Write template<jam::visitor<O> V> to constrain a member tracing hook.
+export template<class V, class O>
+concept visitor = oo<O> && std::same_as<typename V::oo_type, O>;
+
+export template<oo O = std::uint32_t, bool may_dilate = false> class heap;
+export template<class T, oo O = std::uint32_t, bool may_dilate = false> class root;
+
+namespace detail {
+template<class T, class O, bool aligned>
+concept member_trace = requires(T & value, typename heap<O, aligned>::visitor & visit) {
+  value.trace(visit);
+};
+// A hook for another heap width, or a throwing hook, must not become a leaf.
+template<class T>
+concept has_trace = requires { &T::trace; }
+    || member_trace<T, std::uint32_t, false> || member_trace<T, std::uint32_t, true>
+    || member_trace<T, std::uint64_t, false> || member_trace<T, std::uint64_t, true>;
+}
+
+/// \brief A value with no outgoing managed references.
+/// \ingroup jam_heap
+/// Specializing tracer<T> by deriving from leaf<T> explicitly suppresses traversal.
+/// Heap storage requirements are separate from this reference-free promise.
+export template<class T>
+struct leaf {
+  /// \brief Visit no fields; allocation tracing still marks the complete extent.
+  template<class Visitor>
+  static constexpr void trace(Visitor &, T const &) noexcept {}
+};
+
+/// \brief Per-value tracing customization; values without a hook are leaves.
+/// \ingroup jam_heap
+/// Scalars and ordinary records without a trace member contain no managed edges
+/// by convention. Records containing managed pointers must enumerate them in a trace member
+/// or a tracer specialization. Trivial copyability does not enumerate fields.
+export template<class T>
+struct tracer : leaf<T> {};
+
+/// \brief Walk a value through its member hook, without claiming another allocation.
+/// \ingroup jam_heap
+/// Visit each live ptr by reference from the supplied value. Nested values share
+/// the enclosing allocation's pointer mask. All paths must be noexcept.
+export template<class T> requires detail::has_trace<T>
+struct tracer<T> {
+  /// \brief Enumerate a value's parts and forward its member hook's result.
+  template<class Visitor>
+  static constexpr auto trace(Visitor & visit, T const & value) noexcept
+      -> decltype(value.trace(visit))
+      requires requires { { value.trace(visit) } noexcept; } {
+    return value.trace(visit);
+  }
+};
+
+/// \brief T declares noexcept tracing for heaps with object-offset type O.
+/// \ingroup jam_heap
+/// Checked by typed heap operations after T is complete, not by ptr<T,O>.
+/// Hooks must support both alignment policies and enumerate their managed fields.
+/// Their return type is unrestricted; collection currently uses their side effects.
+export template<class T, class O>
+concept traceable = oo<O> && requires(T const & value,
+    typename heap<O>::visitor & plain, typename heap<O, true>::visitor & aligned) {
+  sizeof(T);
+  { tracer<T>::trace(plain, value) } noexcept;
+  { tracer<T>::trace(aligned, value) } noexcept;
+};
+
+/// \brief A typed heap offset, with no root registration or ownership.
+/// \ingroup jam_heap
+/// \tparam O Object-offset representation: std::uint32_t or std::uint64_t.
+/// \tparam T Target record type; it may be incomplete here. No runtime tag is stored.
+/// Null is zero. Copies preserve the offset; only declared heap fields and
+/// registered roots are forwarded. References from different heaps never mix.
+/// Outside the managed heap, do not retain a ptr for use across heap.collect().
+/// Stack variables, external containers and loaded snapshots are not rewritten,
+/// even if a root keeps the target alive. Obtain a fresh pointer from that root
+/// after collection; only registered roots preserve external object identity.
+export template<class T, oo O>
+class ptr {
+public:
+  /// \brief Target record type.
+  using element_type = T;
+  /// \brief Eight-byte cell index, stored in exactly four or eight bytes.
+  using offset = O;
+
+private:
+  offset position = 0;
+
+public:
+  /// \brief Construct a null reference.
+  constexpr ptr() noexcept = default;
+  /// \brief Name a record start in the matching heap; the caller supplies its type.
+  explicit constexpr ptr(offset at) noexcept : position(at) {}
+  /// \brief Read the cell offset; unregistered copies expire on collection.
+  native_nodiscard constexpr offset get() const noexcept { return position; }
+  /// \brief Whether the reference is nonnull.
+  explicit constexpr operator bool() const noexcept {
+    return position != 0;
+  }
+  /// \brief Compare offsets within the same heap.
+  constexpr bool operator==(ptr const &) const noexcept = default;
+};
+
+namespace detail {
+template<class T> inline constexpr bool is_ptr = false;
+template<class T, oo O> inline constexpr bool is_ptr<ptr<T, O>> = true;
+template<class T, class Visitor>
+concept visits = requires(Visitor & visit, std::remove_reference_t<T> const & value) {
+  { tracer<std::remove_cvref_t<T>>::trace(visit, value) } noexcept;
+};
+}
+
+/// \brief Tag a reference slot and queue its target for allocation tracing.
+/// \ingroup jam_heap
+export template<class T, oo O>
+struct tracer<ptr<T, O>> {
+  /// \brief Preserve the field address and dispatch to the matching heap visitor.
+  template<visitor<O> Visitor>
+  static constexpr void trace(Visitor & visit, ptr<T, O> const & value) noexcept {
+    visit(value);
+  }
+};
+
+/// \brief Visit each tuple element in the enclosing allocation.
+/// \ingroup jam_heap
+export template<class... Ts>
+struct tracer<std::tuple<Ts...>> {
+  /// \brief Tuple views retain their elements' original addresses.
+  template<class Visitor>
+  static constexpr void trace(Visitor & visit, std::tuple<Ts...> const & value) noexcept
+      requires (detail::visits<Ts, Visitor> && ...) {
+    std::apply([&](auto const &... part) noexcept {
+      (static_cast<void>(tracer<std::remove_cvref_t<decltype(part)>>::trace(visit, part)), ...);
+    }, value);
+  }
+};
+
+/// \brief Visit each array element in the enclosing allocation.
+/// \ingroup jam_heap
+export template<class T, std::size_t N>
+struct tracer<std::array<T, N>> {
+  /// \brief Preserve element addresses; empty arrays contain no fields.
+  template<class Visitor>
+  static constexpr void trace(Visitor & visit, std::array<T, N> const & value) noexcept
+      requires detail::visits<T, Visitor> {
+    for (auto const & part : value) tracer<std::remove_cv_t<T>>::trace(visit, part);
+  }
+};
+
+/// \brief Visit only the active variant alternative in the enclosing allocation.
+/// \ingroup jam_heap
+export template<class... Ts>
+struct tracer<std::variant<Ts...>> {
+  /// \brief A valueless variant has no outgoing managed fields.
+  template<class Visitor>
+  static constexpr void trace(Visitor & visit, std::variant<Ts...> const & value) noexcept
+      requires (detail::visits<Ts, Visitor> && ...) {
+    if (value.valueless_by_exception()) return;
+    std::visit([&](auto const & part) noexcept {
+      tracer<std::remove_cvref_t<decltype(part)>>::trace(visit, part);
+    }, value);
+  }
+};
+
+/// \brief Construction and collection policy. All worker counts include the caller.
+/// \ingroup jam_heap
+export struct options {
+  /// \brief Initial capacity, including the reserve, in native OS pages.
+  std::size_t capacity_pages = 64;
+  /// \brief N native pages reserved for the bounded compaction window.
+  std::size_t reserve_pages = 32;
+  /// \brief Maximum participating marker callbacks, including the caller.
+  std::size_t marking_workers = 1;
+  /// \brief Maximum participating copy callbacks, including the caller.
+  std::size_t compaction_workers = 1;
+  /// \brief Shrink below 1/2^shift occupancy; two means 1/4, zero disables it.
+  unsigned shrink_shift = 2;
+};
+
+namespace detail {
+template<bool compressed> struct heap_block;
+template<> struct heap_block<true> {
+  /// @brief One live bit per eight-byte cell. @ingroup jam_heap
+  std::uint32_t live = 0;
+  /// @brief Forwarding base in eight-byte cells. @ingroup jam_heap
+  std::uint32_t destination = 0;
+  /// @brief One managed-field bit per four bytes. @ingroup jam_heap
+  std::uint64_t pointers = 0;
+};
+template<> struct heap_block<false> {
+  /// @brief One live bit per eight-byte cell. @ingroup jam_heap
+  std::uint64_t live = 0;
+  /// @brief One managed-field bit per eight bytes. @ingroup jam_heap
+  std::uint64_t pointers = 0;
+  /// @brief Forwarding base, with optional alignment flags in its high nibble. @ingroup jam_heap
+  std::uint64_t destination = 0;
+};
+struct no_alignment {};
+// Four allocation cells per lookup. A table is 256 bytes for wide fields or
+// 4 KiB for paired compressed fields; both are shared by all heap instances.
+template<unsigned fields> inline constexpr auto heap_pack = [] consteval {
+  std::array<std::array<std::uint8_t, 1u << (4 * fields)>, 16> result{};
+  for (unsigned live = 0; live != 16; ++live)
+    for (unsigned value = 0; value != result[live].size(); ++value) {
+      unsigned packed = 0, position = 0;
+      for (unsigned cell = 0; cell != 4; ++cell) if (live & (1u << cell)) {
+        packed |= ((value >> (cell * fields)) & ((1u << fields) - 1)) << position;
+        position += fields;
+      }
+      result[live][value] = static_cast<std::uint8_t>(packed);
+    }
+  return result;
+}();
+#if defined(__BMI2__) && defined(__x86_64__)
+inline std::uint64_t heap_extract(std::uint64_t bits, std::uint64_t mask) noexcept {
+  return _pext_u64(bits, mask);
+}
+#endif
+
+
+}
+
+/** @brief A circular, double-mapped arena with bounded parallel compaction.
+ * @ingroup jam_heap
+ * @tparam O Object-offset representation. std::uint32_t uses four-byte fields
+ * with a 32 GiB capacity limit; std::uint64_t uses eight-byte fields.
+ * @tparam may_dilate Permit record alignments of 16, 32 and 64 bytes, retaining
+ * whole alignment groups and padding between independent rank-block runs.
+ * Allocation and liveness always use eight-byte cells. Clients trace complete
+ * relocatable records; the heap does not infer boundaries or run destructors.
+ * Multiple markers may trace a frozen heap. Join them before compaction,
+ * mutation, allocation, or inspecting metadata. Borrows expire on movement.
+ */
+export template<oo O, bool may_dilate>
+class heap {
+  static constexpr bool compressed = std::same_as<O, std::uint32_t>;
+
+public:
+  /// @brief Eight-byte allocation cell. @ingroup jam_heap
+  using word = std::uint64_t;
+  /// @brief Stored reference, in eight-byte units from data(). @ingroup jam_heap
+  using offset = O;
+  /// @brief Allocation/live bitmap. @ingroup jam_heap
+  using bitmap = offset;
+  /// @brief Unreachable reference preserved by forwarding. @ingroup jam_heap
+  static constexpr offset null = 0;
+  /// @brief Eight-byte cells in one rank block: 32 compressed, 64 wide. @ingroup jam_heap
+  static constexpr std::size_t block_words = compressed ? 32 : 64;
+  /// @brief Four-byte or eight-byte pointer fields per allocation cell. @ingroup jam_heap
+  static constexpr unsigned fields_per_word = compressed ? 2 : 1;
+  /// @brief Live bitmap, forwarding base and pointer-field bitmap. @ingroup jam_heap
+  using block = detail::heap_block<compressed>;
+  /// \brief The compact reference type for this heap's reference width.
+  /// \ingroup jam_heap
+  template<class T> using ptr = jam::ptr<T, O>;
+  static_assert(sizeof(std::size_t) == 8, "jam requires 64-bit addressing");
+  static_assert(sizeof(block) == (compressed ? 16 : 24));
+  static_assert(std::atomic_ref<bitmap>::is_always_lock_free);
+  static_assert(std::atomic_ref<word>::is_always_lock_free);
+
+  class visitor;
+
+private:
+  using trace_function = void (*)(visitor &, offset) noexcept;
+  struct trace_job { offset at; trace_function trace; };
+
+public:
+  /** @brief An external intrusive root, rewritten by each moving collection.
+   * @ingroup jam_heap
+   * Copies attach independent hooks; moves transfer the hook without allocating.
+   * The owning heap must outlive every attached root_handle, including attached null pointers.
+   * Root construction, assignment and destruction require a quiescent collector.
+   */
+  class root_handle {
+    friend class heap;
+    heap * owner = nullptr;
+    root_handle * previous = nullptr;
+    root_handle * next = nullptr;
+    offset position = null;
+    trace_function trace = nullptr;
+
+    void detach() noexcept {
+      if (!owner) return;
+      owner->require_mutator();
+      if (previous) previous->next = next;
+      else owner->roots_head = next;
+      if (next) next->previous = previous;
+      owner = nullptr;
+      previous = next = nullptr;
+      position = null;
+      trace = nullptr;
+    }
+    void attach(heap * arena, offset at, trace_function fn) noexcept {
+      if (!arena) return;
+      arena->require_mutator();
+      owner = arena;
+      position = at;
+      trace = fn;
+      next = owner->roots_head;
+      if (next) next->previous = this;
+      owner->roots_head = this;
+    }
+    void take(root_handle & other) noexcept {
+      if (!other.owner) return;
+      other.owner->require_mutator();
+      owner = std::exchange(other.owner, nullptr);
+      position = std::exchange(other.position, null);
+      trace = std::exchange(other.trace, nullptr);
+      previous = std::exchange(other.previous, nullptr);
+      next = std::exchange(other.next, nullptr);
+      if (previous) previous->next = this;
+      else owner->roots_head = this;
+      if (next) next->previous = this;
+    }
+    root_handle(heap & arena, offset at, trace_function fn = nullptr) noexcept {
+      attach(&arena, at, fn);
+    }
+
+  public:
+    /// @brief Construct a null root_handle with no heap attachment.
+    root_handle() noexcept = default;
+    /// @brief Register a second root with the same owner and offset.
+    root_handle(root_handle const & other) noexcept { attach(other.owner, other.position, other.trace); }
+    /// @brief Transfer registration, leaving the source detached and null.
+    root_handle(root_handle && other) noexcept { take(other); }
+    /// @brief Replace registration, including transfer between heaps.
+    root_handle & operator=(root_handle const & other) noexcept {
+      if (this != &other) { detach(); attach(other.owner, other.position, other.trace); }
+      return *this;
+    }
+    /// @brief Transfer registration, detaching the previous root.
+    root_handle & operator=(root_handle && other) noexcept {
+      if (this != &other) { detach(); take(other); }
+      return *this;
+    }
+    /// @brief Unregister this root without touching its heap record.
+    ~root_handle() noexcept { detach(); }
+    /// @brief Read the current offset; the returned value expires on collection.
+    native_nodiscard offset get() const noexcept { return position; }
+    /// @brief Read the current offset, as with get().
+    native_nodiscard offset operator*() const noexcept { return position; }
+    /// @brief Whether this root currently names a record.
+    explicit operator bool() const noexcept { return position != null; }
+  };
+
+  /** @brief One marker's claim and edge-discovery interface.
+   * @ingroup jam_heap
+   * Only a successful claimant visits the record's fields. The visitor is
+   * borrowed for one callback and must not escape it.
+   */
+  class visitor {
+    friend class heap;
+    heap & arena;
+    detail::frontier<trace_job> & pending;
+    std::size_t worker;
+    void const * record = nullptr;
+    std::size_t record_bytes = 0;
+    offset record_at = 0;
+    visitor(heap & h, detail::frontier<trace_job> & tasks, std::size_t id) noexcept
+        : arena(h), pending(tasks), worker(id) {}
+
+  public:
+    /// \brief Object-offset type used by typed field visits.
+    using oo_type = O;
+    visitor(visitor const &) = delete;
+    visitor & operator=(visitor const &) = delete;
+    /// @brief Claim a complete record; exactly one marker wins traversal.
+    /// @pre All tracers agree on disjoint record starts, extents and alignments.
+    native_nodiscard bool claim(offset start, std::size_t words = 1,
+                               std::size_t alignment_bytes = 8) noexcept {
+      return arena.claim(start, words, alignment_bytes);
+    }
+    /// @brief Declare a managed field and enqueue its nonnull target for tracing.
+    /// @return The stored offset, usable until compaction starts.
+    /// @pre The field belongs to the complete record just successfully claimed.
+    offset field(offset cell, unsigned slot = 0) noexcept {
+      arena.pointer(cell, slot);
+      auto const target = arena.field(cell, slot);
+      if (target != null) pending.push(worker, {target, nullptr});
+      return target;
+    }
+    /// \brief Walk an embedded value without claiming cells again.
+    /// Parts share the current allocation's pointer mask. Tuple views may name
+    /// those parts, but ptr fields must retain their original snapshot addresses.
+    template<class T>
+    void operator()(T const & value) noexcept
+        requires (!detail::is_ptr<T>) && traceable<T, O> {
+      tracer<T>::trace(*this, value);
+    }
+    /// \brief Declare a typed field and queue the target's own tracer.
+    /// \pre The field is a subobject of the supplied tracing value, not a copy.
+    /// The field's type supplies both its width and target type. A null field is
+    /// declared but queues no work. The return value expires on collection.
+    template<class T>
+    ptr<T> operator()(ptr<T> const & value) noexcept {
+      // Defer target validation until use: deducing a recursive member hook's
+      // return type must not require that hook's own traceable constraint.
+      static_assert(traceable<T, O>, "reference target must support noexcept tracing");
+      auto const address = reinterpret_cast<std::uintptr_t>(&value);
+      auto const begin = reinterpret_cast<std::uintptr_t>(record);
+      auto const delta = address - begin;
+      if (!record || address < begin || record_bytes < sizeof(offset)
+          || delta > record_bytes - sizeof(offset) || delta % sizeof(offset))
+        detail::heap_failure("typed visitor requires a field in its tracing value");
+      arena.pointer(static_cast<offset>(record_at + delta / sizeof(word)),
+                    static_cast<unsigned>((delta % sizeof(word)) / sizeof(offset)));
+      if (value) pending.push(worker, {value.get(), &heap::template trace_record<T>});
+      return value;
+    }
+    /// \brief Visit parts in order, preserving their addresses; an empty pack does nothing.
+    template<class... Ts>
+    void operator()(Ts const &... values) noexcept
+        requires (sizeof...(Ts) != 1) && (traceable<Ts, O> && ...) {
+      (static_cast<void>((*this)(values)), ...);
+    }
+  };
+
+private:
+  template<class T>
+  static constexpr std::size_t record_words = (sizeof(T) + sizeof(word) - 1) / sizeof(word);
+
+  template<class T>
+  static constexpr void require_record() noexcept {
+    static_assert(std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>
+                  && !std::is_const_v<T> && !std::is_volatile_v<T>,
+                  "jam typed records must be unqualified, trivially copyable standard-layout types");
+    static_assert(alignof(T) <= (may_dilate ? 64u : 8u), "record alignment requires heap dilation");
+  }
+
+  template<class T>
+  static void trace_record(visitor & visit, offset at) noexcept {
+    require_record<T>();
+    static_assert(traceable<T, O>,
+                  "tracing hooks must be noexcept and accept the heap object-offset type");
+    if (!visit.claim(at, record_words<T>, std::max(alignof(T), sizeof(word)))) return;
+    if constexpr (!std::is_base_of_v<leaf<T>, tracer<T>>) {
+      // A typed snapshot gives fields real C++ lifetimes despite VM alias
+      // changes and cell-wise relocation. Field addresses map back to this record.
+      auto const value = visit.arena.load(ptr<T>{at});
+      visit.record = &value;
+      visit.record_bytes = sizeof(T);
+      visit.record_at = at;
+      tracer<T>::trace(visit, value);
+      visit.record = nullptr;
+    }
+  }
+
+  struct settings { std::size_t page_words, reserved, minimum, bytes; options policy; };
+  options const policy;
+  detail::work_pool workers;
+  std::size_t const page_word_count;
+  std::size_t const reserve_word_count;
+  std::size_t const minimum_capacity;
+  detail::heap_mapping storage;
+  word * view_base;
+  std::vector<block> metadata;
+  // One nibble per 256 bytes, paid only by compressed heaps with dilation.
+  // Low3 bits are a thermometer exponent (0,1,3,7); bit3 joins the next block.
+  // Atomic OR therefore implements max(k), even for simultaneous markers.
+  [[no_unique_address]] std::conditional_t<compressed && may_dilate,
+      std::vector<std::uint8_t>, detail::no_alignment> alignment;
+  std::size_t cursor = 1;
+  std::size_t origin = 0;
+  root_handle * roots_head = nullptr;
+  bool collecting = false;
+  void require_mutator() const noexcept {
+    if (collecting) detail::heap_failure("mutation during collection");
+  }
+  static constexpr unsigned block_shift = compressed ? 5 : 6;
+  static constexpr std::size_t maximum_bytes = compressed ? (std::size_t{1} << 35)
+      : std::bit_floor(static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / 2);
+  static constexpr offset destination_mask = std::numeric_limits<offset>::max() >> (compressed ? 0 : 4);
+
+  static constexpr bool valid_options(options const & config) noexcept {
+    return std::has_single_bit(config.capacity_pages) && config.reserve_pages != 0
+        && config.reserve_pages <= config.capacity_pages / 2
+        && config.marking_workers != 0 && config.compaction_workers != 0
+        && config.shrink_shift < std::numeric_limits<std::size_t>::digits;
+  }
+  static settings configure(options config) noexcept {
+    auto const pages = config.capacity_pages;
+    auto const reserve = config.reserve_pages;
+    auto const bytes = detail::heap_mapping::page_size();
+    if (!valid_options(config) || bytes < 512 || !std::has_single_bit(bytes) || !std::has_single_bit(pages)
+        || reserve == 0 || pages > maximum_bytes / bytes || reserve > pages / 2)
+      detail::heap_failure("power-of-two capacity must hold twice the page reserve; workers must be positive");
+    return {bytes / 8, reserve * (bytes / 8), std::bit_ceil(2 * reserve) * (bytes / 8), pages * bytes, config};
+  }
+  explicit heap(settings s) noexcept
+      : policy(s.policy), workers(std::max(policy.marking_workers, policy.compaction_workers)),
+        page_word_count(s.page_words), reserve_word_count(s.reserved),
+        minimum_capacity(s.minimum), storage(s.bytes),
+        view_base(reinterpret_cast<word *>(storage.data())), metadata(s.bytes / (8 * block_words)) {
+    if constexpr (compressed && may_dilate) alignment.resize((metadata.size() + 1) / 2);
+  }
+  static unsigned exponent(std::size_t bytes) noexcept {
+    if (!std::has_single_bit(bytes) || bytes < 8 || bytes > (may_dilate ? 64u : 8u))
+      detail::heap_failure("unsupported record alignment");
+    return std::countr_zero(bytes) - 3;
+  }
+  unsigned flags(std::size_t index) const noexcept requires may_dilate {
+    if constexpr (compressed) return (alignment[index >> 1] >> ((index & 1) * 4)) & 15;
+    else return static_cast<unsigned>(metadata[index].destination >> 60);
+  }
+  void add_flags(std::size_t index, unsigned bits) noexcept requires may_dilate {
+    if constexpr (compressed)
+      std::atomic_ref<std::uint8_t>{alignment[index >> 1]}.fetch_or(
+          static_cast<std::uint8_t>(bits << ((index & 1) * 4)), std::memory_order_relaxed);
+    else std::atomic_ref<offset>{metadata[index].destination}.fetch_or(
+        static_cast<offset>(bits) << 60, std::memory_order_relaxed);
+  }
+  void note_record(offset first, std::size_t words, std::size_t bytes) noexcept {
+    if constexpr (may_dilate) {
+      assert(std::has_single_bit(bytes) && bytes >= 8 && bytes <= 64);
+      assert((static_cast<std::size_t>(first) * 8) % bytes == 0);
+      if (!words) return;
+      auto const k = std::countr_zero(bytes) - 3;
+      add_flags(first >> block_shift, (1u << k) - 1);
+      auto const last = (static_cast<std::size_t>(first) + words - 1) >> block_shift;
+      for (auto i = static_cast<std::size_t>(first) >> block_shift; i < last; ++i) add_flags(i, 8);
+    } else { static_cast<void>(first); static_cast<void>(words); assert(bytes == 8); }
+  }
+  void mark_range(offset first, std::size_t words) noexcept {
+    while (words != 0) {
+      auto const bit = static_cast<std::size_t>(first & (block_words - 1));
+      auto const count = std::min(words, block_words - bit);
+      std::atomic_ref<bitmap>{metadata[first >> block_shift].live}.fetch_or(
+          static_cast<bitmap>((~bitmap{0} >> (block_words - count)) << bit), std::memory_order_relaxed);
+      first += static_cast<offset>(count);
+      words -= count;
+    }
+  }
+  static word pointer_cells(bitmap live) noexcept {
+    if constexpr (!compressed) return live;
+    else {
+      word x = live;
+      x = (x | (x << 16)) & 0x0000ffff0000ffffULL;
+      x = (x | (x << 8)) & 0x00ff00ff00ff00ffULL;
+      x = (x | (x << 4)) & 0x0f0f0f0f0f0f0f0fULL;
+      x = (x | (x << 2)) & 0x3333333333333333ULL;
+      x = (x | (x << 1)) & 0x5555555555555555ULL;
+      return x | (x << 1);
+    }
+  }
+  static bitmap expand(bitmap live, unsigned k) noexcept {
+    // OR across each 2^k-cell chunk, then fill it. No pdep loop on AArch64.
+    for (unsigned shift = 1; shift < (1u << k); shift <<= 1) {
+      word const low = ~word{0} / ((word{1} << shift) + 1);
+      live = static_cast<bitmap>(live | ((live >> shift) & low) | ((live & low) << shift));
+    }
+    return live;
+  }
+  static word packed_pointers(block const & item) noexcept {
+    if (!item.pointers) return 0;
+    auto const first = static_cast<unsigned>(std::countr_zero(item.live));
+    bitmap const run = item.live >> first;
+    // Complete and contiguous records need only a shift; there are no holes.
+    if ((run & (run + bitmap{1})) == 0) return item.pointers >> (first * fields_per_word);
+#if defined(__BMI2__) && defined(__x86_64__)
+    return detail::heap_extract(item.pointers, pointer_cells(item.live));
+#else
+    word result = 0;
+    unsigned position = 0;
+    for (unsigned i = 0; i != block_words / 4; ++i) {
+      auto const live = static_cast<unsigned>((item.live >> (4 * i)) & 15);
+      auto const fields = (item.pointers >> (4 * fields_per_word * i))
+          & ((1u << (4 * fields_per_word)) - 1);
+      result |= word{detail::heap_pack<fields_per_word>[live][fields]} << position;
+      position += fields_per_word * std::popcount(live);
+    }
+    return result;
+#endif
+  }
+  native_nodiscard offset base(block const & item) const noexcept {
+    if constexpr (!compressed && may_dilate) return item.destination & destination_mask;
+    else return item.destination;
+  }
+  native_nodiscard offset forward(offset value) const noexcept {
+    if (value == null) return null;
+    assert(value < cursor);
+    auto const & item = metadata[value >> block_shift];
+    auto const bit = static_cast<bitmap>(bitmap{1} << (value & (block_words - 1)));
+    assert((item.live & bit) != 0);
+    return base(item) + static_cast<offset>(std::popcount(static_cast<bitmap>(item.live & (bit - 1))));
+  }
+  void resize(std::size_t words) noexcept {
+    assert(std::has_single_bit(words) && words >= minimum_capacity);
+    assert(cursor <= words - reserve_word_count);
+    std::vector<block> next_metadata(words / block_words);
+    std::copy_n(metadata.begin(), (cursor + block_words - 1) / block_words, next_metadata.begin());
+    auto const next_origin = words - reserve_word_count;
+    auto next = storage.resized(origin * 8, cursor * 8, words * 8, next_origin * 8);
+    if constexpr (compressed && may_dilate) alignment.resize((next_metadata.size() + 1) / 2);
+    storage.swap(next); metadata.swap(next_metadata);
+    origin = next_origin;
+    view_base = reinterpret_cast<word *>(storage.data()) + origin;
+  }
+
+public:
+  /// \brief Construct a heap and one persistent pool sized for both collection phases.
+  /// \ingroup jam_heap
+  /// \pre Capacity is a power of two, holding at least twice N; workers are positive.
+  /// Mapping/allocation/thread creation failures terminate; collection never unwinds.
+  explicit heap(options config = {}) noexcept
+      native_diagnose_if(!valid_options(config), "invalid jam heap construction options")
+      : heap(configure(config)) {}
+  /// \brief Read the immutable construction policy. \ingroup jam_heap
+  native_nodiscard options configuration() const noexcept { return policy; }
+  heap(heap const &) = delete;
+  heap & operator=(heap const &) = delete;
+  /// @brief Release the arena; every attached root must already be destroyed.
+  ~heap() noexcept {
+    if (roots_head) detail::heap_failure("heap destroyed with attached roots");
+  }
+  /// @brief Register a record or null as an intrusive public root.
+  /// @pre A nonnull offset names an allocated record understood by the tracer.
+  native_nodiscard root_handle root(offset at) noexcept {
+    assert(at == null || at < cursor);
+    return root_handle{*this, at};
+  }
+  /// \brief Register a typed external root with its type-specific tracing callback.
+  /// \ingroup jam_heap
+  /// \pre The reference is null or names a complete T in this heap.
+  template<class T>
+  native_nodiscard jam::root<T, O, may_dilate> root(ptr<T> at) noexcept requires traceable<T, O> {
+    require_record<T>();
+    assert(!at || at.get() < cursor);
+    return jam::root<T, O, may_dilate>{root_handle{*this, at.get(), &heap::template trace_record<T>}};
+  }
+  /// \brief Trace typed roots and their typed edges, then compact.
+  /// \ingroup jam_heap
+  /// Nonnull untyped roots or untyped visitor.field edges require collect(trace).
+  /// External ptr copies expire, including stack variables and loaded snapshots.
+  /// Only registered roots retain their meaning; reacquire pointers from them.
+  void collect() noexcept {
+    collect([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); });
+  }
+  /** @brief Trace registered roots in parallel, then compact and rewrite them.
+   * @ingroup jam_heap
+   * @param trace A noexcept callable accepting visitor& and a record offset.
+   * @pre Mutators are stopped, and the tracer permits concurrent invocation.
+   * The tracer claims a complete record before visiting its outgoing fields.
+   * Cycles and sharing terminate because only one claimant traverses each record.
+   * Raw offsets and borrowed pointers expire on return; registered roots are updated.
+   * External ptr copies on the stack or in containers and snapshots are not
+   * rewritten, even when their targets survive. Reacquire them from roots.
+   */
+  template<class Trace>
+  void collect(Trace && trace) noexcept
+      requires std::is_nothrow_invocable_v<Trace &, visitor &, offset> {
+    require_mutator();
+    collecting = true;
+    clear_marks();
+    // Each collection redeclares fields: conditional tracers may change which
+    // slots are references. Raw clear_marks()/compact() retain their old contract.
+    for (auto & item : metadata) item.pointers = 0;
+    std::vector<trace_job> initial;
+    for (auto hook = roots_head; hook; hook = hook->next)
+      if (hook->position != null) initial.push_back({hook->position, hook->trace});
+    detail::frontier<trace_job> pending{policy.marking_workers, initial};
+    struct context {
+      heap * arena;
+      std::remove_reference_t<Trace> * trace;
+      detail::frontier<trace_job> * pending;
+    } state{this, std::addressof(trace), &pending};
+    workers.run(policy.marking_workers, [](void * raw, std::size_t worker) noexcept {
+      auto & state = *static_cast<context *>(raw);
+      visitor visit{*state.arena, *state.pending, worker};
+      trace_job job;
+      while (state.pending->pop(worker, job)) {
+        if (job.trace) job.trace(visit, job.at);
+        else std::invoke(*state.trace, visit, job.at);
+        state.pending->complete();
+      }
+    }, &state);
+    compact_impl({});
+    collecting = false;
+  }
+  /// \brief Allocate and copy a typed record, returning an unrooted reference.
+  /// \ingroup jam_heap
+  /// Construct T from the arguments. Register a root before collecting; copies
+  /// of the returned ptr do not keep the target alive. Allocation preserves pointers.
+  template<class T, class... Args>
+  native_nodiscard ptr<T> make(Args &&... args) noexcept requires traceable<T, O> {
+    require_record<T>();
+    static_assert(noexcept(T{std::forward<Args>(args)...}), "record construction must be noexcept");
+    T const value{std::forward<Args>(args)...};
+    auto const at = allocate(record_words<T>, std::max(alignof(T), sizeof(word)));
+    std::fill_n(data() + at, record_words<T>, word{0});
+    std::memcpy(data() + at, &value, sizeof(T));
+    return ptr<T>{at};
+  }
+  /// \brief Read a typed value snapshot; any pointers in it expire on collection.
+  /// \ingroup jam_heap
+  /// \pre The reference names a complete T in this heap. No concurrent mutation.
+  template<class T>
+  native_nodiscard T load(ptr<T> at) const noexcept requires traceable<T, O> {
+    require_record<T>();
+    assert(at && at.get() < cursor && record_words<T> <= cursor - at.get());
+    std::array<std::byte, sizeof(T)> bytes;
+    std::memcpy(bytes.data(), data() + at.get(), sizeof(T));
+    return std::bit_cast<T>(bytes);
+  }
+  /// \brief Replace a typed record's bytes without changing its extent or type.
+  /// \ingroup jam_heap
+  /// \pre The reference names a complete T in this heap; mutators are quiescent with GC.
+  template<class T>
+  void store(ptr<T> at, T const & value) noexcept requires traceable<T, O> {
+    require_record<T>();
+    require_mutator();
+    assert(at && at.get() < cursor && record_words<T> <= cursor - at.get());
+    std::memcpy(data() + at.get(), &value, sizeof(T));
+  }
+  /// @brief Capacity in eight-byte cells, including the reserve. @ingroup jam_heap
+  native_nodiscard std::size_t capacity() const noexcept { return storage.bytes() / 8; }
+  /// @brief Reserved cells for bounded parallel compaction. @ingroup jam_heap
+  native_nodiscard std::size_t reserved() const noexcept { return reserve_word_count; }
+  /// @brief Allocated prefix in eight-byte cells, including the reserved null cell. @ingroup jam_heap
+  native_nodiscard std::size_t used() const noexcept { return cursor; }
+  /// @brief Current view's offset in the circular backing, in cells. @ingroup jam_heap
+  native_nodiscard std::size_t start() const noexcept { return origin; }
+  /// @brief Cells per native OS page (distinct from a rank block). @ingroup jam_heap
+  native_nodiscard std::size_t page_words() const noexcept { return page_word_count; }
+  /// @brief Borrow cells; dereference an offset as data()[offset]. @ingroup jam_heap
+  template<class Self>
+  native_nodiscard auto data(this Self & self native_lifetimebound) noexcept {
+    using cell = std::conditional_t<std::is_const_v<Self>, word const, word>;
+    return static_cast<cell *>(self.view_base);
+  }
+  /// @brief Borrow an allocated cell. @ingroup jam_heap
+  template<class Self>
+  decltype(auto) operator[](this Self & self native_lifetimebound, offset index) noexcept {
+    assert(index < self.cursor); return self.data()[index];
+  }
+  /** @brief Read one managed reference field by value.
+   * @ingroup jam_heap
+   * @param cell Eight-byte cell offset.
+   * @param slot Zero or one for compressed references; zero for wide references.
+   * Fixed-size byte copies permit both halves to coexist with whole-cell access.
+   */
+  native_nodiscard offset field(offset cell, unsigned slot = 0) const noexcept {
+    assert(cell < cursor && slot < fields_per_word);
+    offset value;
+    auto const address = reinterpret_cast<std::byte const *>(data() + cell) + slot * sizeof(offset);
+    std::memcpy(&value, address, sizeof(value));
+    return value;
+  }
+  /** @brief Write a managed reference field's bytes.
+   * @ingroup jam_heap
+   * @param cell Eight-byte cell offset.
+   * @param value Reference or null to store.
+   * @param slot Zero or one compressed; zero wide.
+   * Declare its pointer bit separately with pointer(). Mutation must not overlap
+   * tracing or compaction; this operation does not synchronize field values.
+   */
+  void set_field(offset cell, offset value, unsigned slot = 0) noexcept {
+    require_mutator();
+    assert(cell < cursor && slot < fields_per_word);
+    auto const address = reinterpret_cast<std::byte *>(data() + cell) + slot * sizeof(offset);
+    std::memcpy(address, &value, sizeof(value));
+  }
+  /// @brief Borrow rank descriptors while markers and compaction are quiescent. @ingroup jam_heap
+  native_nodiscard std::span<block const> blocks() const noexcept { return metadata; }
+  /** @brief Allocate a positive complete record measured in eight-byte cells.
+   * @ingroup jam_heap
+   * @param words Extent, including any padding within the record.
+   * @param alignment_bytes Alignment (8; additionally 16, 32, 64 with may_dilate).
+   * Grows by powers of two without copying payloads. Allocations preserve offsets.
+   * Cell zero is reserved for null; leading alignment padding is initialized.
+   * Resource failures terminate.
+   */
+  native_nodiscard offset allocate(std::size_t words, std::size_t alignment_bytes = 8) noexcept
+      native_diagnose_if(words == 0, "jam records must contain at least one cell")
+      native_diagnose_if(!std::has_single_bit(alignment_bytes) || alignment_bytes < 8 || alignment_bytes > (may_dilate ? 64u : 8u), "unsupported jam record alignment") {
+    require_mutator();
+    auto const k = exponent(alignment_bytes);
+    auto const aligned = (cursor + (std::size_t{1} << k) - 1) & ~((std::size_t{1} << k) - 1);
+    if (!words) detail::heap_failure("zero-word allocation");
+    if (words > maximum_bytes / 8 - reserve_word_count - aligned)
+      detail::heap_failure("capacity overflow");
+    while (words > capacity() - reserve_word_count - std::min(aligned, capacity() - reserve_word_count))
+      resize(capacity() * 2);
+    std::fill(data() + cursor, data() + aligned, word{0});
+    cursor = aligned + words;
+    return static_cast<offset>(aligned);
+  }
+  /// @brief Clear marks and alignment requirements; pointer declarations survive. @ingroup jam_heap
+  void clear_marks() noexcept {
+    for (auto & item : metadata) {
+      item.live = 0;
+      if constexpr (!compressed && may_dilate) item.destination = 0;
+    }
+    if constexpr (compressed && may_dilate) std::fill(alignment.begin(), alignment.end(), 0);
+  }
+  /** @brief Mark a complete reachable record; concurrent markers are permitted.
+   * @ingroup jam_heap
+   * @param first Record start in cells.
+   * @param words Complete extent in cells.
+   * @param alignment_bytes Same alignment used to allocate this record.
+   * @pre Extent is allocated and the heap is frozen. Join markers before moving.
+   * With may_dilate, record boundaries prevent padding within straddling records.
+   */
+  void mark(offset first, std::size_t words = 1, std::size_t alignment_bytes = 8) noexcept {
+    assert(first != null && first <= cursor && words <= cursor - first);
+    note_record(first, words, alignment_bytes); mark_range(first, words);
+  }
+  /** @brief Claim traversal by atomically marking the record's first cell.
+   * @ingroup jam_heap
+   * @return Exactly one winning marker must trace this record's outgoing fields.
+   * @pre Disjoint complete extents; all tracers agree on start, extent, alignment.
+   * The start must not be independently marked. A claim is not completion;
+   * join all markers before inspecting final marks or compacting.
+   */
+  native_nodiscard bool claim(offset first, std::size_t words = 1,
+                           std::size_t alignment_bytes = 8) noexcept {
+    assert(first != null && words && first < cursor && words <= cursor - first);
+    auto const bit = static_cast<bitmap>(bitmap{1} << (first & (block_words - 1)));
+    auto const previous = std::atomic_ref<bitmap>{metadata[first >> block_shift].live}
+        .fetch_or(bit, std::memory_order_relaxed);
+    if ((previous & bit) != 0) return false;
+    note_record(first, words, alignment_bytes);
+    mark_range(first + 1, words - 1);
+    return true;
+  }
+  /** @brief Declare a managed reference field; may overlap frozen-heap markers.
+   * @ingroup jam_heap
+   * @param where Cell containing the field, rather than its target.
+   * @param slot Zero/one compressed, zero wide.
+   * Declarations survive until the containing cell is reclaimed. Unmarked fields
+   * retained solely by dilation are copied as data, never forwarded.
+   */
+  void pointer(offset where, unsigned slot = 0) noexcept {
+    assert(where != null && where < cursor && slot < fields_per_word);
+    auto const bit = (where & (block_words - 1)) * fields_per_word + slot;
+    std::atomic_ref<word>{metadata[where >> block_shift].pointers}
+        .fetch_or(word{1} << bit, std::memory_order_relaxed);
+  }
+  /** @brief Pack marked records, forwarding managed fields and external roots.
+   * @ingroup jam_heap
+   * @param roots Mutable offsets outside the heap, including null.
+   * The construction policy selects the participating workers, including the caller.
+   * @pre Nonnull roots and live fields target marked cells. Mutators and markers
+   * are stopped. Payloads are relocatable and roots do not alias the heap.
+   * The view steps backward by the reserve. Copying never gets more than N
+   * native source pages ahead of the earliest unfinished page; completed pages
+   * release credit. Old rank descriptors remain frozen throughout copying.
+   * Retained alignment groups and destination padding count toward used().
+   * Shrink once below the configured occupancy threshold if live cells and reserve fit.
+   * Resource failures terminate because a moving collection cannot unwind.
+   */
+  void compact(std::span<offset> roots = {}) noexcept {
+    require_mutator();
+    collecting = true;
+    compact_impl(roots);
+    collecting = false;
+  }
+
+private:
+  void compact_impl(std::span<offset> roots) noexcept {
+    // Keep the null cell in the packed prefix, including aligned collections.
+    // It is padding, never a record or a source of outgoing pointers.
+    data()[0] = 0;
+    metadata[0].live |= bitmap{1};
+    metadata[0].pointers &= ~word{(1u << fields_per_word) - 1};
+    auto const old_blocks = (cursor + block_words - 1) / block_words;
+    std::size_t live_words = 0;
+    if constexpr (may_dilate) {
+      for (std::size_t begin = 0; begin < old_blocks;) {
+        auto end = begin + 1;
+        unsigned k = std::popcount(flags(begin) & 7u);
+        while ((flags(end - 1) & 8u) && end < old_blocks) {
+          k = std::max(k, static_cast<unsigned>(std::popcount(flags(end) & 7u))); ++end;
+        }
+        live_words = (live_words + (std::size_t{1} << k) - 1) & ~((std::size_t{1} << k) - 1);
+        for (auto i = begin; i != end; ++i) {
+          auto & item = metadata[i];
+          item.pointers &= pointer_cells(item.live); // exact liveness, before dilation
+          item.live = expand(item.live, k);
+          item.destination = static_cast<offset>(live_words);
+          live_words += std::popcount(item.live);
+        }
+        begin = end;
+      }
+      // Dilation can retain unallocated cells at the final record's rounded end.
+      auto const padded = std::min(capacity() - reserve_word_count, (cursor + 7) & ~std::size_t{7});
+      std::fill(data() + cursor, data() + padded, word{0});
+    } else {
+      for (std::size_t i = 0; i != old_blocks; ++i) {
+        auto & item = metadata[i];
+        item.pointers &= pointer_cells(item.live);
+        item.destination = static_cast<offset>(live_words);
+        live_words += std::popcount(item.live);
+      }
+    }
+    auto const next_origin = (origin - reserve_word_count) & (capacity() - 1);
+    auto const source = data();
+    auto const target = reinterpret_cast<word *>(storage.data()) + next_origin;
+    auto const source_pages = (cursor + page_word_count - 1) / page_word_count;
+    auto const wave_pages = reserve_word_count / page_word_count;
+    auto move_page = [&](std::size_t page) noexcept {
+      auto const begin = page * (page_word_count / block_words);
+      auto const end = std::min(old_blocks, begin + page_word_count / block_words);
+      for (auto i = begin; i != end; ++i) {
+        auto const & item = metadata[i];
+        auto destination = base(item);
+        if (item.live == ~bitmap{0} && item.pointers == 0) {
+          std::memcpy(target + destination, source + i * block_words, block_words * 8); continue;
+        }
+
+        for (auto bits = item.live; bits; bits &= bits - 1) {
+          auto const bit = static_cast<unsigned>(std::countr_zero(bits));
+          word value;
+          std::memcpy(&value, source + i * block_words + bit, sizeof(value));
+          auto const fields = (item.pointers >> (bit * fields_per_word)) & ((1u << fields_per_word) - 1);
+          if constexpr (compressed) {
+            if (fields & 1) value = (value & 0xffffffff00000000ULL) | forward(static_cast<offset>(value));
+            if (fields & 2) value = (value & 0x00000000ffffffffULL) | (word{forward(static_cast<offset>(value >> 32))} << 32);
+          } else if (fields) value = forward(value);
+          std::memcpy(target + destination++, &value, sizeof(value));
+        }
+      }
+    };
+    if (policy.compaction_workers > 1 && source_pages > 1) {
+      auto done = std::make_unique<std::atomic<bool>[]>(source_pages);
+      std::atomic<std::size_t> next{0}, front{0};
+      auto task = [&](std::size_t) noexcept {
+        for (;;) {
+          auto const page = next.fetch_add(1, std::memory_order_relaxed);
+          if (page >= source_pages) return;
+          auto floor = front.load(std::memory_order_acquire);
+          while (page - floor >= wave_pages) {
+            front.wait(floor, std::memory_order_relaxed);
+            floor = front.load(std::memory_order_acquire);
+          }
+          move_page(page);
+          done[page].store(true, std::memory_order_release);
+          // Every completion publishes through this RMW chain, even when an
+          // older page still blocks the prefix. The last publisher therefore
+          // sees all earlier done flags; a store-buffering cycle cannot stall.
+          floor = front.fetch_add(0, std::memory_order_acq_rel);
+          for (;;) {
+            auto end = floor;
+            while (end != source_pages && done[end].load(std::memory_order_acquire)) ++end;
+            if (end == floor) break;
+            if (front.compare_exchange_strong(floor, end, std::memory_order_acq_rel)) {
+              front.notify_all(); break;
+            }
+            floor = front.load(std::memory_order_acquire);
+          }
+        }
+      };
+      workers.run(std::min(policy.compaction_workers, wave_pages),
+        [](void * context, std::size_t i) noexcept {
+          (*static_cast<decltype(task) *>(context))(i);
+        }, &task);
+    } else for (std::size_t page = 0; page < source_pages; ++page) move_page(page);
+    for (auto & root : roots) root = forward(root);
+    for (auto hook = roots_head; hook; hook = hook->next)
+      hook->position = forward(hook->position);
+    // Source-page workers never write destination gaps, so clear padding now.
+    if constexpr (may_dilate) {
+      std::size_t previous_end = 0;
+      for (std::size_t i = 0; i != old_blocks; ++i) {
+        auto const next = static_cast<std::size_t>(base(metadata[i]));
+        std::fill(target + previous_end, target + next, word{0});
+        previous_end = next + std::popcount(metadata[i].live);
+      }
+    }
+    // Forwarding is finished. Reuse old descriptors for the packed field masks.
+    // F(w)<=w means each nonzero output word is at most old block i: copy i's
+    // descriptor first, then initialize/merge only already-consumed descriptors.
+    auto const new_blocks = (live_words + block_words - 1) / block_words;
+    std::size_t cleared = 0;
+    for (std::size_t i = 0; i != old_blocks; ++i) {
+      auto const item = metadata[i];
+      auto const packed = packed_pointers(item);
+      if (!packed) continue;
+      auto const destination = static_cast<std::size_t>(base(item)) * fields_per_word;
+      auto const index = destination >> 6;
+      auto const shift = destination & 63;
+      assert(index <= i);
+      while (cleared <= index) metadata[cleared++].pointers = 0;
+      metadata[index].pointers |= packed << shift;
+      if (shift) {
+        auto const upper = packed >> (64 - shift);
+        if (upper) {
+          assert(index + 1 <= i);
+          while (cleared <= index + 1) metadata[cleared++].pointers = 0;
+          metadata[index + 1].pointers |= upper;
+        }
+      }
+    }
+    while (cleared < new_blocks) metadata[cleared++].pointers = 0;
+    for (std::size_t i = 0; i != old_blocks; ++i) {
+      auto const words = i < new_blocks ? std::min(block_words, live_words - i * block_words) : 0;
+      metadata[i].live = words ? static_cast<bitmap>(~bitmap{0} >> (block_words - words)) : 0;
+      if (i >= new_blocks) metadata[i].pointers = 0;
+      metadata[i].destination = 0;
+    }
+    if constexpr (compressed && may_dilate) std::fill(alignment.begin(), alignment.end(), 0);
+    cursor = live_words; origin = next_origin; view_base = target;
+    if (policy.shrink_shift && capacity() > minimum_capacity
+        && cursor < (capacity() >> policy.shrink_shift)
+        && cursor <= capacity() / 2 - reserve_word_count) resize(capacity() / 2);
+  }
+};
+
+/// \brief An external intrusive root retaining the target's type and tracer.
+/// \ingroup jam_heap
+/// \tparam T Target record type.
+/// \tparam O Object-offset representation, matching the owning heap.
+/// \tparam may_dilate Alignment policy, matching the owning heap.
+/// Copy registers another root; move transfers registration. The heap must
+/// outlive every attached root. Roots retain their meaning across collection;
+/// pointers copied from get() or operator*() do not. Read them afresh afterward.
+export template<class T, oo O, bool may_dilate>
+class root : private heap<O, may_dilate>::root_handle {
+  using base = typename heap<O, may_dilate>::root_handle;
+  friend class heap<O, may_dilate>;
+  explicit root(base value) noexcept : base(std::move(value)) {}
+
+public:
+  /// \brief Construct a detached null root.
+  root() noexcept = default;
+  /// \brief Read the forwarded pointer; copies outside roots/fields expire on collection.
+  native_nodiscard ptr<T, O> get() const noexcept { return ptr<T, O>{base::get()}; }
+  /// \brief Read the current compact pointer.
+  native_nodiscard ptr<T, O> operator*() const noexcept { return get(); }
+  /// \brief Whether this root currently names a record.
+  explicit operator bool() const noexcept { return static_cast<bool>(get()); }
+};
+}

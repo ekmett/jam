@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+cmake_minimum_required(VERSION 3.30)
+project(jam VERSION 0.0.1 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(JAM_BUILD_TESTS "Build heap and tracing checks" ${PROJECT_IS_TOP_LEVEL})
+option(JAM_BUILD_BENCHMARKS "Build the compaction benchmark" OFF)
+option(JAM_BUILD_DOCS "Build Doxygen documentation" OFF)
+option(JAM_USE_BMI2 "Use BMI2 bit extraction; requires a compatible x86-64 CPU" OFF)
+
+if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Darwin|Linux)$")
+  message(FATAL_ERROR "jam requires macOS or Linux virtual-memory aliases")
+endif()
+
+include(CheckCXXSourceCompiles)
+block()
+  set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+  check_cxx_source_compiles([=[
+    #include <array>
+    template<class T> concept additive_t = requires(T x) { x + x; };
+    constexpr int identity(int value) noexcept {
+      if consteval { return value; } else { return value; }
+    }
+    constexpr auto values = [] consteval noexcept { return std::array{1, 2}; }();
+    static_assert(additive_t<int> && identity(values[1]) == 2);
+  ]=] JAM_HAS_REQUIRED_FEATURES)
+  if(NOT JAM_HAS_REQUIRED_FEATURES)
+    message(FATAL_ERROR "jam requires C++26 concepts, if consteval and consteval lambdas")
+  endif()
+  check_cxx_source_compiles([=[
+    #include <concepts>
+    struct value {
+      int member;
+      template<class Self>
+      constexpr decltype(auto) get(this Self & self) noexcept { return (self.member); }
+    };
+    constexpr value constant{7};
+    static_assert(constant.get() == 7);
+    static_assert(std::same_as<decltype(constant.get()), int const &>);
+    int probe() { value mutable_value{2}; mutable_value.get() = 3; return mutable_value.get(); }
+  ]=] JAM_HAS_EXPLICIT_OBJECT_PARAMETERS)
+  if(NOT JAM_HAS_EXPLICIT_OBJECT_PARAMETERS)
+    message(FATAL_ERROR "jam requires explicit object parameters for const-correct heap accessors")
+  endif()
+endblock()
+
+include(FetchContent)
+# Populate only the textual attribute catalog. Upstream's module build and its
+# compiler, numerical and exception policies are not part of jam's interface.
+FetchContent_Declare(jam_native
+  GIT_REPOSITORY https://github.com/ekmett/native.git
+  GIT_TAG a1c56a3e249ff82e711c18d0f8cf308d9eb4b62c
+  SOURCE_SUBDIR jam-attributes-only)
+FetchContent_MakeAvailable(jam_native)
+if(NOT EXISTS "${jam_native_SOURCE_DIR}/src/native/attributes.h")
+  message(FATAL_ERROR "jam requires native's textual attributes.h catalog")
+endif()
+
+find_package(Threads REQUIRED)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+add_library(jam STATIC)
+add_library(jam::jam ALIAS jam)
+target_compile_features(jam PUBLIC cxx_std_26)
+set_target_properties(jam PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
+target_sources(jam PUBLIC FILE_SET modules TYPE CXX_MODULES
+  BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
+  FILES jam.ccm heap.ccm work.ccm)
+target_include_directories(jam PRIVATE
+  "$<BUILD_INTERFACE:${jam_native_SOURCE_DIR}/src>"
+  "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/jam/vendor>")
+target_link_libraries(jam PUBLIC Threads::Threads)
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  block()
+    # A Homebrew LLVM's headers can be newer than the SDK's libc++ runtime.
+    get_filename_component(jam_compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(jam_libcxx "${jam_compiler_bin}/../lib/c++")
+    if(EXISTS "${jam_libcxx}/libc++.dylib")
+      target_link_directories(jam PUBLIC "$<BUILD_INTERFACE:${jam_libcxx}>")
+    endif()
+  endblock()
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(jam PUBLIC -fno-exceptions)
+  target_compile_options(jam PRIVATE -Wall -Wextra "$<BUILD_INTERFACE:-Werror>")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # CMake's installed BMI rule combines --precompile with an unused -c.
+    target_compile_options(jam PRIVATE "$<INSTALL_INTERFACE:-Wno-unused-command-line-argument>")
+  endif()
+else()
+  message(FATAL_ERROR "jam requires a compiler supporting C++26 modules and -fno-exceptions")
+endif()
+if(JAM_USE_BMI2)
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    message(FATAL_ERROR "JAM_USE_BMI2 requires x86-64")
+  endif()
+  target_compile_options(jam PUBLIC -mbmi2)
+endif()
+
+if(JAM_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
+if(JAM_BUILD_BENCHMARKS)
+  add_executable(heap-bench heap-bench.cc)
+  target_link_libraries(heap-bench PRIVATE jam::jam)
+endif()
+if(JAM_BUILD_DOCS)
+  find_package(Doxygen 1.18 REQUIRED COMPONENTS doxygen dot)
+  set(DOXYGEN_PROJECT_NAME jam)
+  set(DOXYGEN_PROJECT_BRIEF "A compacting heap with intrusive tracing roots for C++26")
+  set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/docs")
+  set(DOXYGEN_GENERATE_HTML YES)
+  set(DOXYGEN_GENERATE_LATEX NO)
+  set(DOXYGEN_GENERATE_XML YES)
+  set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+  set(DOXYGEN_FILE_PATTERNS "*.ccm" "*.md")
+  set(DOXYGEN_EXTENSION_MAPPING "ccm=C++")
+  set(DOXYGEN_EXTRACT_ALL NO)
+  set(DOXYGEN_EXTRACT_PRIVATE NO)
+  set(DOXYGEN_EXTRACT_STATIC NO)
+  set(DOXYGEN_HIDE_UNDOC_MEMBERS YES)
+  set(DOXYGEN_HIDE_UNDOC_CLASSES YES)
+  set(DOXYGEN_SEARCH_INCLUDES NO)
+  set(DOXYGEN_MACRO_EXPANSION YES)
+  set(DOXYGEN_EXPAND_ONLY_PREDEF YES)
+  set(DOXYGEN_PREDEFINED
+    "native_nodiscard=" "native_cold=" "native_noreturn="
+    "native_lifetimebound=" "native_diagnose_if(condition,message)=")
+  set(DOXYGEN_EXCLUDE_SYMBOLS "jam::detail" "jam::detail::*")
+  set(DOXYGEN_MARKDOWN_ID_STYLE GITHUB)
+  set(DOXYGEN_STRIP_FROM_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
+  set(DOXYGEN_GENERATE_TREEVIEW YES)
+  # Match native's static menus; Doxygen 1.18's dynamic menus link to absent sections.
+  set(DOXYGEN_HTML_DYNAMIC_MENUS NO)
+  set(DOXYGEN_HTML_COLORSTYLE AUTO_LIGHT)
+  set(DOXYGEN_OBFUSCATE_EMAILS NO)
+  set(DOXYGEN_SOURCE_BROWSER YES)
+  set(DOXYGEN_INLINE_SOURCES NO)
+  set(DOXYGEN_HAVE_DOT YES)
+  set(DOXYGEN_DOT_IMAGE_FORMAT svg)
+  set(DOXYGEN_INTERACTIVE_SVG YES)
+  set(DOXYGEN_WARN_AS_ERROR FAIL_ON_WARNINGS)
+  set(DOXYGEN_WARN_IF_DOC_ERROR YES)
+  set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
+  set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
+  set(DOXYGEN_QUIET YES)
+  doxygen_add_docs(jam-docs jam.ccm heap.ccm README.md LICENSE.md
+    COMMENT "Build jam API documentation")
+  # Removed declarations must not leave stale pages in the generated reference.
+  add_custom_target(jam-docs-clean
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf
+      "${CMAKE_CURRENT_BINARY_DIR}/docs/html" "${CMAKE_CURRENT_BINARY_DIR}/docs/xml"
+    VERBATIM)
+  add_dependencies(jam-docs jam-docs-clean)
+endif()
+
+install(TARGETS jam EXPORT jamTargets
+  ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  FILE_SET modules DESTINATION "${CMAKE_INSTALL_LIBDIR}/jam/modules")
+install(FILES "${jam_native_SOURCE_DIR}/src/native/attributes.h"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/jam/vendor/native")
+install(FILES LICENSE.md DESTINATION "${CMAKE_INSTALL_DATADIR}/jam")
+install(EXPORT jamTargets NAMESPACE jam:: CXX_MODULES_DIRECTORY cxx-modules
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/jam")
+configure_package_config_file(etc/cmake/jamConfig.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/jamConfig.cmake"
+  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/jam")
+write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/jamConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/jamConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/jamConfigVersion.cmake"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/jam")

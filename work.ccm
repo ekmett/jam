@@ -1,0 +1,294 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+module;
+
+#include <native/attributes.h>
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <stop_token>
+#include <thread>
+#include <type_traits>
+#include <vector>
+
+export module jam:work;
+
+namespace jam::detail {
+
+// A phase supplies a bounded number of long-lived callbacks. The caller is
+// one worker; callbacks and their context remain borrowed until run returns.
+class work_pool {
+public:
+  using callback = void (*)(void *, std::size_t) noexcept;
+
+private:
+  struct range {
+    std::size_t begin;
+    std::size_t end;
+  };
+
+  struct activation {
+    activation * previous;
+    inline static thread_local activation * current = nullptr;
+
+    activation() noexcept : previous(current) { current = this; }
+    ~activation() noexcept { current = previous; }
+  };
+
+  std::size_t const worker_count;
+  std::mutex bulk_mutex;
+  std::mutex scheduler_mutex;
+  std::condition_variable ready;
+  std::vector<std::optional<range>> mailboxes;
+  callback function = nullptr;
+  void * context = nullptr;
+  std::size_t pending_count = 0;
+  std::size_t remaining_count = 0;
+  std::size_t chunk_grain = 1;
+  // Threads must be destroyed before the synchronization state they use.
+  std::vector<std::jthread> threads;
+
+  native_nodiscard
+  static bool executing_here() noexcept {
+    return activation::current != nullptr;
+  }
+
+  static void execute(range work, callback fn, void * state) noexcept {
+    activation scope;
+    for (auto index = work.begin; index < work.end; ++index) fn(state, index);
+  }
+
+  // scheduler_mutex is held and pending_count > 0. Transfers preserve the
+  // remaining count, which includes queued, claimed and executing indices.
+  native_nodiscard
+  range take(std::size_t worker) noexcept {
+    if (!mailboxes[worker]) {
+      for (std::size_t distance = 1; distance < worker_count; ++distance) {
+        auto const victim = (worker + distance) % worker_count;
+        auto & source = mailboxes[victim];
+        if (!source) continue;
+        auto & pending = *source;
+        auto const size = pending.end - pending.begin;
+        auto const split = size > chunk_grain ? pending.begin + size / 2
+                                             : pending.begin;
+        mailboxes[worker] = range{split, pending.end};
+        if (split == pending.begin) source.reset();
+        else pending.end = split;
+        break;
+      }
+    }
+    auto & pending = *mailboxes[worker];
+    range const work{pending.begin,
+                    pending.begin + std::min(chunk_grain, pending.end - pending.begin)};
+    pending.begin = work.end;
+    if (pending.begin == pending.end) mailboxes[worker].reset();
+    pending_count -= work.end - work.begin;
+    return work;
+  }
+
+  void complete(range work) noexcept {
+    bool finished;
+    {
+      std::lock_guard lock(scheduler_mutex);
+      remaining_count -= work.end - work.begin;
+      finished = remaining_count == 0;
+    }
+    if (finished) ready.notify_all();
+  }
+
+  void worker_loop(std::stop_token stop, std::size_t worker) noexcept {
+    for (;;) {
+      std::unique_lock lock(scheduler_mutex);
+      ready.wait(lock, [&] noexcept {
+        return stop.stop_requested() || pending_count != 0;
+      });
+      if (stop.stop_requested()) return;
+      auto const work = take(worker);
+      auto const fn = function;
+      auto * const state = context;
+      lock.unlock();
+      execute(work, fn, state);
+      complete(work);
+    }
+  }
+
+  void stop_threads() noexcept {
+    {
+      std::lock_guard lock(scheduler_mutex);
+      for (auto & thread : threads) thread.request_stop();
+    }
+    ready.notify_all();
+    threads.clear();
+  }
+
+public:
+  explicit work_pool(std::size_t workers = 1) noexcept
+      : worker_count(std::max(workers, std::size_t{1})), mailboxes(worker_count) {
+    threads.reserve(worker_count - 1);
+    for (std::size_t worker = 1; worker < worker_count; ++worker)
+      threads.emplace_back([this, worker](std::stop_token stop) noexcept {
+        worker_loop(stop, worker);
+      });
+  }
+
+  work_pool(work_pool const &) = delete;
+  work_pool & operator=(work_pool const &) = delete;
+  ~work_pool() noexcept { stop_threads(); }
+
+  native_nodiscard
+  std::size_t workers() const noexcept { return worker_count; }
+
+  // External calls serialize. A nested call from any pool callback runs
+  // inline, avoiding both same-pool and A -> B -> A waiting cycles.
+  void run(std::size_t count, callback fn, void * state,
+           std::size_t grain = 1) noexcept {
+    if (!count) return;
+    assert(fn != nullptr);
+    grain = std::max(grain, std::size_t{1});
+    if (executing_here()) {
+      execute({0, count}, fn, state);
+      return;
+    }
+    std::lock_guard bulk_lock(bulk_mutex);
+    if (worker_count == 1 || count <= grain) {
+      execute({0, count}, fn, state);
+      return;
+    }
+    {
+      std::lock_guard lock(scheduler_mutex);
+      mailboxes[0] = range{0, count};
+      function = fn;
+      context = state;
+      chunk_grain = grain;
+      pending_count = count;
+      remaining_count = count;
+    }
+    ready.notify_all();
+    for (;;) {
+      std::unique_lock lock(scheduler_mutex);
+      ready.wait(lock, [&] noexcept {
+        return remaining_count == 0 || pending_count != 0;
+      });
+      if (remaining_count == 0) {
+        function = nullptr;
+        context = nullptr;
+        return;
+      }
+      auto const work = take(0);
+      lock.unlock();
+      execute(work, fn, state);
+      complete(work);
+    }
+  }
+};
+
+// Outstanding is exactly pending + in-flight records. Pop only transfers
+// between those sets. A tracer queues every child before completing its own
+// record, so zero is final and cannot race with publication of a new child.
+template<class Item>
+class frontier {
+  static_assert(std::is_trivially_copyable_v<Item>);
+
+  struct mailbox {
+    std::mutex mutex;
+    std::vector<Item> pending;
+  };
+
+  std::size_t const worker_count;
+  std::unique_ptr<mailbox[]> mailboxes;
+  std::atomic<std::size_t> outstanding;
+  std::atomic<std::uint64_t> revision{0};
+
+  void publish() noexcept {
+    revision.fetch_add(1, std::memory_order_release);
+    revision.notify_all();
+  }
+
+  native_nodiscard
+  bool take(std::size_t worker, Item & result) noexcept {
+    auto & own = mailboxes[worker];
+    {
+      std::lock_guard lock(own.mutex);
+      if (!own.pending.empty()) {
+        result = own.pending.back();
+        own.pending.pop_back();
+        return true;
+      }
+    }
+    for (std::size_t distance = 1; distance < worker_count; ++distance) {
+      auto & source = mailboxes[(worker + distance) % worker_count];
+      std::scoped_lock lock(own.mutex, source.mutex);
+      // A publication may have reached this mailbox since its first check.
+      if (own.pending.empty() && !source.pending.empty()) {
+        auto const split = source.pending.size() / 2;
+        own.pending.insert(own.pending.end(), source.pending.begin() + split,
+                           source.pending.end());
+        source.pending.resize(split);
+      }
+      if (!own.pending.empty()) {
+        result = own.pending.back();
+        own.pending.pop_back();
+        return true;
+      }
+    }
+    return false;
+  }
+
+public:
+  explicit frontier(std::size_t workers, std::span<Item const> roots) noexcept
+      : worker_count(std::max(workers, std::size_t{1})),
+        mailboxes(std::make_unique<mailbox[]>(worker_count)), outstanding(roots.size()) {
+    auto const capacity = roots.size() / worker_count + (roots.size() % worker_count != 0);
+    for (std::size_t worker = 0; worker != worker_count; ++worker)
+      mailboxes[worker].pending.reserve(capacity);
+    for (std::size_t index = 0; index != roots.size(); ++index)
+      mailboxes[index % worker_count].pending.push_back(roots[index]);
+  }
+
+  frontier(frontier const &) = delete;
+  frontier & operator=(frontier const &) = delete;
+
+  // Called by the owner of an in-flight record. Publication may allocate a
+  // larger mailbox; allocation failure terminates the non-unwinding phase.
+  void push(std::size_t worker, Item value) noexcept {
+    assert(worker < worker_count);
+    assert(outstanding.load(std::memory_order_relaxed) != 0);
+    outstanding.fetch_add(1, std::memory_order_relaxed);
+    {
+      auto & own = mailboxes[worker];
+      std::lock_guard lock(own.mutex);
+      own.pending.push_back(value);
+    }
+    publish();
+  }
+
+  native_nodiscard
+  bool pop(std::size_t worker, Item & result) noexcept {
+    assert(worker < worker_count);
+    for (;;) {
+      // Observe the revision before checking queues. An enqueue or final
+      // completion during the scan changes it, so wait cannot lose that wake.
+      auto const version = revision.load(std::memory_order_acquire);
+      if (take(worker, result)) return true;
+      if (outstanding.load(std::memory_order_acquire) == 0) return false;
+      revision.wait(version, std::memory_order_acquire);
+    }
+  }
+
+  // Each successful pop is completed exactly once, including lost claims.
+  void complete() noexcept {
+    auto const previous = outstanding.fetch_sub(1, std::memory_order_acq_rel);
+    assert(previous != 0);
+    if (previous == 1) publish();
+  }
+};
+
+}
