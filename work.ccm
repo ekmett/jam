@@ -8,6 +8,8 @@ module;
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
+#include <chrono>
+#include <random>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -152,6 +154,11 @@ public:
   native_nodiscard
   std::size_t workers() const noexcept { return worker_count; }
 
+  // Nested pool launches execute serially: do not count unstarted markers.
+  std::size_t available_workers() const noexcept {
+    return executing_here() ? 1 : worker_count;
+  }
+
   // External calls serialize. A nested call from any pool callback runs
   // inline, avoiding both same-pool and A -> B -> A waiting cycles.
   void run(std::size_t count, callback fn, void * state,
@@ -196,104 +203,139 @@ public:
   }
 };
 
-// Outstanding is exactly pending + in-flight records. Pop only transfers
-// between those sets. A tracer queues every child before completing its own
-// record, so zero is final and cannot race with publication of a new child.
+// Sender-initiated private queues: Acar/Chargueraud/Rainey, PPoPP 2013,
+// Figure 3; PASL sched/workstealing.cpp (algorithm reference, not copied code).
+// Unlike PASL's reset-to-now alarm, deadlines accumulate exponential intervals.
+struct donation_clock {
+  using clock = std::chrono::steady_clock;
+  std::minstd_rand random;
+  std::exponential_distribution<double> interval{1.0 / 30'000.0}; // nanoseconds
+  clock::time_point deadline;
+
+  explicit donation_clock(unsigned seed) noexcept
+      : random(seed + 1), deadline(clock::now()) { advance(); }
+
+  void advance() noexcept {
+    // Rounding must never produce zero: catch-up must make forward progress.
+    auto const ns = std::chrono::nanoseconds{
+        std::max(std::int64_t{1}, static_cast<std::int64_t>(interval(random)))};
+    deadline += std::max(clock::duration{1},
+                        std::chrono::duration_cast<clock::duration>(ns));
+  }
+
+  template<class Attempt>
+  void catch_up(clock::time_point now, Attempt attempt) noexcept {
+    while (deadline <= now) {
+      attempt();
+      advance();
+    }
+  }
+};
+
 template<class Item>
 class frontier {
   static_assert(std::is_trivially_copyable_v<Item>);
-
-  struct mailbox {
-    std::mutex mutex;
-    std::vector<Item> pending;
+  enum class state : unsigned { running, idle, reserved, ready, stopped };
+  struct alignas(64) mailbox {
+    std::atomic<state> status{state::running};
+    std::vector<Item> incoming;
   };
-
+  struct alignas(64) local {
+    std::vector<Item> pending;
+    donation_clock timer;
+    explicit local(unsigned seed) noexcept : timer(seed) {}
+  };
   std::size_t const worker_count;
   std::unique_ptr<mailbox[]> mailboxes;
-  std::atomic<std::size_t> outstanding;
-  std::atomic<std::uint64_t> revision{0};
+  std::vector<local> locals;
+  // Counts active workers plus reserved/published transfers. A sender remains
+  // active until after incrementing for its recipient and publishing the batch.
+  // No atomics are touched by local queue mutation or record completion.
+  std::atomic<std::size_t> active;
 
-  void publish() noexcept {
-    revision.fetch_add(1, std::memory_order_release);
-    revision.notify_all();
-  }
-
-  native_nodiscard
-  bool take(std::size_t worker, Item & result) noexcept {
-    auto & own = mailboxes[worker];
-    {
-      std::lock_guard lock(own.mutex);
-      if (!own.pending.empty()) {
-        result = own.pending.back();
-        own.pending.pop_back();
+  bool acquire(std::size_t worker) noexcept {
+    auto & box = mailboxes[worker];
+    // Publishes completion of all previous reads of incoming. A sender must
+    // acquire this idle epoch before it can reuse the vector (ARM as well as TSO).
+    box.status.store(state::idle, std::memory_order_release);
+    if (active.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      // Every initial worker is counted, even before entering pop. Reserved
+      // transfers are counted before ready is published. Zero is therefore
+      // terminal: no sender or unstarted worker can still publish work.
+      for (std::size_t i = 0; i != worker_count; ++i) {
+        mailboxes[i].status.store(state::stopped, std::memory_order_release);
+        mailboxes[i].status.notify_one();
+      }
+      return false;
+    }
+    for (;;) {
+      auto const observed = box.status.load(std::memory_order_acquire);
+      if (observed == state::stopped) return false;
+      if (observed == state::ready) {
+        // Acquire pairs with the donor's ready store; only this receiver reads
+        // the published batch. No sender accesses it again until the next idle.
+        locals[worker].pending.swap(box.incoming);
+        box.status.store(state::running, std::memory_order_relaxed);
         return true;
       }
+      box.status.wait(observed, std::memory_order_acquire);
     }
-    for (std::size_t distance = 1; distance < worker_count; ++distance) {
-      auto & source = mailboxes[(worker + distance) % worker_count];
-      std::scoped_lock lock(own.mutex, source.mutex);
-      // A publication may have reached this mailbox since its first check.
-      if (own.pending.empty() && !source.pending.empty()) {
-        auto const split = source.pending.size() / 2;
-        own.pending.insert(own.pending.end(), source.pending.begin() + split,
-                           source.pending.end());
-        source.pending.resize(split);
-      }
-      if (!own.pending.empty()) {
-        result = own.pending.back();
-        own.pending.pop_back();
-        return true;
-      }
-    }
-    return false;
   }
 
 public:
   explicit frontier(std::size_t workers, std::span<Item const> roots) noexcept
       : worker_count(std::max(workers, std::size_t{1})),
-        mailboxes(std::make_unique<mailbox[]>(worker_count)), outstanding(roots.size()) {
-    auto const capacity = roots.size() / worker_count + (roots.size() % worker_count != 0);
-    for (std::size_t worker = 0; worker != worker_count; ++worker)
-      mailboxes[worker].pending.reserve(capacity);
-    for (std::size_t index = 0; index != roots.size(); ++index)
-      mailboxes[index % worker_count].pending.push_back(roots[index]);
+        mailboxes(std::make_unique<mailbox[]>(worker_count)), active(worker_count) {
+    locals.reserve(worker_count);
+    for (std::size_t i = 0; i != worker_count; ++i)
+      locals.emplace_back(static_cast<unsigned>(i));
+    for (std::size_t i = 0; i != roots.size(); ++i)
+      locals[i % worker_count].pending.push_back(roots[i]);
   }
-
   frontier(frontier const &) = delete;
   frontier & operator=(frontier const &) = delete;
 
-  // Called by the owner of an in-flight record. Publication may allocate a
-  // larger mailbox; allocation failure terminates the non-unwinding phase.
-  void push(std::size_t worker, Item value) noexcept {
-    assert(worker < worker_count);
-    assert(outstanding.load(std::memory_order_relaxed) != 0);
-    outstanding.fetch_add(1, std::memory_order_relaxed);
-    {
-      auto & own = mailboxes[worker];
-      std::lock_guard lock(own.mutex);
-      own.pending.push_back(value);
-    }
-    publish();
+  native_inline void push(std::size_t worker, Item value) noexcept {
+    locals[worker].pending.push_back(value);
   }
 
-  native_nodiscard
+  // Only the owner accesses pending. A successful CAS reserves exclusive writer
+  // access to an idle peer's inbox; failed attempts never modify either queue.
+  bool donate(std::size_t worker, std::size_t peer) noexcept {
+    auto & source = locals[worker].pending;
+    if (source.size() < 2 || worker == peer) return false;
+    auto & box = mailboxes[peer];
+    auto expected = state::idle;
+    if (!box.status.compare_exchange_strong(expected, state::reserved,
+          std::memory_order_acquire, std::memory_order_relaxed)) return false;
+    active.fetch_add(1, std::memory_order_relaxed);
+    auto const half = source.size() / 2;
+    // Keep the newest half for local DFS; transfer ownership of older work.
+    box.incoming.assign(source.begin(), source.begin() + half);
+    source.erase(source.begin(), source.begin() + half);
+    box.status.store(state::ready, std::memory_order_release);
+    box.status.notify_one();
+    return true;
+  }
+
+  void communicate(std::size_t worker) noexcept {
+    if (worker_count == 1) return;
+    auto & timer = locals[worker].timer;
+    while (timer.deadline <= donation_clock::clock::now()) {
+      auto peer = std::uniform_int_distribution<std::size_t>{0, worker_count - 2}(timer.random);
+      if (peer >= worker) ++peer;
+      donate(worker, peer);
+      timer.advance();
+    }
+  }
+
   bool pop(std::size_t worker, Item & result) noexcept {
-    assert(worker < worker_count);
-    for (;;) {
-      // Observe the revision before checking queues. An enqueue or final
-      // completion during the scan changes it, so wait cannot lose that wake.
-      auto const version = revision.load(std::memory_order_acquire);
-      if (take(worker, result)) return true;
-      if (outstanding.load(std::memory_order_acquire) == 0) return false;
-      revision.wait(version, std::memory_order_acquire);
-    }
-  }
-
-  // Each successful pop is completed exactly once, including lost claims.
-  void complete() noexcept {
-    auto const previous = outstanding.fetch_sub(1, std::memory_order_acq_rel);
-    assert(previous != 0);
-    if (previous == 1) publish();
+    communicate(worker);
+    auto & pending = locals[worker].pending;
+    if (pending.empty() && !acquire(worker)) return false;
+    result = pending.back();
+    pending.pop_back();
+    return true;
   }
 };
 

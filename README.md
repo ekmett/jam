@@ -9,8 +9,8 @@ Records have no collector header or runtime type tag.
 
 `jam::ptr<T>` holds a four-byte object offset. Dereferencing it uses the heap
 bound by the current thread's `jam::heap_scope`. Visiting a field carries its
-target type into the marking queue, which invokes `jam::tracer<T>`. The default
-tracer calls the target's `trace` member when present. Types without a hook are
+target type into traversal, which invokes `jam::tracer<T>`. The default
+tracer supports ordinary member hooks and cooperative static hooks. Types without a hook are
 leaves: scalars and ordinary reference-free records need no boilerplate.
 
 ```cpp
@@ -22,8 +22,9 @@ struct node {
   ptr<node> next;
   std::uint64_t data;
 
-  constexpr auto trace(visitor auto & visit) const noexcept {
-    return visit(next);
+  static constexpr void trace(visitor auto & visit, ptr<node> at) noexcept {
+    for (auto const * p = visit.claim_target(at); p; p = visit.claim(p->next))
+      visit.poll();
   }
 };
 
@@ -31,9 +32,9 @@ int main() {
   heap heap{{.capacity = 8_MiB, .reserve = 1_MiB, .workers = 4}};
   heap_scope scope{heap};
 
-  static_cast<void>(make_ptr<node>());        // Unreachable.
-  auto const a = make_ptr<node>(nullptr, 42u);
-  auto const b = make_ptr<node>(a, 99u);
+  static_cast<void>(mk<node>());        // Unreachable.
+  auto const a = mk<node>(nullptr, 42u);
+  auto const b = mk<node>(a, 99u);
   a->next = b;                           // A cycle with inline data.
   root answer = a;                       // Implicit root registration.
   auto copy = answer;                    // An independent root hook.
@@ -51,24 +52,35 @@ int main() {
 byte literals, `pages`, `bytes`, `space_cast` and `ceil`. Use `import jam;`
 to keep names qualified.
 
-`ptr<T>` can name an incomplete type, so recursive records need only their
-member `trace` function. Typed heap operations check `jam::traceable<T>` once
-`T` is complete: its tracer must be `noexcept`. The abbreviated parameter
-`jam::visitor auto & visit` constrains the hook to jam's visitor. No superclass or separate tracer registration is needed.
+`ptr<T>` can name an incomplete type. Typed heap operations check
+`jam::traceable<T>` once `T` is complete. The abbreviated parameter
+`jam::visitor auto & visit` constrains the hook to jam's visitor. No superclass or
+separate tracer registration is needed.
 
-The intrusive object hook is `node::trace`. It visits only `next`. The inline
-`std::uint64_t` data needs no visit and is never interpreted as a pointer.
-For a type you cannot modify, specialize `jam::tracer<T>` with a static
-`trace(Visitor &, T const &) noexcept` function. The default tracer forwards the
-member hook's result; no particular return type is required. Collection currently
-uses the hook's side effects.
-Deriving that specialization from `jam::leaf<T>` explicitly suppresses traversal.
-A record containing managed pointers must enumerate them: the default leaf convention
-does not inspect arbitrary fields. Raw C++ pointers are data, not managed edges.
+The cooperative hook `static trace(visit, ptr<T>)` receives an unclaimed entry.
+It claims the complete record before reading its fields, then walks between
+records using raw pointers while marking is in progress. The example walks the
+list directly; its inline `std::uint64_t` data needs no visit. Nulls, cycles and
+sharing stop the walk when a claim returns null.
 
-Allocation tracing claims the complete target and sets its live bits before
-walking its contents. Cycles and sharing therefore invoke the hook once per
-reachable record per collection. Even a leaf allocation needs those live bits.
+An ordinary member hook remains a field enumerator:
+
+```cpp
+constexpr auto trace(visitor auto & visit) const noexcept {
+  return visit(next);
+}
+```
+
+Jam claims the allocation before calling this form. Each visit declares a slot
+and queues its target. For a type you cannot modify, specialize `jam::tracer<T>`
+with `trace(Visitor &, T const &)` for ordinary enumeration or
+`trace(Visitor &, ptr<T>)` for cooperative walking. If both forms exist, allocation
+tracing chooses the cooperative form; embedded values use the ordinary form.
+Return types are unrestricted; collection currently uses the hook's effects.
+Deriving the specialization from `jam::leaf<T>` explicitly suppresses traversal.
+A record containing managed pointers must enumerate them: the default leaf
+convention does not inspect arbitrary fields. Raw C++ pointers are data, not
+managed edges. Even a leaf allocation needs its complete extent marked live.
 
 The visitor walks parts of that already-live allocation. `visit(a, b, ...)`
 visits each argument in order, by reference; `visit()` does nothing. It does not
@@ -78,12 +90,27 @@ adapters compose recursively and require every element or alternative to support
 tracing with the visitor. Scalar visits do nothing.
 
 Visiting a `ptr<T>` tags its location in the enclosing allocation's pointer
-mask and queues its nonnull target for allocation tracing as `T`. Compaction uses
+mask and enqueues its nonnull target for tracing as `T`. Compaction uses
 those marks to rewrite pointers; other live bytes remain data. Every edge to a record
 must agree on its complete type. Base-subobject and interior references require
 the raw API.
 
-`jam::make_ptr<T>(args...)` forwards constructor arguments or aggregate fields into
+Cooperative walkers can separate pointer declarations from target claims:
+`visit.pointer(p)` declares only the source slot, while `visit.claim_target(p)`
+claims the complete target and returns its in-place `T const*` (null for a null
+pointer or an earlier claim). `visit.claim(p)` does both, declaring the source
+even when the target was already claimed. A successful target claim makes that
+record current; failed claims leave the current record unchanged. Declare the
+outgoing slots before descending into other records, and trace every target you
+successfully claim yourself.
+
+`visit.pointers(0b101001)` ORs a known pattern into the current record's pointer
+metadata without following targets. Bit 0 denotes its first 32-bit slot; this
+pattern declares slots 0, 3 and 5. An optional second argument gives the starting
+slot for a chunk of up to 64 bits. Zero bits leave existing declarations alone.
+These operations belong to the visitor, not to `ptr`.
+
+`jam::mk<T>(args...)` forwards constructor arguments or aggregate fields into
 `T{args...}`, then copies the value into the heap and returns an unrooted
 `ptr<T>`. No preconstructed `T` is needed. Braced initialization rejects narrowing
 conversions; use `42u` for the node's unsigned data field. `nullptr` implicitly
@@ -98,12 +125,12 @@ need not be trivially copyable or standard-layout. `std::tie` provides a tuple
 view of existing fields without storing a tuple in the heap when a tuple view
 is useful; ordinary hooks can pass their fields directly to `visit`.
 
-Tracing also uses a temporary value snapshot so typed field access does not
-assume a persistent C++ object lifetime through VM alias changes or cell-wise
-relocation. Visit ptr members **by reference from that supplied value**, including
-members of nested subobjects. A copied ptr no longer identifies the field's
-location. The value and visitor must not escape the callback. Leaf records need
-no snapshot. Each traced non-leaf record is copied once for its hook.
+Tracing reads each successfully claimed record in place. The claimant restores
+its typed C++ lifetime after earlier VM remapping or cell-wise relocation;
+marking finishes before any further relocation. Visit ptr members **by reference
+from that supplied object**, including nested subobjects. A copied ptr no longer
+identifies the field's location. Borrowed record addresses and the visitor must
+not escape the callback. Tracing does not copy payloads onto the stack.
 
 `jam::heap_scope scope{heap}` binds an existing heap until scope exit, then
 restores the previous binding. Scopes can nest, switch heaps and re-enter them.
@@ -115,7 +142,7 @@ Compact pointers are plain field values: copying one does not register a root.
 Initializing a `jam::root` from a ptr deduces its target type and registers it
 with the current heap.
 `heap.root(ptr)` provides the same operation with an explicit heap. `auto p =
-jam::make_ptr<T>()` still deduces a ptr; use `jam::root` when retention is needed.
+jam::mk<T>()` still deduces a ptr; use `jam::root` when retention is needed.
 A root implicitly converts to its current ptr; `get()` returns the same value.
 Both types provide `*` and `->`.
 Their stored offsets are mutable so forwarding can update const handles.
@@ -157,12 +184,117 @@ pool synchronizes worker completion before collection returns. These compiler
 fences add no hardware fence instructions and do not permit concurrent mutators.
 
 Mutation and changes to the root set stop during collection. Tracer hooks must
-be `noexcept` and safe for concurrent invocation. Marking finishes before
+be safe for concurrent invocation and must not block waiting for other hooks.
+Marking finishes before
 compaction begins. `collect()` requires typed roots and edges; `collect(trace)`
 also accepts untyped roots/edges, invoking its callback with a visitor and an
 offset for those targets. That callback must claim each record and enumerate its
-fields. Both forms redeclare pointer fields each collection, so a conditional
+fields and remain `noexcept`. Both forms redeclare pointer fields each collection, so a conditional
 tracer can stop treating a field as a managed edge.
+
+Ordinary `visit(...)` calls enqueue edges without following them recursively.
+Cooperative hooks can walk a spine and enqueue other branches. For a binary tree:
+
+```cpp
+struct tree {
+  ptr<tree> left, right;
+  std::uint64_t data;
+
+  static constexpr void trace(visitor auto & visit, ptr<tree> at) noexcept {
+    for (auto const * p = visit.claim_target(at); p; p = visit.claim(p->right)) {
+      visit(p->left); // Declare and enqueue the left subtree.
+      visit.poll();  // Offer queued branches to idle workers when due.
+    }
+  }
+};
+```
+
+A tracer can instead keep a typed FIFO in front of its local walk. Here a
+32-entry buffer prefetches object data on entry. `pushpop` only removes an entry when
+full; otherwise it appends and returns null. The walker tries left first, then
+right if nothing was displaced. Once left displaces work, right goes to the
+worker queue. When neither displaces a node, the explicit drain handles the
+partially filled buffer and the final tail. Early drains discover more children
+and fill the buffer; later children refill any slots emptied by leaves or lost
+claims. Draining is not a separate mode.
+
+```cpp
+#include <array>
+#include <utility>
+
+struct buffered_tree {
+  ptr<buffered_tree> left, right;
+  std::uint64_t data;
+
+  static constexpr void trace(visitor auto & visit, ptr<buffered_tree> at) noexcept {
+    std::array<ptr<buffered_tree>, 32> queue{};
+    unsigned head = 0, size = 0;
+    auto pushpop = [&](ptr<buffered_tree> value) noexcept -> ptr<buffered_tree> {
+      if (!value) return {};
+      value.prefetch();
+      if (size < queue.size()) {
+        queue[(head + size++) % queue.size()] = value;
+        return {};
+      }
+      auto const result = std::exchange(queue[head], value);
+      head = (head + 1) % queue.size();
+      return result;
+    };
+    at.prefetch();
+    for (;;) {
+      if (!at) {
+        if (!size) break;
+        at = queue[head];
+        head = (head + 1) % queue.size();
+        --size;
+      }
+      auto const * p = visit.claim_target(std::exchange(at, {}));
+      if (!p) continue;
+      visit.pointer(p->left);
+      at = pushpop(p->left);
+      if (at) visit(p->right);
+      else {
+        visit.pointer(p->right);
+        at = pushpop(p->right);
+      }
+      visit.poll();
+    }
+  }
+};
+```
+
+`ptr<T>::prefetch()` is always inlined and hints the cache line containing the
+object's first byte in the current heap. `prefetch_marks()` instead hints its
+mark metadata. Both treat null as a no-op, even without a heap scope, and use
+the pure current-heap accessor so the compiler can share its TLS lookup.
+Prefetching neither claims
+the target nor declares a pointer slot; it provides no synchronization. The
+buffer remains local and typed, so only branches sent to `visit(...)` incur
+queued callback dispatch. Buffer size is a tracer choice, not a heap setting.
+
+There is no recursive call or queue entry for each right-spine link. `claim`
+declares that link before attempting the next target, including links whose
+target was already claimed. Stack use is independent of graph depth. Ordinary
+embedded tuple, array and variant traversal still follows the nesting of values.
+Tracing must not throw; an escaping user exception terminates collection.
+
+Pending jobs own offsets and type-specific callbacks, not stack references.
+Between queued jobs and at `visit.poll()`, the worker processes overdue donation
+attempts and advances the previous deadline by exponential intervals (30
+microseconds mean). Each successful attempt transfers the older half of the
+queue to a randomly selected idle worker. Long cooperative hooks should poll
+periodically so queued branches can be donated. A single chain offers no
+independent branches to another worker. There are no scheduling exceptions,
+stack captures or recursion-depth limits.
+
+Only the owner accesses a local queue. A donor reserves an idle mailbox with CAS,
+writes the batch, then publishes it with release ordering; the recipient acquires
+it. Returning to idle releases the inbox for reuse. Active-worker accounting
+includes reserved transfers, so marking cannot finish while a batch is in flight.
+Local push/pop needs no synchronization; marking shared heap metadata still does.
+This follows the sender-initiated algorithm in
+[Acar, Charguéraud and Rainey (2013)](https://www.chargueraud.org/research/2013/ppopp/full.pdf)
+and [PASL](https://github.com/deepsea-inria/pasl).
 
 The heap uses 32-bit offsets scaled by eight, permitting a 32 GiB heap and two
 managed fields in one cell. Each 256-byte rank block has 16 bytes of metadata;
@@ -278,7 +410,7 @@ The default carrier is `thread_local`. On AArch64, `JAM_CONTEXT_X28=ON` uses a
 reserved `x28` register instead. CMake probes support and propagates `-ffixed-x28`
 to consumers; all participating compilation must reserve it. The carrier holds
 a stable heap pointer, and dereference loads that heap's current mapping base.
-`jam::current_heap()` is a pure accessor; scope entry and exit use ordinary C++
+`jam::heap::current()` is a pure accessor; scope entry and exit use ordinary C++
 stores so the compiler can observe rebinding.
 
 The register carrier has no initial null guarantee: use implicit operations only

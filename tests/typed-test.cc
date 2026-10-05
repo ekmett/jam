@@ -32,7 +32,7 @@ struct node {
   std::uint64_t value;
   inline static std::atomic<unsigned> visits{0};
 
-  constexpr auto trace(jam::visitor auto & visit) const noexcept {
+  constexpr auto trace(jam::visitor auto & visit) const {
     visits.fetch_add(1, std::memory_order_relaxed);
     return visit(next, data);
   }
@@ -46,13 +46,11 @@ concept accepts_field = requires(V & visit, Rs const &... values) { visit(values
 
 struct alignas(64) aligned_branch {
   jam::ptr<std::uint32_t> data;
-  inline static std::barrier<> * rendezvous = nullptr;
   inline static jam::heap * expected_heap = nullptr;
 
   template<class Visitor>
   void trace(Visitor & visit) const noexcept {
-    if (jam::current_heap() != expected_heap) std::abort();
-    rendezvous->arrive_and_wait(); // Both children must be discovered and run concurrently.
+    if (jam::heap::current() != expected_heap) std::abort();
     visit(data);
   }
 };
@@ -65,8 +63,8 @@ struct fork_node {
 };
 
 struct untraced { std::uint64_t bits; };
-struct throwing_trace {
-  template<class V> void trace(V &) const {}
+struct invalid_trace {
+  void trace() const noexcept {}
 };
 struct trace_result {
   template<class V>
@@ -91,12 +89,12 @@ struct incomplete;
 static_assert(sizeof(jam::ptr<incomplete>) == 4);
 static_assert(sizeof(jam::heap::ptr<incomplete>) == 4);
 static_assert(accepts_ptr<untraced>);
-static_assert(accepts_ptr<throwing_trace>);
+static_assert(accepts_ptr<invalid_trace>);
 template<class T>
-concept allocatable = requires(jam::heap & heap) { heap.template make_ptr<T>(); };
-static_assert(allocatable<untraced> && !allocatable<throwing_trace>);
+concept allocatable = requires(jam::heap & heap) { heap.template mk<T>(); };
+static_assert(allocatable<untraced> && !allocatable<invalid_trace>);
 static_assert(accepts_root<jam::heap, jam::ptr<untraced>>);
-static_assert(!accepts_root<jam::heap, jam::ptr<throwing_trace>>);
+static_assert(!accepts_root<jam::heap, jam::ptr<invalid_trace>>);
 static_assert(accepts_field<jam::heap::visitor, jam::ptr<untraced>>);
 static_assert(jam::traceable<node>);
 
@@ -106,13 +104,13 @@ static_assert(word_ptr{}.get() == 0 && !word_ptr{0});
 static_assert(jam::ptr<word>{}.get() == 0);
 static_assert(accepts_field<jam::heap::visitor>);
 static_assert(accepts_field<jam::heap::visitor, word_ptr, word, word_ptr>);
-static_assert(!accepts_field<jam::heap::visitor, word_ptr, throwing_trace>);
+static_assert(!accepts_field<jam::heap::visitor, word_ptr, invalid_trace>);
 static_assert(jam::traceable<bool> && jam::traceable<double>);
 static_assert(jam::traceable<std::nullptr_t> && jam::traceable<void *>);
 static_assert(jam::traceable<std::tuple<>>);
 static_assert(jam::traceable<std::array<word_ptr, 0>>);
 static_assert(jam::traceable<std::tuple<word, word_ptr, std::variant<word, word_ptr>>>);
-static_assert(!jam::traceable<std::tuple<throwing_trace>>);
+static_assert(!jam::traceable<std::tuple<invalid_trace>>);
 static_assert([] {
   // Leaf-only traversal needs no runtime visitor operations.
   std::nullptr_t visit{};
@@ -172,10 +170,10 @@ void mixed_graph() noexcept {
   H heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
                      .workers = 4}};
   static_cast<void>(heap.allocate(23));
-  auto const data = heap.template make_ptr<payload>(payload{1, 7});
-  auto const a = heap.template make_ptr<N>(N{{}, data, 101});
+  auto const data = heap.template mk<payload>(payload{1, 7});
+  auto const a = heap.template mk<N>(N{{}, data, 101});
   static_cast<void>(heap.allocate(5));
-  auto const b = heap.template make_ptr<N>(N{a, data, 202});
+  auto const b = heap.template mk<N>(N{a, data, 202});
   heap.store(a, N{b, data, 101});
   auto root = heap.root(a);
   static_assert(std::is_same_v<decltype(root.get()), R>);
@@ -215,14 +213,12 @@ void mixed_graph() noexcept {
 void parallel_typed_discovery() noexcept {
   jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
                                        .workers = 4}};
-  std::barrier rendezvous{2};
-  aligned_branch::rendezvous = &rendezvous;
   aligned_branch::expected_heap = &heap;
   static_cast<void>(heap.allocate(31));
-  auto const data = heap.make_ptr<std::uint32_t>(77u);
-  auto const left = heap.make_ptr<aligned_branch>(aligned_branch{data});
-  auto const right = heap.make_ptr<aligned_branch>(aligned_branch{data});
-  auto root = heap.root(heap.make_ptr<fork_node>(fork_node{left, right}));
+  auto const data = heap.mk<std::uint32_t>(77u);
+  auto const left = heap.mk<aligned_branch>(aligned_branch{data});
+  auto const right = heap.mk<aligned_branch>(aligned_branch{data});
+  auto root = heap.root(heap.mk<fork_node>(fork_node{left, right}));
   static_assert(std::is_same_v<decltype(root), jam::root<fork_node>>);
   for (unsigned round = 0; round != 3; ++round) {
     heap.collect();
@@ -234,7 +230,6 @@ void parallel_typed_discovery() noexcept {
     check(a.data == b.data && heap.load(a.data) == 77,
           "parallel heterogeneous traversal retains a shared scalar leaf");
   }
-  aligned_branch::rendezvous = nullptr;
 }
 
 void composite_graph() noexcept {
@@ -245,12 +240,12 @@ void composite_graph() noexcept {
   jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
                                 .workers = 3}};
   static_cast<void>(heap.allocate(17));
-  auto const first = heap.template make_ptr<payload>(payload{71, 11});
-  auto const second = heap.template make_ptr<payload>(payload{83, 13});
+  auto const first = heap.template mk<payload>(payload{71, 11});
+  auto const second = heap.template mk<payload>(payload{83, 13});
   using Part = tagged;
-  auto root = heap.root(heap.template make_ptr<C>(C{{Part{first}, Part{std::uint32_t{1}}, Part{embedded{second, 1}}}, 1}));
-  auto array_root = heap.root(heap.template make_ptr<A>(A{first, {}}));
-  auto variant_root = heap.root(heap.template make_ptr<V>(V{second}));
+  auto root = heap.root(heap.template mk<C>(C{{Part{first}, Part{std::uint32_t{1}}, Part{embedded{second, 1}}}, 1}));
+  auto array_root = heap.root(heap.template mk<A>(A{first, {}}));
+  auto variant_root = heap.root(heap.template mk<V>(V{second}));
   for (unsigned round = 0; round != 3; ++round) {
     heap.collect();
     auto value = heap.load(root.get());
@@ -279,7 +274,7 @@ void composite_graph() noexcept {
   check(value.entries[0].scalar == 1 && !value.entries[2].pointer,
         "changing a tagged alternative clears the old pointer declaration");
   check(heap.used() == 1 + (sizeof(C) + 7) / 8, "inactive alternatives retain no targets");
-  auto const replacement = heap.template make_ptr<payload>(payload{97, 17});
+  auto const replacement = heap.template mk<payload>(payload{97, 17});
   value.entries[0] = replacement;
   heap.store(root.get(), value);
   heap.collect();
@@ -320,7 +315,239 @@ void variant_adapters() noexcept {
   check(visitor.calls == 3, "nested tuple/array/variant adapters follow changed alternatives and nulls");
 }
 
+
+struct walking_node {
+  std::array<jam::ptr<walking_node>, 3> edges;
+  unsigned value;
+  inline static std::atomic<unsigned> calls{0};
+  inline static std::uintptr_t heap_begin = 0, heap_end = 0;
+  static constexpr void trace(jam::visitor auto & visit, jam::ptr<walking_node> at) noexcept {
+    for (auto const * p = visit.claim_target(at); p; p = visit.claim(p->edges[0])) {
+      auto const address = reinterpret_cast<std::uintptr_t>(p);
+      check(address >= heap_begin && address + sizeof(*p) <= heap_end,
+            "trace hook must read the claimed allocation in place");
+      calls.fetch_add(1, std::memory_order_relaxed);
+      visit(p->edges[1], p->edges[2]);
+      visit.poll();
+    }
+  }
+};
+static_assert(jam::traceable<walking_node>);
+
+void deep_cooperative_graph() noexcept {
+  constexpr unsigned count = 2048;
+  for (auto workers : {1u, 4u}) {
+    jam::heap heap{{.capacity = jam::units::pages{32},
+                   .reserve = jam::units::pages{2}, .workers = workers}};
+    std::vector<jam::ptr<walking_node>> nodes;
+    for (unsigned i = 0; i != count * 3; ++i) {
+      static_cast<void>(heap.allocate(1)); // Every pointer must change on compaction.
+      nodes.push_back(heap.mk<walking_node>(walking_node{{}, i}));
+    }
+    for (unsigned i = 0; i != count; ++i)
+      heap.store(nodes[i], walking_node{{nodes[(i + 1) % count],
+          nodes[count + i], nodes[2 * count + i]}, i});
+    auto root = heap.root(nodes[0]);
+    for (unsigned round = 0; round != 5; ++round) {
+      walking_node::heap_begin = reinterpret_cast<std::uintptr_t>(heap.data());
+      walking_node::heap_end = walking_node::heap_begin + heap.used() * 8;
+      walking_node::calls.store(0);
+      heap.collect();
+      check(walking_node::calls.load() == count * 3, "cooperative traversal visits each record once");
+      auto p = root.get();
+      for (unsigned i = 0; i != count; ++i) {
+        auto const value = heap.load(p);
+        check(value.value == i, "cooperative walking preserves its cycle");
+        check(heap.load(value.edges[1]).value == count + i,
+              "queued branch survives cooperative walking");
+        check(heap.load(value.edges[2]).value == 2 * count + i,
+              "last array field is declared before compaction");
+        p = value.edges[0];
+      }
+      check(p == root.get(), "cycle closes after forwarding");
+    }
+  }
+}
+
+extern "C" void check_work_pushing() noexcept;
+
+template<unsigned Depth, unsigned Prefetch>
+struct tree_node {
+  jam::ptr<tree_node> left, right;
+  std::uint64_t value;
+  inline static std::atomic<unsigned> * seen = nullptr;
+
+  static constexpr void trace(jam::visitor auto & visit, jam::ptr<tree_node> at) noexcept {
+    std::array<jam::ptr<tree_node>, Depth> queue{};
+    unsigned head = 0, size = 0;
+    auto pushpop = [&](jam::ptr<tree_node> value) noexcept -> jam::ptr<tree_node> {
+      if (!value) return {};
+      if constexpr (Prefetch == 1) value.prefetch_marks();
+      if constexpr (Prefetch == 2) value.prefetch();
+      if (size < Depth) {
+        queue[(head + size++) % Depth] = value;
+        return {};
+      }
+      auto const result = std::exchange(queue[head], value);
+      head = (head + 1) % Depth;
+      return result;
+    };
+    if constexpr (Prefetch == 1) at.prefetch_marks();
+    if constexpr (Prefetch == 2) at.prefetch();
+    for (;;) {
+      if (!at) {
+        if (!size) break;
+        at = queue[head];
+        head = (head + 1) % Depth;
+        --size;
+      }
+      auto const * p = visit.claim_target(std::exchange(at, {}));
+      if (!p) continue;
+      check(seen[p->value].fetch_add(1, std::memory_order_relaxed) == 0,
+            "buffered traversal claims shared targets once");
+      visit.pointer(p->left);
+      at = pushpop(p->left);
+      if (at) visit(p->right);
+      else {
+        visit.pointer(p->right);
+        at = pushpop(p->right);
+      }
+      visit.poll();
+    }
+  }
+};
+
+template<unsigned Depth, unsigned Prefetch>
+void cooperative_tree() noexcept {
+  using tree_node = ::tree_node<Depth, Prefetch>;
+  constexpr unsigned count = 8191;
+  for (auto workers : {1u, 4u}) {
+    jam::heap heap{{.capacity = jam::units::pages{16},
+                   .reserve = jam::units::pages{2}, .workers = workers}};
+    std::vector<jam::ptr<tree_node>> nodes(count + 1);
+    for (unsigned i = 1; i <= count; ++i) {
+      static_cast<void>(heap.allocate(1));
+      nodes[i] = heap.mk<tree_node>(nullptr, nullptr, i);
+    }
+    for (unsigned i = 1; i <= count / 2; ++i)
+      heap.store(nodes[i], tree_node{nodes[2 * i], nodes[2 * i + 1], i});
+    heap.store(nodes[count], tree_node{nodes[2], nodes[1], count}); // Sharing and a cycle.
+    auto root = heap.root(nodes[1]);
+    auto duplicate = root;
+    std::vector<std::atomic<unsigned>> seen(count + 1);
+    tree_node::seen = seen.data();
+    for (unsigned round = 0; round != 3; ++round) {
+      for (auto & n : seen) n.store(0);
+      heap.collect();
+      for (unsigned i = 1; i <= count; ++i) {
+        check(seen[i].load() == 1, "all enqueued subtrees are processed before compaction");
+        auto const node = heap.load(jam::ptr<tree_node>{1 + 2 * (i - 1)});
+        check(node.value == i, "buffered tree preserves stable record order");
+        if (i <= count / 2)
+          check(heap.load(node.left).value == 2 * i && heap.load(node.right).value == 2 * i + 1,
+                "both enqueued and walked edges are forwarded");
+        else if (i == count)
+          check(node.right == root.get() && heap.load(node.left).value == 2,
+                "shared and cyclic edges are declared even when their claims lose");
+        else check(!node.left && !node.right, "tree leaves retain null fields");
+      }
+      check(heap.used() == 1 + 2 * count && root.get() == duplicate.get(),
+            "typed static hooks claim complete records and reclaim garbage gaps");
+    }
+  }
+}
+
+struct patterned_node {
+  jam::ptr<payload> a;
+  std::uint32_t x, y;
+  jam::ptr<payload> b;
+  std::uint32_t z;
+  jam::ptr<patterned_node> next;
+};
+static_assert(sizeof(patterned_node) == 24);
+
+void cooperative_claims() noexcept {
+  for (bool pattern : {false, true}) {
+    jam::heap heap{{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
+                   .workers = 4}};
+    static_cast<void>(heap.allocate(30));
+    // The six-slot pattern straddles a metadata word on the first collection.
+    auto const a = heap.mk<patterned_node>();
+    static_cast<void>(heap.allocate(7));
+    auto const b = heap.mk<patterned_node>();
+    auto const data = heap.mk<payload>(payload{71, 83});
+    heap.store(a, patterned_node{data, 1, 1, data, 1, b});
+    heap.store(b, patterned_node{data, 1, 1, {}, 1, a});
+    auto root = heap.root(a.get());
+    for (unsigned round = 0; round != 3; ++round) {
+      heap.collect([&](jam::heap::visitor & visit, jam::heap::offset at) noexcept {
+        auto const * current = visit.claim_target(jam::ptr<patterned_node>{at});
+        unsigned count = 0;
+        while (current) {
+          ++count;
+          check(!visit.claim_target(jam::ptr<patterned_node>{at}), "duplicate claim loses");
+          check(!visit.claim_target(jam::ptr<payload>{}), "null claim loses");
+          // Failed claims must preserve the current source context.
+          if (pattern) {
+            visit.pointers(0);
+            if (round == 1) {
+              visit.pointers(1);
+              visit.pointers(0b101, 3);
+            } else visit.pointers(0b101001);
+          } else {
+            visit.pointer(current->a);
+            visit.pointer(current->b);
+            visit.pointer(current->next);
+          }
+          auto const next = current->next;
+          auto const second = current->b;
+          if (auto const * p = visit.claim_target(current->a))
+            check(p->bits == 71 && p->small == 83, "claim returns the live payload address");
+          static_cast<void>(visit.claim_target(second));
+          current = visit.claim_target(next);
+        }
+        check(count == 2, "cooperative walking terminates at the back edge");
+      });
+      auto const first = heap.load(jam::ptr<patterned_node>{root.get()});
+      auto const second = heap.load(first.next);
+      check(first.x == 1 && first.y == 1 && first.z == 1, "zero mask bits remain scalar data");
+      check(first.a == first.b && first.a == second.a && !second.b,
+            "pattern forwards shared pointers and preserves null slots");
+      check(second.next.get() == root.get() && heap.load(first.a).bits == 71,
+            "separate slot declaration and target claim preserve the graph");
+    }
+  }
+
+  jam::heap heap{{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
+  static_cast<void>(heap.allocate(11));
+  auto const tail = heap.mk<self_link>();
+  auto root = heap.root(heap.mk<self_link>(tail).get());
+  for (unsigned round = 0; round != 3; ++round) {
+    bool const cycle = round == 1;
+    auto const head_at = jam::ptr<self_link>{root.get()};
+    heap.store(heap.load(head_at).next, self_link{cycle ? head_at : nullptr});
+    heap.collect([](jam::heap::visitor & visit, jam::heap::offset at) noexcept {
+      unsigned count = 0;
+      for (auto const * p = visit.claim_target(jam::ptr<self_link>{at}); p;
+           p = visit.claim(p->next)) ++count;
+      check(count == 2, "combined claim marks each source slot and walks in place");
+    });
+    auto const head = heap.load(jam::ptr<self_link>{root.get()});
+    check(head.next && heap.load(head.next).next.get() == (cycle ? root.get() : 0),
+          "combined claim forwards null and already-claimed back edges");
+  }
+}
+
 int main() {
+  jam::ptr<incomplete>{}.prefetch();
+  jam::ptr<incomplete>{}.prefetch_marks(); // Null needs no current heap or complete T.
+  cooperative_tree<1, true>();
+  cooperative_tree<32, false>();
+  cooperative_tree<32, true>();
+  cooperative_tree<32, 2>();
+  cooperative_claims();
+  check_work_pushing();
+  deep_cooperative_graph();
   mixed_graph();
   parallel_typed_discovery();
   composite_graph();

@@ -294,6 +294,7 @@ namespace jam {
 
 export class heap;
 export template<class T> class root;
+export template<class T> class ptr;
 
 /// \brief A visitor for jam's compressed, alignment-preserving heap.
 /// \ingroup jam_heap
@@ -313,15 +314,12 @@ template<class T, class H = heap>
 concept member_trace = requires(T & value, typename H::visitor & visit) {
   value.trace(visit);
 };
+template<class T, class H = heap>
+concept cooperative_trace = requires(typename H::visitor & visit, ptr<T> at) {
+  T::trace(visit, at);
+};
 template<class T>
-concept has_trace = requires { &T::trace; } || member_trace<T>;
-}
-
-/// \brief Read the current thread's dynamically bound heap.
-/// Implicit operations require an active heap_scope. Binding stores invalidate
-/// this pure accessor; it is not const and may change between scopes.
-export native_nodiscard native_pure inline heap * current_heap() noexcept {
-  return detail::active_heap;
+concept has_trace = requires { &T::trace; } || member_trace<T> || cooperative_trace<T>;
 }
 
 /// \brief Bind an existing heap, restoring the previous binding on scope exit.
@@ -332,9 +330,7 @@ export class heap_scope {
   heap * previous;
 public:
   /// \brief Use the supplied heap for implicit operations on this thread.
-  explicit inline heap_scope(heap & arena) noexcept : previous(current_heap()) {
-    detail::active_heap = &arena;
-  }
+  explicit inline heap_scope(heap & arena) noexcept;
   /// \brief Restore the binding saved at construction.
   inline ~heap_scope() noexcept { detail::active_heap = previous; }
   heap_scope(heap_scope const &) = delete;
@@ -360,18 +356,24 @@ struct leaf {
 export template<class T>
 struct tracer : leaf<T> {};
 
-/// \brief Walk a value through its member hook, without claiming another allocation.
+/// \brief Forward a value hook or a cooperative allocation hook.
 /// \ingroup jam_heap
 /// Visit each live ptr by reference from the supplied value. Nested values share
-/// the enclosing allocation's pointer mask. All paths must be noexcept.
+/// the enclosing allocation's pointer mask. Static trace(visit, ptr<T>) owns
+/// allocation claiming and may walk directly between records.
 export template<class T> requires detail::has_trace<T>
 struct tracer<T> {
   /// \brief Enumerate a value's parts and forward its member hook's result.
   template<class Visitor>
-  static constexpr auto trace(Visitor & visit, T const & value) noexcept
-      -> decltype(value.trace(visit))
-      requires requires { { value.trace(visit) } noexcept; } {
+  static constexpr auto trace(Visitor & visit, T const & value)
+      noexcept(noexcept(value.trace(visit))) -> decltype(value.trace(visit)) {
     return value.trace(visit);
+  }
+  /// \brief Forward an unclaimed target to its cooperative static hook.
+  template<class Visitor>
+  static constexpr decltype(auto) trace(Visitor & visit, ptr<T> at) noexcept
+      requires requires { T::trace(visit, at); } {
+    return T::trace(visit, at);
   }
 };
 
@@ -379,11 +381,14 @@ namespace detail {
 template<class T, class H>
 concept traceable_in = requires(T const & value, typename H::visitor & visit) {
   sizeof(T);
-  { tracer<T>::trace(visit, value) } noexcept;
+  tracer<T>::trace(visit, value);
+} || requires(ptr<T> at, typename H::visitor & visit) {
+  sizeof(T);
+  tracer<T>::trace(visit, at);
 };
 }
 
-/// \brief T supports noexcept tracing after it is complete.
+/// \brief T supports tracing after it is complete.
 /// \ingroup jam_heap
 /// Return types are unrestricted; collection currently uses the hook's effects.
 export template<class T>
@@ -418,8 +423,10 @@ public:
   /// \brief Name a record start in the matching heap; the caller supplies its type.
   explicit constexpr ptr(offset at) noexcept : position(at) {}
   /// \brief Read the cell offset; unregistered copies expire on collection.
-  native_nodiscard constexpr offset get() const noexcept { return position; }
+  native_nodiscard native_inline native_pure
+  constexpr offset get() const noexcept { return position; }
   /// \brief Whether the reference is nonnull.
+  native_inline native_pure
   explicit constexpr operator bool() const noexcept {
     return position != 0;
   }
@@ -428,6 +435,14 @@ public:
   native_nodiscard T * operator->() const noexcept;
   /// \brief Borrow the target in the current heap.
   native_nodiscard T & operator*() const noexcept;
+  /// \brief Prefetch the target's mark metadata without claiming or reading it.
+  /// Null does nothing, even without a current heap. Nonnull pointers must belong
+  /// to the current heap. This cache hint provides no synchronization.
+  native_inline void prefetch_marks() const noexcept;
+  /// \brief Prefetch the cache line containing the target's first byte for reading.
+  /// Null does nothing, even without a current heap. Nonnull pointers must belong
+  /// to the current heap. No target is claimed or dereferenced.
+  native_inline void prefetch() const noexcept;
   /// \brief Order offsets within one heap; forwarding preserves surviving order.
   /// Compare fresh pointers after collection; unregistered copies still expire.
   constexpr auto operator<=>(ptr const &) const noexcept = default;
@@ -438,20 +453,32 @@ template<class T> inline constexpr bool is_ptr = false;
 template<class T> inline constexpr bool is_ptr<ptr<T>> = true;
 template<class T, class Visitor>
 concept visits = requires(Visitor & visit, std::remove_reference_t<T> const & value) {
-  { tracer<std::remove_cvref_t<T>>::trace(visit, value) } noexcept;
+  tracer<std::remove_cvref_t<T>>::trace(visit, value);
 };
 }
 
-/// \brief Tag a reference slot and queue its target for allocation tracing.
+/// \brief Tag a reference slot and enqueue its target.
 /// \ingroup jam_heap
 export template<class T>
 struct tracer<ptr<T>> {
   /// \brief Preserve the field address and dispatch to the matching heap visitor.
   template<visitor Visitor>
-  static constexpr void trace(Visitor & visit, ptr<T> const & value) noexcept {
+  static constexpr void trace(Visitor & visit, ptr<T> const & value)
+      noexcept(noexcept(visit(value))) {
     visit(value);
   }
 };
+
+namespace detail {
+template<class Visitor, class... Ts>
+constexpr void trace_parts(Visitor & visit, Ts const &... values) noexcept {
+  auto part = [&](auto const & value) constexpr noexcept {
+    if constexpr (requires { visit(value); }) visit(value);
+    else tracer<std::remove_cvref_t<decltype(value)>>::trace(visit, value);
+  };
+  (part(values), ...);
+}
+}
 
 /// \brief Visit each tuple element in the enclosing allocation.
 /// \ingroup jam_heap
@@ -459,10 +486,10 @@ export template<class... Ts>
 struct tracer<std::tuple<Ts...>> {
   /// \brief Tuple views retain their elements' original addresses.
   template<class Visitor>
-  static constexpr void trace(Visitor & visit, std::tuple<Ts...> const & value) noexcept
+  static constexpr void trace(Visitor & visit, std::tuple<Ts...> const & value)
       requires (detail::visits<Ts, Visitor> && ...) {
-    std::apply([&](auto const &... part) noexcept {
-      (static_cast<void>(tracer<std::remove_cvref_t<decltype(part)>>::trace(visit, part)), ...);
+    std::apply([&](auto const &... part) constexpr {
+      detail::trace_parts(visit, part...);
     }, value);
   }
 };
@@ -471,11 +498,11 @@ struct tracer<std::tuple<Ts...>> {
 /// \ingroup jam_heap
 export template<class T, std::size_t N>
 struct tracer<std::array<T, N>> {
-  /// \brief Preserve element addresses; empty arrays contain no fields.
+  /// \brief Visit elements in order, preserving their original addresses.
   template<class Visitor>
-  static constexpr void trace(Visitor & visit, std::array<T, N> const & value) noexcept
+  static constexpr void trace(Visitor & visit, std::array<T, N> const & value)
       requires detail::visits<T, Visitor> {
-    for (auto const & part : value) tracer<std::remove_cv_t<T>>::trace(visit, part);
+    for (auto const & part : value) detail::trace_parts(visit, part);
   }
 };
 
@@ -485,11 +512,11 @@ export template<class... Ts>
 struct tracer<std::variant<Ts...>> {
   /// \brief A valueless variant has no outgoing managed fields.
   template<class Visitor>
-  static constexpr void trace(Visitor & visit, std::variant<Ts...> const & value) noexcept
+  static constexpr void trace(Visitor & visit, std::variant<Ts...> const & value)
       requires (detail::visits<Ts, Visitor> && ...) {
     if (value.valueless_by_exception()) return;
-    std::visit([&](auto const & part) noexcept {
-      tracer<std::remove_cvref_t<decltype(part)>>::trace(visit, part);
+    std::visit([&](auto const & part) constexpr {
+      detail::trace_parts(visit, part);
     }, value);
   }
 };
@@ -517,8 +544,15 @@ export struct heap_options {
  * mutation, allocation, or inspecting metadata. Borrows expire on movement.
  */
 export class heap {
+  template<class T> friend class ptr;
 
 public:
+  /// \brief Read the current thread's dynamically bound heap.
+  /// Implicit operations require an active heap_scope. Binding stores invalidate
+  /// this pure accessor; it is not const and may change between scopes.
+  native_nodiscard native_pure native_inline
+  static heap * current() noexcept { return detail::active_heap; }
+
   /// \brief Eight-byte allocation cell. \ingroup jam_heap
   using word = std::uint64_t;
   /// \brief Stored reference, in eight-byte units from data(). \ingroup jam_heap
@@ -544,7 +578,7 @@ public:
   class visitor;
 
 private:
-  using trace_function = void (*)(visitor &, offset) noexcept;
+  using trace_function = void (*)(visitor &, offset);
   struct trace_job { offset at; trace_function trace; };
 
 public:
@@ -638,7 +672,6 @@ public:
     std::size_t worker;
     void const * record = nullptr;
     std::size_t record_bytes = 0;
-    offset record_at = 0;
     visitor(heap & h, detail::frontier<trace_job> & tasks, std::size_t id) noexcept
         : arena(h), pending(tasks), worker(id) {}
 
@@ -649,14 +682,70 @@ public:
     visitor & operator=(visitor const &) = delete;
     /// \brief Claim a complete record; exactly one marker wins traversal.
     /// \pre All tracers agree on disjoint record starts, extents and alignments.
-    native_nodiscard bool claim(offset start, std::size_t words = 1,
+    native_nodiscard native_inline bool claim(offset start, std::size_t words = 1,
                                std::size_t alignment_bytes = 8) noexcept {
       return arena.claim(start, words, alignment_bytes);
+    }
+    /// \brief Claim a typed target without declaring the pointer's source slot.
+    /// \return Its in-place address, or nullptr for null or an earlier claim.
+    /// A successful claim makes this the current record for pointer declarations.
+    /// Decorate its outgoing slots before claiming another target. Failure leaves
+    /// the current record unchanged; the returned address cannot escape marking.
+    template<class T>
+    native_nodiscard native_inline T const * claim_target(ptr<T> value) noexcept {
+      heap::require_record<T>();
+      if (!value || !claim(value.get(), record_words<T>, std::max(alignof(T), sizeof(word))))
+        return nullptr;
+      auto const * result = arena.template record_address<T>(value.get());
+      record = result;
+      record_bytes = sizeof(T);
+      return result;
+    }
+    /// \brief Declare one pointer slot without following or claiming its target.
+    /// \pre The field is a subobject of the current successfully claimed record.
+    template<class T>
+    native_inline void pointer(ptr<T> const & value) noexcept {
+      auto const address = reinterpret_cast<std::uintptr_t>(&value);
+      auto const begin = reinterpret_cast<std::uintptr_t>(record);
+      auto const delta = address - begin;
+      if (!record || address < begin || record_bytes < sizeof(offset)
+          || delta > record_bytes - sizeof(offset) || delta % sizeof(offset))
+        detail::heap_failure("typed visitor requires a field in its tracing value");
+      auto const heap_delta = address - reinterpret_cast<std::uintptr_t>(arena.data());
+      arena.pointer(static_cast<offset>(heap_delta / sizeof(word)),
+                    static_cast<unsigned>((heap_delta % sizeof(word)) / sizeof(offset)));
+    }
+    /// \brief OR a pattern of pointer slots into the current record's metadata.
+    /// Bit zero names the 32-bit slot at first_slot, relative to the record start.
+    /// Zero bits leave existing declarations unchanged. No targets are claimed.
+    /// \pre Every set bit names a complete managed pointer field in this record.
+    native_inline void pointers(word bits, std::size_t first_slot = 0) noexcept {
+      if (!bits) return;
+      auto const slots = record_bytes / sizeof(offset);
+      if (!record || first_slot > slots
+          || static_cast<std::size_t>(std::bit_width(bits)) > slots - first_slot)
+        detail::heap_failure("pointer pattern exceeds its tracing value");
+      auto const slot = (reinterpret_cast<std::uintptr_t>(record)
+          - reinterpret_cast<std::uintptr_t>(arena.data())) / sizeof(offset) + first_slot;
+      constexpr auto width = block_words * fields_per_word;
+      auto const shift = slot % width;
+      std::atomic_ref<word>{arena.metadata[slot / width].pointers}
+          .fetch_or(bits << shift, std::memory_order_relaxed);
+      if (shift && (bits >> (width - shift)))
+        std::atomic_ref<word>{arena.metadata[slot / width + 1].pointers}
+            .fetch_or(bits >> (width - shift), std::memory_order_relaxed);
+    }
+    /// \brief Declare a pointer slot, then claim its target as with claim_target().
+    /// Null and already-claimed targets still have their source slot declared.
+    template<class T>
+    native_nodiscard native_inline T const * claim(ptr<T> const & value) noexcept {
+      pointer(value);
+      return claim_target(value);
     }
     /// \brief Declare a managed field and enqueue its nonnull target for tracing.
     /// \return The stored offset, usable until compaction starts.
     /// \pre The field belongs to the complete record just successfully claimed.
-    offset field(offset cell, unsigned slot = 0) noexcept {
+    native_inline offset field(offset cell, unsigned slot = 0) noexcept {
       arena.pointer(cell, slot);
       auto const target = arena.field(cell, slot);
       if (target != null) pending.push(worker, {target, nullptr});
@@ -664,38 +753,34 @@ public:
     }
     /// \brief Walk an embedded value without claiming cells again.
     /// Parts share the current allocation's pointer mask. Tuple views may name
-    /// those parts, but ptr fields must retain their original snapshot addresses.
+    /// those parts, but ptr fields must retain their original heap addresses.
     template<class T>
-    void operator()(T const & value) noexcept
-        requires (!detail::is_ptr<T>) && traceable<T> {
+    native_inline void operator()(T const & value) noexcept
+        requires (!detail::is_ptr<T>) && detail::visits<T, visitor> {
       tracer<T>::trace(*this, value);
     }
-    /// \brief Declare a typed field and queue the target's own tracer.
+    /// \brief Declare a typed field and enqueue its nonnull target.
     /// \pre The field is a subobject of the supplied tracing value, not a copy.
     /// The field's type supplies both its width and target type. A null field is
-    /// declared but queues no work. The return value expires on collection.
+    /// declared but follows no target. The return value expires on collection.
     template<class T>
-    ptr<T> operator()(ptr<T> const & value) noexcept {
+    native_inline ptr<T> operator()(ptr<T> const & value) noexcept {
       // Defer target validation until use: deducing a recursive member hook's
       // return type must not require that hook's own traceable constraint.
-      static_assert(traceable<T>, "reference target must support noexcept tracing");
-      auto const address = reinterpret_cast<std::uintptr_t>(&value);
-      auto const begin = reinterpret_cast<std::uintptr_t>(record);
-      auto const delta = address - begin;
-      if (!record || address < begin || record_bytes < sizeof(offset)
-          || delta > record_bytes - sizeof(offset) || delta % sizeof(offset))
-        detail::heap_failure("typed visitor requires a field in its tracing value");
-      arena.pointer(static_cast<offset>(record_at + delta / sizeof(word)),
-                    static_cast<unsigned>((delta % sizeof(word)) / sizeof(offset)));
+      static_assert(traceable<T>, "reference target must support tracing");
+      pointer(value);
       if (value) pending.push(worker, {value.get(), &heap::template trace_record<T>});
       return value;
     }
     /// \brief Visit parts in order, preserving their addresses; an empty pack does nothing.
     template<class... Ts>
-    void operator()(Ts const &... values) noexcept
-        requires (sizeof...(Ts) != 1) && (traceable<Ts> && ...) {
-      (static_cast<void>((*this)(values)), ...);
+    native_inline void operator()(Ts const &... values) noexcept
+        requires (sizeof...(Ts) != 1) && (detail::visits<Ts, visitor> && ...) {
+      detail::trace_parts(*this, values...);
     }
+    /// \brief Service overdue stochastic donations without leaving this walker.
+    /// Long cooperative hooks should poll periodically after enqueueing branches.
+    native_inline void poll() noexcept { pending.communicate(worker); }
   };
 
 private:
@@ -711,21 +796,27 @@ private:
     static_assert(alignof(T) <= 64, "record alignment exceeds 64 bytes");
   }
 
+  // The mutator or the unique successful marker owns typed lifetime restoration.
+  // Marking never changes mappings; no payload copy or stack snapshot is needed.
+  template<class T>
+  native_inline T * record_address(offset at) noexcept {
+    require_record<T>();
+    assert(at && at < cursor && record_words<T> <= cursor - at);
+    auto * p = data() + at;
+    // As in typed mutator access, memmove starts implicit object lifetimes after
+    // VM remapping or cell relocation. The self-copy is optimized away.
+    return static_cast<T *>(std::memmove(p, p, sizeof(T)));
+  }
+
   template<class T>
   static void trace_record(visitor & visit, offset at) noexcept {
     require_record<T>();
-    static_assert(traceable<T>,
-                  "tracing hooks must be noexcept and accept the heap visitor");
-    if (!visit.claim(at, record_words<T>, std::max(alignof(T), sizeof(word)))) return;
-    if constexpr (!std::is_base_of_v<leaf<T>, tracer<T>>) {
-      // A typed snapshot gives fields real C++ lifetimes despite VM alias
-      // changes and cell-wise relocation. Field addresses map back to this record.
-      auto const value = visit.arena.load(ptr<T>{at});
-      visit.record = &value;
-      visit.record_bytes = sizeof(T);
-      visit.record_at = at;
-      tracer<T>::trace(visit, value);
-      visit.record = nullptr;
+    static_assert(traceable<T>, "tracing hooks must accept the heap visitor");
+    if constexpr (requires { tracer<T>::trace(visit, ptr<T>{at}); }) {
+      // Cooperative hooks receive an unclaimed entry and own the walk.
+      tracer<T>::trace(visit, ptr<T>{at});
+    } else if (auto const * value = visit.claim_target(ptr<T>{at})) {
+      tracer<T>::trace(visit, *value);
     }
   }
 
@@ -788,20 +879,20 @@ private:
   unsigned flags(std::size_t index) const noexcept {
     return (alignment[index >> 1] >> ((index & 1) * 4)) & 15;
   }
-  void add_flags(std::size_t index, unsigned bits) noexcept {
+  native_inline void add_flags(std::size_t index, unsigned bits) noexcept {
     std::atomic_ref<std::uint8_t>{alignment[index >> 1]}.fetch_or(
         static_cast<std::uint8_t>(bits << ((index & 1) * 4)), std::memory_order_relaxed);
   }
-  void note_record(offset first, std::size_t words, std::size_t bytes) noexcept {
+  native_inline void note_record(offset first, std::size_t words, std::size_t bytes) noexcept {
     assert(std::has_single_bit(bytes) && bytes >= 8 && bytes <= 64);
     assert((static_cast<std::size_t>(first) * 8) % bytes == 0);
     if (!words) return;
     auto const k = std::countr_zero(bytes) - 3;
-    add_flags(first >> block_shift, (1u << k) - 1);
+    if (k) add_flags(first >> block_shift, (1u << k) - 1);
     auto const last = (static_cast<std::size_t>(first) + words - 1) >> block_shift;
     for (auto i = static_cast<std::size_t>(first) >> block_shift; i < last; ++i) add_flags(i, 8);
   }
-  void mark_range(offset first, std::size_t words) noexcept {
+  native_inline void mark_range(offset first, std::size_t words) noexcept {
     while (words != 0) {
       auto const bit = static_cast<std::size_t>(first & (block_words - 1));
       auto const count = std::min(words, block_words - bit);
@@ -918,13 +1009,14 @@ public:
     std::vector<trace_job> initial;
     for (auto hook = roots_head; hook; hook = hook->next)
       if (hook->position != null) initial.push_back({hook->position, hook->trace});
-    detail::frontier<trace_job> pending{policy.workers, initial};
+    auto const marker_count = workers.available_workers();
+    detail::frontier<trace_job> pending{marker_count, initial};
     struct context {
       heap * arena;
       std::remove_reference_t<Trace> * trace;
       detail::frontier<trace_job> * pending;
     } state{this, std::addressof(trace), &pending};
-    workers.run(policy.workers, [](void * raw, std::size_t worker) noexcept {
+    workers.run(marker_count, [](void * raw, std::size_t worker) noexcept {
       auto & state = *static_cast<context *>(raw);
       heap_scope binding{*state.arena};
       visitor visit{*state.arena, *state.pending, worker};
@@ -932,7 +1024,6 @@ public:
       while (state.pending->pop(worker, job)) {
         if (job.trace) job.trace(visit, job.at);
         else std::invoke(*state.trace, visit, job.at);
-        state.pending->complete();
       }
     }, &state);
     compact_impl({});
@@ -944,7 +1035,7 @@ public:
   /// Construct T from the arguments. Register a root before collecting; copies
   /// of the returned ptr do not keep the target alive. Allocation preserves pointers.
   template<class T, class... Args>
-  native_nodiscard ptr<T> make_ptr(Args &&... args) noexcept requires traceable<T> {
+  native_nodiscard ptr<T> mk(Args &&... args) noexcept requires traceable<T> {
     require_record<T>();
     static_assert(noexcept(T{std::forward<Args>(args)...}), "record construction must be noexcept");
     T const value{std::forward<Args>(args)...};
@@ -961,12 +1052,7 @@ public:
   native_nodiscard T * address(ptr<T> at) noexcept requires traceable<T> {
     require_record<T>();
     assert(!collecting);
-    assert(at && at.get() < cursor && record_words<T> <= cursor - at.get());
-    auto * p = data() + at.get();
-    // C++20 memmove starts implicit object lifetimes in the destination region.
-    // The self-copy restores a T lifetime after VM remapping or cell relocation;
-    // compilers remove the physical copy. Typed records have trivial copy ctors.
-    return static_cast<T *>(std::memmove(p, p, sizeof(T)));
+    return record_address<T>(at.get());
   }
   /// \brief Read a typed value snapshot; any pointers in it expire on collection.
   /// \ingroup jam_heap
@@ -1001,7 +1087,8 @@ public:
   native_nodiscard std::size_t page_words() const noexcept { return page_word_count; }
   /// \brief Borrow cells; dereference an offset as data()[offset]. \ingroup jam_heap
   template<class Self>
-  native_nodiscard auto data(this Self & self native_lifetimebound) noexcept
+  native_nodiscard native_inline native_pure
+  auto data(this Self & self native_lifetimebound) noexcept
       -> std::conditional_t<std::is_const_v<Self>, word const, word> * {
     using cell = std::conditional_t<std::is_const_v<Self>, word const, word>;
     return static_cast<cell *>(self.view_base);
@@ -1091,7 +1178,7 @@ public:
    * The start must not be independently marked. A claim is not completion;
    * join all markers before inspecting final marks or compacting.
    */
-  native_nodiscard bool claim(offset first, std::size_t words = 1,
+  native_nodiscard native_inline bool claim(offset first, std::size_t words = 1,
                            std::size_t alignment_bytes = 8) noexcept {
     assert(first != null && words && first < cursor && words <= cursor - first);
     auto const bit = static_cast<bitmap>(bitmap{1} << (first & (block_words - 1)));
@@ -1109,7 +1196,7 @@ public:
    * Declarations survive until the containing cell is reclaimed. Unmarked fields
    * retained solely by dilation are copied as data, never forwarded.
    */
-  void pointer(offset where, unsigned slot = 0) noexcept {
+  native_inline void pointer(offset where, unsigned slot = 0) noexcept {
     assert(where != null && where < cursor && slot < fields_per_word);
     auto const bit = (where & (block_words - 1)) * fields_per_word + slot;
     std::atomic_ref<word>{metadata[where >> block_shift].pointers}
@@ -1241,6 +1328,10 @@ private:
   }
 };
 
+inline heap_scope::heap_scope(heap & arena) noexcept : previous(heap::current()) {
+  detail::active_heap = &arena;
+}
+
 /// \brief A copyable external root, updated during collection.
 /// \ingroup jam_heap
 /// The owning heap must outlive the root. Copy and destruction use that owner,
@@ -1255,7 +1346,7 @@ public:
   root() noexcept = default;
   /// \brief Register a pointer with the current heap.
   /// \pre The pointer belongs to the current heap, which outlives this root.
-  root(ptr<T> value) noexcept requires traceable<T> : root(current_heap()->root(value)) {}
+  root(ptr<T> value) noexcept requires traceable<T> : root(heap::current()->root(value)) {}
   /// \brief Obtain a pointer valid until the next collection.
   native_nodiscard ptr<T> get() const noexcept { return ptr<T>{base::get()}; }
   /// \brief Copy the current pointer; this unrooted copy expires on collection.
@@ -1270,17 +1361,32 @@ public:
 
 /// \brief Allocate a record in the current heap; register a root before collection.
 export template<traceable T, class... Args>
-native_nodiscard ptr<T> make_ptr(Args &&... args) noexcept {
-  return current_heap()->make_ptr<T>(std::forward<Args>(args)...);
+native_nodiscard ptr<T> mk(Args &&... args) noexcept {
+  return heap::current()->mk<T>(std::forward<Args>(args)...);
 }
 
 /// \brief Collect the current heap; only registered roots remain meaningful outside it.
-export inline void collect() noexcept { current_heap()->collect(); }
+export inline void collect() noexcept { heap::current()->collect(); }
 
 template<class T>
 T * ptr<T>::operator->() const noexcept {
-  return current_heap()->address(*this);
+  return heap::current()->address(*this);
 }
 template<class T>
 T & ptr<T>::operator*() const noexcept { return *operator->(); }
+
+template<class T>
+native_inline void ptr<T>::prefetch_marks() const noexcept {
+  if (!position) return;
+  auto const * arena = heap::current();
+  assert(arena && position < arena->cursor);
+  __builtin_prefetch(&arena->metadata[position >> heap::block_shift].live, 0, 3);
+}
+template<class T>
+native_inline void ptr<T>::prefetch() const noexcept {
+  if (!position) return;
+  auto const * arena = heap::current();
+  assert(arena && position < arena->cursor);
+  __builtin_prefetch(arena->view_base + position, 0, 3);
+}
 }

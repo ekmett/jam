@@ -14,3 +14,5 @@ foreach(name IN ITEMS heap heap-mode root typed scope units)
 endforeach()
 
 target_sources(heap-test PRIVATE compactor-checks.cc)
+
+target_sources(typed-test PRIVATE work-checks.cc)

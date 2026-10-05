@@ -36,30 +36,30 @@ void nested_scopes() {
   jam::heap first{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
   jam::heap second{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
   jam::root<node> a, b;
-  auto const previous = jam::current_heap();
+  auto const previous = jam::heap::current();
   {
     jam::heap_scope scope{first};
-    check(jam::current_heap() == &first);
-    a = jam::make_ptr<node>(nullptr, std::uint64_t{41});
-    a = jam::make_ptr<node>(a, std::uint64_t{99});
+    check(jam::heap::current() == &first);
+    a = jam::mk<node>(nullptr, std::uint64_t{41});
+    a = jam::mk<node>(a, std::uint64_t{99});
     a->value += 1;
     check((*a).value == 100 && a->next->value == 41);
     {
       jam::heap_scope nested{second};
-      check(jam::current_heap() == &second);
-      b = jam::make_ptr<node>(nullptr, std::uint64_t{200});
+      check(jam::heap::current() == &second);
+      b = jam::mk<node>(nullptr, std::uint64_t{200});
       auto copy = a; // Registration uses the root's owner, not the current heap.
       copy = {};
       jam::collect();
       check(b->value == 200);
     }
-    check(jam::current_heap() == &first && a->next->value == 41);
+    check(jam::heap::current() == &first && a->next->value == 41);
     static_cast<void>(first.allocate(first.capacity()));
     check(a->value == 100); // Dereference observes the remapped base after growth.
     jam::collect();
     check(a->value == 100 && a->next->value == 41);
   }
-  check(jam::current_heap() == previous);
+  check(jam::heap::current() == previous);
   {
     jam::heap_scope reenter{second};
     check(b->value == 200);
@@ -80,8 +80,8 @@ void nested_scopes() {
 void const_root() {
   heap heap{{.capacity = 8_MiB, .reserve = 1_MiB}};
   heap_scope scope{heap};
-  static_cast<void>(make_ptr<node>());
-  root<node> const root = make_ptr<node>(nullptr, std::uint64_t{23});
+  static_cast<void>(mk<node>());
+  root<node> const root = mk<node>(nullptr, std::uint64_t{23});
   auto copy = root; // Linking another root also updates the const root's hook.
   auto const before = root.get().get();
   collect();
@@ -104,9 +104,9 @@ void collection_boundary(std::size_t workers) {
                              .workers = workers}};
   jam::heap_scope scope{heap};
   static_cast<void>(heap.allocate(heap.page_words()));
-  jam::root const first = jam::make_ptr<node_t>(nullptr, std::uint64_t{11});
+  jam::root const first = jam::mk<node_t>(nullptr, std::uint64_t{11});
   static_cast<void>(heap.allocate(heap.page_words()));
-  jam::root const second = jam::make_ptr<node_t>(first, std::uint64_t{22});
+  jam::root const second = jam::mk<node_t>(first, std::uint64_t{22});
   check(first.get() < second.get() && nullptr < first.get());
   check(first.get() <= second.get() && second.get() > first.get());
   check((first.get() <=> first.get()) == 0);
@@ -117,7 +117,7 @@ void collection_boundary(std::size_t workers) {
   first->value = 101;
   second->value = 202;
   jam::collect();
-  check(jam::current_heap() == &heap && heap.start() != old_start);
+  check(jam::heap::current() == &heap && heap.start() != old_start);
   check(first.get().get() < first_before && second.get().get() < second_before);
   check(first->next == second.get() && second->next == first.get());
   check(first->next->value == 202 && second->next->value == 101);
@@ -137,9 +137,9 @@ void thread_scopes() {
   auto work = [&](std::uint64_t value) {
     jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
     jam::heap_scope scope{heap};
-    jam::root<node> root = jam::make_ptr<node>(nullptr, value);
+    jam::root<node> root = jam::mk<node>(nullptr, value);
     gate.arrive_and_wait();
-    check(jam::current_heap() == &heap && root->value == value);
+    check(jam::heap::current() == &heap && root->value == value);
     jam::collect();
     gate.arrive_and_wait();
     check(root->value == value);

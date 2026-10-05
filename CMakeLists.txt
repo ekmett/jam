@@ -193,7 +193,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_MACRO_EXPANSION YES)
   set(DOXYGEN_EXPAND_ONLY_PREDEF YES)
   set(DOXYGEN_PREDEFINED
-    "native_nodiscard=" "native_pure=" "native_cold=" "native_noreturn="
+    "native_nodiscard=" "native_pure=" "native_inline=inline" "native_cold=" "native_noreturn="
     "native_lifetimebound=" "native_diagnose_if(condition,message)=")
   set(DOXYGEN_EXCLUDE_SYMBOLS "jam::detail" "jam::detail::*")
   set(DOXYGEN_MARKDOWN_ID_STYLE GITHUB)
