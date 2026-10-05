@@ -28,7 +28,7 @@ struct node {
 };
 
 int main() {
-  heap heap{{.capacity = 1_MiB, .reserve = 256_KiB, .workers = 4}};
+  heap heap{{.capacity = 8_MiB, .reserve = 1_MiB, .workers = 4}};
   heap_scope scope{heap};
 
   static_cast<void>(make_ptr<node>());        // Unreachable.
@@ -47,8 +47,9 @@ int main() {
 }
 ```
 
-`import jam.unqualified;` makes jam's public names and byte literals available
-unqualified. Use `import jam;` to keep names in `jam`.
+`import jam.unqualified;` brings `jam` and `jam::units` into scope, including
+byte literals, `pages`, `bytes`, `space_cast` and `ceil`. Use `import jam;`
+to keep names qualified.
 
 `ptr<T>` can name an incomplete type, so recursive records need only their
 member `trace` function. Typed heap operations check `jam::traceable<T>` once
@@ -170,15 +171,39 @@ alignment. Marking and compaction retain alignment groups as needed, and retaine
 neighboring cells count toward the used size.
 
 Constructor options set initial capacity, reserve `N`, and one `workers` limit
-shared by marking and compaction. Capacity and reserve are byte counts;
-`_KiB`, `_MiB` and `_GiB` in `jam::literals` multiply by powers of 1024 at compile
-time and return `std::size_t`. Defaults are 1 MiB capacity
-and 256 KiB reserve. Construction rounds each size up to a native OS page and
-requires the rounded capacity to hold at least twice the rounded reserve.
-Any whole-page capacity is supported. `configuration()` reports the rounded
-initial sizes; the low-level `capacity()` and `reserved()` accessors use cells.
+shared by marking and compaction. Capacity and reserve are `jam::units::pages`.
+The literals in `jam::literals` retain their units: `_B`, `_kB`, `_MB`, `_GB`,
+`_KiB`, `_MiB` and `_GiB`. Defaults are 1 MiB capacity
+and 256 KiB reserve. MiB units convert implicitly to pages; KiB units use
+an explicit ceiling because a KiB is smaller than a page. Use
+`units::ceil<units::pages>(size)` for arbitrary byte counts. The capacity must
+hold at least twice the reserve.
+Any whole-page capacity is supported. `configuration()` reports the initial
+typed page counts; the low-level `capacity()` and `reserved()` accessors use cells.
 `workers` must be positive and includes the calling thread. One persistent
 pool serves both collection phases.
+
+`jam::units::space<Rep, Ratio>` follows `std::chrono::duration`: an explicit
+count constructor, implicit exact unit conversions, `.count()`, arithmetic in
+a common unit and comparisons. `Ratio` measures a unit in bytes. Both integral
+and floating representations are supported; there is no implicit conversion
+to a plain integer. Integer arithmetic and conversions check overflow.
+
+```cpp
+using namespace jam;
+using namespace jam::units;
+
+bytes size = 1536_KiB;
+auto truncated = space_cast<mebibytes>(size); // 1 MiB: truncate toward zero.
+auto reserved = ceil<mebibytes>(size);        // 2 MiB: enough room.
+auto total = 1_MiB + 512_KiB;                 // 1536 KiB.
+auto fractional = space<double, mebi>{size};  // 1.5 MiB.
+```
+
+`floor` rounds downward; `round` chooses the nearest count, with ties to even.
+`pages` has a compile-time ratio determined at configuration. Cross builds set
+`JAM_PAGE_BYTES` explicitly; the heap checks that the running platform matches.
+
 Compaction advances at most the reserved number of source pages past its earliest
 unfinished page.
 Ordinary collections step backward into the reserve through coherent virtual
@@ -196,12 +221,14 @@ operations have the same frozen-heap requirements as `collect`.
 
 ## Build and use
 
-Jam requires macOS or Linux, CMake 3.30+, Ninja and a compiler with C++26 modules.
-Configuration probes the language features used by the implementation. No
-exceptions are enabled; resource failures terminate. Jam uses only native's
-textual [attribute catalog](https://github.com/ekmett/native/blob/a1c56a3e249ff82e711c18d0f8cf308d9eb4b62c/src/native/attributes.h),
-pinned at `a1c56a3e249ff82e711c18d0f8cf308d9eb4b62c`. It does not build native's
-modules or inherit their numerical/compiler policies.
+Jam requires macOS, Linux or Windows 10 version 1803+, CMake 4.4+, Ninja
+and Clang 23+ with C++26 modules.
+Configuration probes the language features used by the implementation.
+Exceptions are enabled. Heap construction throws `std::length_error` above
+32 GiB; resource failures and failures during collection still terminate. Jam links
+[native](https://github.com/ekmett/native), pinned at
+`4f5f6533417b2951b063581a3252c63de0024102`, for CPU/OS capability detection,
+source-targeted SIMD and attributes.
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ \
@@ -211,13 +238,31 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix /path/to/jam
 ```
 
+On Windows, use LLVM 23.1.1 `clang-cl`, its matching `clang-scan-deps` and
+LLD, and a Visual Studio developer shell with the MSVC C++ library and Windows
+SDK. CI uses CMake 4.4.3 and Ninja 1.13.2. Run:
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_LINKER_TYPE=LLD -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Windows uses pagefile sections and `VirtualAlloc2`/`MapViewOfFile3` placeholders.
+Aliases, rotations and resizing retain the original backing without copying
+payloads. Placeholder replacement supports the OS page size (4 KiB on x64),
+including non-power-of-two capacities; 64 KiB allocation granularity does not
+constrain heap capacities. Dead pages receive advisory `MEM_RESET`; a partially
+retained section keeps its commit charge until its final view and handle are
+released. Logical shrinking therefore need not immediately reduce system commit.
+
 The first configure fetches the pinned native source. For an existing checkout
 or an offline build, set `FETCHCONTENT_SOURCE_DIR_JAM_NATIVE=/path/to/native`.
-Installed packages carry the attribute header and module sources; compatible
+Installed packages include native and the module sources; compatible
 consumer BMIs are regenerated by CMake after installation or relocation.
 
 ```cmake
-cmake_minimum_required(VERSION 3.30)
+cmake_minimum_required(VERSION 4.4)
 project(example LANGUAGES CXX)
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(jam CONFIG REQUIRED)
@@ -226,7 +271,7 @@ target_link_libraries(example PRIVATE jam::jam)
 ```
 
 The consumer's compiler, standard library, exception mode and language-extension
-mode must match its module build. `jam::jam` supplies C++26 and no exceptions;
+mode must match its module build. `jam::jam` supplies C++26;
 set `CMAKE_CXX_EXTENSIONS=OFF` for consumers as shown.
 
 The default carrier is `thread_local`. On AArch64, `JAM_CONTEXT_X28=ON` uses a
@@ -243,9 +288,15 @@ need their own scopes. Other users of `x28` require distinct scoped regions or a
 shared carrier; they cannot hold separate active contexts in
 the same register.
 
-`JAM_USE_BMI2=ON` enables bit extraction on x86-64 and requires BMI2 support
-throughout the resulting application. There is no runtime ISA dispatch. The
-default uses a portable bit-packing table. Tests default on for a top-level build. Enable
+Each heap selects its compactor at construction from the capabilities admitted
+by the CPU and OS: BMI2+AVX512, BMI2+AVX2, NEON, or a portable baseline.
+Workers forward pointer fields and pack live cells with that implementation.
+SIMD stores write exactly the live prefix; adjacent workers never overstore.
+The x86 variants use BMI2 for final pointer-mask packing; the other variants
+use a portable table. Optional instructions stay in the selected compactor,
+without raising the instruction requirements of the rest of the application.
+Tests compare every implementation admitted on the host against the baseline.
+Tests default on for a top-level build. Enable
 `JAM_BUILD_BENCHMARKS=ON` for `heap-bench`.
 
 ```sh

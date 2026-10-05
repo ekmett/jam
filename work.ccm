@@ -19,6 +19,12 @@ module;
 #include <type_traits>
 #include <vector>
 
+#if defined(__APPLE__)
+// Keep the SDK assert macro's implicit builtin declaration in the global
+// module; otherwise Clang 23 imports competing declarations from native/jam.
+extern "C" long __builtin_expect(long, long) noexcept;
+#endif
+
 export module jam:work;
 
 namespace jam::detail {

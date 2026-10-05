@@ -1,0 +1,277 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+module;
+#include <chrono>
+#include <cmath>
+#include <compare>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+#include <ratio>
+#include <type_traits>
+
+export module jam:units;
+
+namespace jam::units::detail {
+[[noreturn]] inline void overflow() noexcept {
+  std::fputs("jam: space arithmetic overflow or invalid conversion\n", stderr);
+  std::abort();
+}
+
+template<class To, class From, class Scale = std::ratio<1>>
+constexpr To convert(From value) noexcept {
+  if constexpr (std::integral<To> && std::integral<From>) {
+    // A 64-bit count times an intmax_t ratio fits this signed intermediate.
+    auto const scaled = static_cast<__int128>(value) * Scale::num / Scale::den;
+    if (scaled < static_cast<__int128>(std::numeric_limits<To>::lowest()) ||
+        scaled > static_cast<__int128>(std::numeric_limits<To>::max())) overflow();
+    return static_cast<To>(scaled);
+  } else {
+    auto const scaled = static_cast<long double>(value) * Scale::num / Scale::den;
+    if constexpr (std::integral<To>) {
+      // Truncate before checking the destination, including -0.5 -> unsigned 0.
+      // This loose exact bound makes the intermediate float-to-integer cast safe.
+      constexpr auto bound = static_cast<long double>(__int128{1} << 65);
+      if (!std::isfinite(scaled) || scaled <= -bound || scaled >= bound) overflow();
+      auto const integral = static_cast<__int128>(scaled);
+      if (integral < static_cast<__int128>(std::numeric_limits<To>::lowest()) ||
+          integral > static_cast<__int128>(std::numeric_limits<To>::max())) overflow();
+      return static_cast<To>(integral);
+    }
+    return static_cast<To>(scaled);
+  }
+}
+
+template<char Op, class R>
+constexpr R arithmetic(R a, R b) noexcept {
+  if constexpr (std::integral<R>) {
+    R result;
+    if constexpr (Op == '+') { if (__builtin_add_overflow(a, b, &result)) overflow(); }
+    if constexpr (Op == '-') { if (__builtin_sub_overflow(a, b, &result)) overflow(); }
+    if constexpr (Op == '*') { if (__builtin_mul_overflow(a, b, &result)) overflow(); }
+    if constexpr (Op == '/' || Op == '%') {
+      if (!b) overflow();
+      if constexpr (std::is_signed_v<R>)
+        if (a == std::numeric_limits<R>::lowest() && b == -1) overflow();
+      if constexpr (Op == '/') result = a / b;
+      else result = a % b;
+    }
+    return result;
+  } else {
+    if constexpr (Op == '+') return a + b;
+    if constexpr (Op == '-') return a - b;
+    if constexpr (Op == '*') return a * b;
+    if constexpr (Op == '/') return a / b;
+  }
+}
+}
+
+export namespace jam::units {
+/// \brief A count of storage units; Ratio measures one unit in bytes.
+/// Integer arithmetic and conversions terminate on overflow. Floating arithmetic
+/// follows its representation. Like chrono, integral destinations accept only
+/// lossless unit conversions implicitly; use space_cast, floor, ceil or round
+/// otherwise. There is no implicit conversion to an untyped count.
+template<class Rep, class Ratio = std::ratio<1>>
+class space {
+  static_assert(std::is_arithmetic_v<Rep> && !std::same_as<Rep, bool> && sizeof(Rep) <= sizeof(long double));
+  static_assert(!std::integral<Rep> || sizeof(Rep) <= sizeof(std::uint64_t));
+  static_assert(Ratio::num > 0);
+  Rep value;
+public:
+  using rep = Rep; ///< Count representation.
+  using ratio = typename Ratio::type; ///< Bytes per unit, in lowest terms.
+  /// \brief Default-initialize the representation, as with chrono durations.
+  constexpr space() = default;
+  /// \brief Explicitly construct from a count, without implicit float-to-integer loss.
+  template<class R>
+    requires std::is_arithmetic_v<R> && (std::floating_point<Rep> || !std::floating_point<R>)
+  constexpr explicit space(R count) noexcept : value(detail::convert<Rep>(count)) {}
+  /// \brief Implicit conversion when the destination can express every source tick.
+  template<class R, class P>
+    requires (std::floating_point<Rep> ||
+      (!std::floating_point<R> && std::ratio_divide<P, ratio>::den == 1))
+  constexpr space(space<R, P> other) noexcept
+    : value(detail::convert<Rep, R, std::ratio_divide<P, ratio>>(other.count())) {}
+  /// \brief Retrieve the count in this unit explicitly.
+  constexpr rep count() const noexcept { return value; }
+  /// \brief Zero units.
+  static constexpr space zero() noexcept { return space{rep{0}}; }
+  /// \brief Least representable count.
+  static constexpr space min() noexcept { return space{std::numeric_limits<rep>::lowest()}; }
+  /// \brief Greatest representable count.
+  static constexpr space max() noexcept { return space{std::numeric_limits<rep>::max()}; }
+  /// \brief Preserve the count.
+  constexpr space operator+() const noexcept { return *this; }
+  /// \brief Negate the count; unrepresentable negation terminates.
+  constexpr space operator-() const noexcept { return space{detail::arithmetic<'-'>(rep{0}, value)}; }
+  /// \brief Add one unit.
+  constexpr space & operator++() noexcept { return *this += space{1}; }
+  /// \brief Add one unit, returning the previous count.
+  constexpr space operator++(int) noexcept { auto old = *this; ++*this; return old; }
+  /// \brief Subtract one unit.
+  constexpr space & operator--() noexcept { return *this -= space{1}; }
+  /// \brief Subtract one unit, returning the previous count.
+  constexpr space operator--(int) noexcept { auto old = *this; --*this; return old; }
+  /// \brief Add an exactly convertible amount.
+  constexpr space & operator+=(space other) noexcept { value = detail::arithmetic<'+'>(value, other.value); return *this; }
+  /// \brief Subtract an exactly convertible amount.
+  constexpr space & operator-=(space other) noexcept { value = detail::arithmetic<'-'>(value, other.value); return *this; }
+  /// \brief Multiply by a scalar count.
+  constexpr space & operator*=(rep scalar) noexcept { value = detail::arithmetic<'*'>(value, scalar); return *this; }
+  /// \brief Divide by a scalar count.
+  constexpr space & operator/=(rep scalar) noexcept { value = detail::arithmetic<'/'>(value, scalar); return *this; }
+  /// \brief Remainder of an integral count divided by a scalar.
+  constexpr space & operator%=(rep scalar) noexcept requires std::integral<rep> { value = detail::arithmetic<'%'>(value, scalar); return *this; }
+  /// \brief Remainder after whole multiples of an amount.
+  constexpr space & operator%=(space other) noexcept requires std::integral<rep> { return *this %= other.value; }
+};
+}
+
+export namespace std {
+/// \brief Common representation and greatest common unit, as for chrono durations.
+template<class R1, class P1, class R2, class P2>
+struct common_type<jam::units::space<R1, P1>, jam::units::space<R2, P2>> {
+  using duration = common_type_t<chrono::duration<R1, P1>, chrono::duration<R2, P2>>;
+  using type = jam::units::space<typename duration::rep, typename duration::period>;
+};
+}
+
+export namespace jam::units {
+/// \brief Explicit conversion; fractional integral ticks truncate toward zero.
+template<class To, class R, class P>
+constexpr To space_cast(space<R, P> value) noexcept {
+  return To{detail::convert<typename To::rep, R, std::ratio_divide<P, typename To::ratio>>(value.count())};
+}
+/// \brief Compare amounts without overflowing an integral common-unit conversion.
+template<class R1, class P1, class R2, class P2>
+constexpr auto operator<=>(space<R1, P1> a, space<R2, P2> b) noexcept {
+  if constexpr (std::integral<R1> && std::integral<R2>) {
+    using Scale = std::ratio_divide<P1, P2>;
+    return (static_cast<__int128>(a.count()) * Scale::num)
+       <=> (static_cast<__int128>(b.count()) * Scale::den);
+  } else {
+    using C = std::common_type_t<decltype(a), decltype(b)>;
+    return C{a}.count() <=> C{b}.count();
+  }
+}
+/// \brief Equal amounts may have different units or representations.
+template<class R1, class P1, class R2, class P2>
+constexpr bool operator==(space<R1, P1> a, space<R2, P2> b) noexcept { return (a <=> b) == 0; }
+/// \brief Add amounts in their common unit.
+template<class R1, class P1, class R2, class P2>
+constexpr auto operator+(space<R1, P1> a, space<R2, P2> b) noexcept {
+  using C = std::common_type_t<decltype(a), decltype(b)>;
+  return C{a} += C{b};
+}
+/// \brief Subtract amounts in their common unit.
+template<class R1, class P1, class R2, class P2>
+constexpr auto operator-(space<R1, P1> a, space<R2, P2> b) noexcept {
+  using C = std::common_type_t<decltype(a), decltype(b)>;
+  return C{a} -= C{b};
+}
+/// \brief Multiply an amount by a scalar, preserving its unit.
+template<class R, class P, class S> requires std::is_arithmetic_v<S>
+constexpr auto operator*(space<R, P> a, S b) noexcept {
+  return space<std::common_type_t<R, S>, P>{a} *= b;
+}
+/// \brief Multiply a scalar by an amount.
+template<class R, class P, class S> requires std::is_arithmetic_v<S>
+constexpr auto operator*(S a, space<R, P> b) noexcept { return b * a; }
+/// \brief Divide an amount by a scalar, preserving its unit.
+template<class R, class P, class S> requires std::is_arithmetic_v<S>
+constexpr auto operator/(space<R, P> a, S b) noexcept {
+  return space<std::common_type_t<R, S>, P>{a} /= b;
+}
+/// \brief Divide two amounts, producing a dimensionless count.
+template<class R1, class P1, class R2, class P2>
+constexpr auto operator/(space<R1, P1> a, space<R2, P2> b) noexcept {
+  using C = std::common_type_t<decltype(a), decltype(b)>;
+  return detail::arithmetic<'/'>(C{a}.count(), C{b}.count());
+}
+/// \brief Integral remainder in the original unit.
+template<std::integral R, class P, std::integral S>
+constexpr auto operator%(space<R, P> a, S b) noexcept { return space<std::common_type_t<R, S>, P>{a} %= b; }
+/// \brief Integral remainder in the common unit.
+template<std::integral R1, class P1, std::integral R2, class P2>
+constexpr auto operator%(space<R1, P1> a, space<R2, P2> b) noexcept {
+  using C = std::common_type_t<decltype(a), decltype(b)>;
+  return C{a} %= C{b};
+}
+/// \brief Greatest whole destination count not exceeding the source.
+template<class To, class R, class P>
+constexpr To floor(space<R, P> value) noexcept {
+  auto result = space_cast<To>(value);
+  if (result > value) --result;
+  return result;
+}
+/// \brief Least whole destination count not less than the source.
+template<class To, class R, class P>
+constexpr To ceil(space<R, P> value) noexcept {
+  auto result = space_cast<To>(value);
+  if (result < value) ++result;
+  return result;
+}
+/// \brief Nearest integral destination count; ties round to even.
+template<class To, class R, class P> requires std::integral<typename To::rep>
+constexpr To round(space<R, P> value) noexcept {
+  auto const lo = floor<To>(value);
+  if (lo == value) return lo;
+  auto hi = lo; ++hi;
+  auto const down = value - lo, up = hi - value;
+  return down < up || (down == up && lo.count() % 2 == 0) ? lo : hi;
+}
+/// \brief Absolute value of a signed amount.
+template<class R, class P> requires std::is_signed_v<R>
+constexpr auto abs(space<R, P> value) noexcept { return value < value.zero() ? -value : value; }
+
+using kibi = std::ratio<1024>; ///< Binary kilo: 1024.
+using mebi = std::ratio<1048576>; ///< Binary mega: 1024 squared.
+using gibi = std::ratio<1073741824>; ///< Binary giga: 1024 cubed.
+using bytes = space<std::size_t>; ///< Whole bytes.
+using kilobytes = space<std::size_t, std::kilo>; ///< Thousands of bytes.
+using megabytes = space<std::size_t, std::mega>; ///< Millions of bytes.
+using gigabytes = space<std::size_t, std::giga>; ///< Billions of bytes.
+using kibibytes = space<std::size_t, kibi>; ///< Groups of 1024 bytes.
+using mebibytes = space<std::size_t, mebi>; ///< Groups of 1048576 bytes.
+using gibibytes = space<std::size_t, gibi>; ///< Groups of 1073741824 bytes.
+using pages = space<std::size_t, std::ratio<JAM_PAGE_BYTES>>; ///< Platform pages, fixed at build time.
+}
+
+export namespace jam {
+/// \brief Decimal and binary byte literals; counts retain their units.
+inline namespace literals {
+/// \brief Bytes.
+consteval units::bytes operator""_B(unsigned long long n) noexcept { return units::bytes{n}; }
+/// \brief Fractional B count.
+consteval units::space<long double, std::ratio<1>> operator""_B(long double n) noexcept { return units::space<long double, std::ratio<1>>{n}; }
+/// \brief Kilobytes.
+consteval units::kilobytes operator""_kB(unsigned long long n) noexcept { return units::kilobytes{n}; }
+/// \brief Fractional kB count.
+consteval units::space<long double, std::kilo> operator""_kB(long double n) noexcept { return units::space<long double, std::kilo>{n}; }
+/// \brief Megabytes.
+consteval units::megabytes operator""_MB(unsigned long long n) noexcept { return units::megabytes{n}; }
+/// \brief Fractional MB count.
+consteval units::space<long double, std::mega> operator""_MB(long double n) noexcept { return units::space<long double, std::mega>{n}; }
+/// \brief Gigabytes.
+consteval units::gigabytes operator""_GB(unsigned long long n) noexcept { return units::gigabytes{n}; }
+/// \brief Fractional GB count.
+consteval units::space<long double, std::giga> operator""_GB(long double n) noexcept { return units::space<long double, std::giga>{n}; }
+/// \brief Kibibytes.
+consteval units::kibibytes operator""_KiB(unsigned long long n) noexcept { return units::kibibytes{n}; }
+/// \brief Fractional KiB count.
+consteval units::space<long double, units::kibi> operator""_KiB(long double n) noexcept { return units::space<long double, units::kibi>{n}; }
+/// \brief Mebibytes.
+consteval units::mebibytes operator""_MiB(unsigned long long n) noexcept { return units::mebibytes{n}; }
+/// \brief Fractional MiB count.
+consteval units::space<long double, units::mebi> operator""_MiB(long double n) noexcept { return units::space<long double, units::mebi>{n}; }
+/// \brief Gibibytes.
+consteval units::gibibytes operator""_GiB(unsigned long long n) noexcept { return units::gibibytes{n}; }
+/// \brief Fractional GiB count.
+consteval units::space<long double, units::gibi> operator""_GiB(long double n) noexcept { return units::space<long double, units::gibi>{n}; }
+}
+}

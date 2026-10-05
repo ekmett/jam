@@ -15,11 +15,11 @@
 #include <thread>
 #include <vector>
 
-#include <unistd.h>
+#include "../etc/page-size.h"
 
 import jam;
 
-auto const page_bytes = static_cast<std::uint64_t>(::getpagesize());
+auto const page_bytes = static_cast<std::uint64_t>(system_page_size());
 
 namespace {
 
@@ -43,7 +43,7 @@ std::uint64_t replace(std::uint64_t word, unsigned slot, H::offset value) noexce
 void exact_fields() noexcept {
   using offset = H::offset;
   static_assert(sizeof(H::block) == 16);
-  H heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 1 * page_bytes, .workers = 4}};
+  H heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{1}, .workers = 4}};
   static_cast<void>(heap.allocate(31));
   std::vector<offset> records{heap.allocate(4)};
   static_cast<void>(heap.allocate(28));
@@ -88,7 +88,7 @@ void exact_fields() noexcept {
 
 void aligned_neighbors_and_rotations() noexcept {
   using offset = H::offset;
-  H heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 1 * page_bytes, .workers = 4}};
+  H heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{1}, .workers = 4}};
   static_cast<void>(heap.allocate(H::block_words - 8));
   std::vector<offset> roots{heap.allocate(3, 64)};
   static_cast<void>(heap.allocate(5));
@@ -133,7 +133,7 @@ void aligned_neighbors_and_rotations() noexcept {
 
 void aligned_parallel_claims() noexcept {
   using offset = H::offset;
-  H heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes, .workers = 4}};
+  H heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}, .workers = 4}};
   std::vector<std::size_t> const widths{3, 65, heap.page_words() + 3, 5};
   std::vector<offset> roots;
   for (auto const width : widths) {
@@ -181,7 +181,7 @@ void aligned_parallel_claims() noexcept {
 
 void mixed_alignment_claims_share_one_rank_block() noexcept {
   using offset = H::offset;
-  H heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 1 * page_bytes, .workers = 4}};
+  H heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{1}, .workers = 4}};
   static_cast<void>(heap.allocate(1));
   std::vector<offset> roots{heap.allocate(1, 16)};
   static_cast<void>(heap.allocate(3));
@@ -224,7 +224,7 @@ void mixed_alignment_claims_share_one_rank_block() noexcept {
 
 void zero_is_reserved() noexcept {
   static_assert(H::null == 0);
-  H heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 1 * page_bytes}};
+  H heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{1}}};
   for (unsigned round = 0; round != 3; ++round) {
     auto const at = heap.allocate(1);
     check(at != 0, "allocation never returns the null offset");

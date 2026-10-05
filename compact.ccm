@@ -1,0 +1,208 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+module;
+#include <native/config.h>
+#include <native/targets.h>
+#include <native/attributes.h>
+#include <array>
+#include <bit>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <span>
+
+export module jam:compact;
+import native;
+
+export namespace jam::detail {
+struct heap_block {
+  std::uint32_t live = 0;
+  std::uint32_t destination = 0;
+  std::uint64_t pointers = 0;
+};
+
+// Both entries operate on whole ranges: dispatch never occurs per cell.
+struct compactor {
+  void (*move)(std::uint64_t const *, std::uint64_t *, heap_block const *,
+               std::size_t, std::size_t) noexcept;
+  void (*pack)(heap_block *, std::size_t, std::size_t) noexcept;
+  native::isa<> requirement;
+  char const * name;
+};
+}
+
+namespace jam::detail {
+using word = std::uint64_t;
+using bitmap = std::uint32_t;
+
+inline word pointer_cells(bitmap live) noexcept {
+  word x = live;
+  x = (x | (x << 16)) & 0x0000ffff0000ffffULL;
+  x = (x | (x << 8)) & 0x00ff00ff00ff00ffULL;
+  x = (x | (x << 4)) & 0x0f0f0f0f0f0f0f0fULL;
+  x = (x | (x << 2)) & 0x3333333333333333ULL;
+  x = (x | (x << 1)) & 0x5555555555555555ULL;
+  return x | (x << 1);
+}
+
+inline bitmap forward(heap_block const * metadata, bitmap value) noexcept {
+  if (!value) return 0;
+  auto const & item = metadata[value >> 5];
+  auto const bit = bitmap{1} << (value & 31);
+  assert(item.live & bit);
+  return item.destination + std::popcount(item.live & (bit - 1));
+}
+
+// Four cells per lookup; one 4 KiB table shared by the portable variants.
+inline constexpr auto pack_table = [] consteval {
+  std::array<std::array<std::uint8_t, 256>, 16> result{};
+  for (unsigned live = 0; live != 16; ++live)
+    for (unsigned value = 0; value != 256; ++value) {
+      unsigned packed = 0, position = 0;
+      for (unsigned cell = 0; cell != 4; ++cell) if (live & (1u << cell)) {
+        packed |= ((value >> (cell * 2)) & 3) << position;
+        position += 2;
+      }
+      result[live][value] = static_cast<std::uint8_t>(packed);
+    }
+  return result;
+}();
+
+inline word portable_pack(heap_block const & item) noexcept {
+  word result = 0;
+  unsigned position = 0;
+  for (unsigned i = 0; i != 8; ++i) {
+    auto const live = (item.live >> (4 * i)) & 15;
+    result |= word{pack_table[live][(item.pointers >> (8 * i)) & 255]} << position;
+    position += 2 * std::popcount(live);
+  }
+  return result;
+}
+
+void baseline_move(word const * source, word * target, heap_block const * metadata,
+                   std::size_t begin, std::size_t end) noexcept {
+  for (auto i = begin; i != end; ++i) {
+    auto const & item = metadata[i];
+    auto destination = item.destination;
+    if (item.live == ~bitmap{0} && !item.pointers) {
+      std::memcpy(target + destination, source + i * 32, 256);
+      continue;
+    }
+    for (auto bits = item.live; bits; bits &= bits - 1) {
+      auto const bit = static_cast<unsigned>(std::countr_zero(bits));
+      word value;
+      std::memcpy(&value, source + i * 32 + bit, sizeof(value));
+      auto const fields = (item.pointers >> (bit * 2)) & 3;
+      if (fields & 1) value = (value & 0xffffffff00000000ULL) | forward(metadata, static_cast<bitmap>(value));
+      if (fields & 2) value = (value & 0x00000000ffffffffULL) | (word{forward(metadata, static_cast<bitmap>(value >> 32))} << 32);
+      std::memcpy(target + destination++, &value, sizeof(value));
+    }
+  }
+}
+
+// F(w)<=w: copy each old descriptor before overwriting its packed destination.
+#define JAM_PACK_MASKS(EXTRACT) \
+  std::size_t cleared = 0; \
+  for (std::size_t i = 0; i != old_blocks; ++i) { \
+    auto const item = metadata[i]; \
+    if (!item.pointers) continue; \
+    word packed; \
+    auto const first = static_cast<unsigned>(std::countr_zero(item.live)); \
+    auto const run = item.live >> first; \
+    if ((run & (run + bitmap{1})) == 0) packed = item.pointers >> (first * 2); \
+    else packed = (EXTRACT); \
+    if (!packed) continue; \
+    auto const destination = std::size_t{item.destination} * 2; \
+    auto const index = destination >> 6; \
+    auto const shift = destination & 63; \
+    assert(index <= i); \
+    while (cleared <= index) metadata[cleared++].pointers = 0; \
+    metadata[index].pointers |= packed << shift; \
+    if (shift) { \
+      auto const upper = packed >> (64 - shift); \
+      if (upper) { \
+        assert(index + 1 <= i); \
+        while (cleared <= index + 1) metadata[cleared++].pointers = 0; \
+        metadata[index + 1].pointers |= upper; \
+      } \
+    } \
+  } \
+  while (cleared < new_blocks) metadata[cleared++].pointers = 0;
+
+void baseline_pack(heap_block * metadata, std::size_t old_blocks, std::size_t new_blocks) noexcept {
+  JAM_PACK_MASKS(portable_pack(item))
+}
+
+#if NATIVE_HOST_X86
+#define NATIVE_TARGET_jam_avx2 "avx2,fma,bmi2"
+#define NATIVE_TARGET_jam_avx512 "avx2,fma,avx512f,avx512dq,avx512bw,avx512vl,bmi2"
+#define JAM_TARGETS jam_avx512, jam_avx2
+#define JAM_LANES(ISA) ((ISA).has(native::x86_feature::avx512f) ? 16 : 8)
+#define JAM_EXTRACT(ISA) native::pext<ISA>(item.pointers, pointer_cells(item.live))
+#elif NATIVE_HOST_NEON
+#define JAM_TARGETS neon
+#define JAM_LANES(ISA) 4
+#define JAM_EXTRACT(ISA) portable_pack(item)
+#endif
+
+#define JAM_COMPACTOR(name, ISA, ...) \
+  template<native::isa<> A> \
+    requires (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
+  void name##_move(word const * source, word * target, heap_block const * metadata, \
+                   std::size_t begin, std::size_t end) noexcept { \
+    constexpr unsigned lanes = JAM_LANES(ISA); \
+    using V = native::simd<bitmap, lanes, ISA>; \
+    using M = typename V::mask; \
+    for (auto i = begin; i != end; ++i) { \
+      auto const & item = metadata[i]; \
+      auto destination = item.destination; \
+      if (item.live == ~bitmap{0} && !item.pointers) { \
+        std::memcpy(target + destination, source + i * 32, 256); \
+        continue; \
+      } \
+      for (unsigned cell = 0; cell != 32; cell += lanes / 2) { \
+        auto const live = (item.live >> cell) & ((1u << (lanes / 2)) - 1); \
+        if (!live) continue; \
+        std::array<bitmap, lanes> values; \
+        std::memcpy(values.data(), source + i * 32 + cell, sizeof(values)); \
+        auto fields = (item.pointers >> (cell * 2)) & ((1u << lanes) - 1); \
+        for (; fields; fields &= fields - 1) { \
+          auto const lane = std::countr_zero(fields); \
+          values[lane] = forward(metadata, values[lane]); \
+        } \
+        auto const written = native::compress_store(reinterpret_cast<bitmap *>(target + destination), \
+          lanes, M::from_bitset(pointer_cells(live)), V::load(values.data())); \
+        destination += static_cast<bitmap>(written / 2); \
+      } \
+    } \
+  } \
+  template<native::isa<> A> \
+    requires (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
+  void name##_pack(heap_block * metadata, std::size_t old_blocks, std::size_t new_blocks) noexcept { \
+    JAM_PACK_MASKS(JAM_EXTRACT(ISA)) \
+  }
+NATIVE_TARGET_VARIANTS(vector, JAM_COMPACTOR, JAM_TARGETS)
+#undef JAM_COMPACTOR
+#undef JAM_PACK_MASKS
+
+constexpr compactor baseline{baseline_move, baseline_pack, native::scalar, "baseline"};
+#define JAM_ENTRY(unused, tag) \
+  compactor{vector_move<NATIVE_TARGET_ISA(tag)>, vector_pack<NATIVE_TARGET_ISA(tag)>, \
+    NATIVE_TARGET_ISA(tag), #tag},
+constexpr compactor variants[]{NATIVE_DETAIL_TARGET_MAP(JAM_ENTRY, unused, JAM_TARGETS) baseline};
+#undef JAM_ENTRY
+}
+
+export namespace jam::detail {
+// Internal partition API also lets tests compare every admitted implementation.
+std::span<compactor const> compactor_variants() noexcept { return variants; }
+compactor choose_compactor() noexcept {
+  auto selected = baseline;
+  native::with_isa(NATIVE_TARGET_LIST(JAM_TARGETS), native::observe_cpu(), [&]<native::isa<> A> {
+    for (auto const & variant : variants) if (variant.requirement == A) selected = variant;
+  });
+  return selected;
+}
+}

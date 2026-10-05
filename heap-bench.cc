@@ -17,9 +17,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include <unistd.h>
+#include "etc/page-size.h"
 
 import jam;
+import native;
 
 namespace {
 
@@ -129,11 +130,11 @@ sample trial(options const & config) noexcept {
   using H = jam::heap;
   using offset = typename H::offset;
   auto const cluster_words = config.cluster_words;
-  auto const page_bytes = static_cast<std::size_t>(::getpagesize());
+  auto const page_bytes = static_cast<std::size_t>(system_page_size());
   auto const words = (config.bytes / 8 / cluster_words) * cluster_words;
   auto const pages = (words * 8 + page_bytes - 1) / page_bytes;
   auto const capacity_pages = std::max(pages + config.reserve, 2 * config.reserve);
-  H heap{jam::heap_options{.capacity = capacity_pages * page_bytes, .reserve = config.reserve * page_bytes,
+  H heap{jam::heap_options{.capacity = jam::units::pages{capacity_pages}, .reserve = jam::units::pages{config.reserve},
                       .workers = config.workers}};
   auto const first = heap.allocate(words, config.alignment);
   // Pre-touch backing through the first alias, including the copy reserve.
@@ -226,15 +227,12 @@ void print_summary(options const & config, std::size_t workers, sample const & g
   constexpr auto arch = "x86_64";
 #endif
   constexpr auto scheduler = "window";
-#ifdef __BMI2__
-  constexpr int bmi2 = 1;
+#if defined(__x86_64__) || defined(_M_X64)
+  auto const cpu = native::observe_cpu();
+  auto const bmi2 = native::classify_isa(cpu, native::isa<>{native::x86_feature::bmi2}).admitted();
+  auto const avx2 = native::classify_isa(cpu, native::avx2).admitted();
 #else
-  constexpr int bmi2 = 0;
-#endif
-#ifdef __AVX2__
-  constexpr int avx2 = 1;
-#else
-  constexpr int avx2 = 0;
+  constexpr int bmi2 = 0, avx2 = 0;
 #endif
 #ifdef NDEBUG
   constexpr auto build = "release";

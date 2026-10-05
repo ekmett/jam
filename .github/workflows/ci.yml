@@ -58,6 +58,24 @@ jobs:
           path: build/docs/html
           retention-days: 1
 
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ekmett/native/.github/actions/setup/windows@261c56507195e78c104ca7aa4e6e764c19a55f84
+      - name: Configure native Windows modules
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_LINKER_TYPE=LLD
+          -DCMAKE_BUILD_TYPE=Release -DJAM_BUILD_TESTS=ON -DJAM_BUILD_BENCHMARKS=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --no-tests=error --output-on-failure
+
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build

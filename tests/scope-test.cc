@@ -8,11 +8,11 @@
 #include <thread>
 #include <type_traits>
 
-#include <unistd.h>
+#include "../etc/page-size.h"
 
 import jam.unqualified;
 
-auto const page_bytes = static_cast<std::uint64_t>(::getpagesize());
+auto const page_bytes = static_cast<std::uint64_t>(system_page_size());
 
 struct node {
   ptr<node> next;
@@ -33,8 +33,8 @@ static_assert(std::is_convertible_v<jam::ptr<node>, jam::root<node>>);
 static_assert(std::is_nothrow_convertible_v<jam::root<node> const &, jam::ptr<node>>);
 
 void nested_scopes() {
-  jam::heap first{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
-  jam::heap second{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
+  jam::heap first{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
+  jam::heap second{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
   jam::root<node> a, b;
   auto const previous = jam::current_heap();
   {
@@ -78,7 +78,7 @@ void nested_scopes() {
 }
 
 void const_root() {
-  heap heap{{.capacity = 1_MiB, .reserve = 256_KiB}};
+  heap heap{{.capacity = 8_MiB, .reserve = 1_MiB}};
   heap_scope scope{heap};
   static_cast<void>(make_ptr<node>());
   root<node> const root = make_ptr<node>(nullptr, std::uint64_t{23});
@@ -100,7 +100,7 @@ struct alignas(Alignment) ordered_node {
 template<std::size_t Alignment>
 void collection_boundary(std::size_t workers) {
   using node_t = ordered_node<Alignment>;
-  jam::heap heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes,
+  jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
                              .workers = workers}};
   jam::heap_scope scope{heap};
   static_cast<void>(heap.allocate(heap.page_words()));
@@ -135,7 +135,7 @@ void collection_boundary(std::size_t workers) {
 void thread_scopes() {
   std::barrier gate{2};
   auto work = [&](std::uint64_t value) {
-    jam::heap heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
+    jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
     jam::heap_scope scope{heap};
     jam::root<node> root = jam::make_ptr<node>(nullptr, value);
     gate.arrive_and_wait();

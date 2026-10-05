@@ -5,3 +5,4 @@
 export module jam.unqualified;
 export import jam;
 export using namespace jam;
+export using namespace jam::units;

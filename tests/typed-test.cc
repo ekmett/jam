@@ -14,11 +14,11 @@
 #include <utility>
 #include <vector>
 
-#include <unistd.h>
+#include "../etc/page-size.h"
 
 import jam;
 
-auto const page_bytes = static_cast<std::uint64_t>(::getpagesize());
+auto const page_bytes = static_cast<std::uint64_t>(system_page_size());
 
 struct payload {
   std::uint64_t bits;
@@ -127,9 +127,25 @@ struct embedded {
   constexpr auto trace(jam::visitor auto & visit) const noexcept { return visit(data, scalar); }
 };
 
+// Standard libraries need not make std::variant standard-layout. Keep managed
+// records portable and test the standard variant adapter independently below.
+struct tagged {
+  using edge = jam::ptr<payload>;
+  union { std::uint32_t scalar; edge pointer; embedded nested; };
+  unsigned kind;
+  constexpr tagged(std::uint32_t value) noexcept : scalar(value), kind(0) {}
+  constexpr tagged(edge value) noexcept : pointer(value), kind(1) {}
+  constexpr tagged(embedded value) noexcept : nested(value), kind(2) {}
+  constexpr auto trace(jam::visitor auto & visit) const noexcept {
+    if (kind == 1) visit(pointer);
+    else if (kind == 2) visit(nested);
+  }
+};
+static_assert(std::is_standard_layout_v<tagged> && std::is_trivially_copyable_v<tagged>);
+
 struct composite {
   using edge = jam::ptr<payload>;
-  std::array<std::variant<std::uint32_t, edge, embedded>, 3> entries;
+  std::array<tagged, 3> entries;
   std::uint64_t scalar;
 
   constexpr auto trace(jam::visitor auto & visit) const noexcept {
@@ -153,7 +169,7 @@ void mixed_graph() noexcept {
   static_assert(std::is_same_v<R, jam::ptr<N>>);
   static_assert(sizeof(R) == sizeof(std::uint32_t));
   static_assert(std::is_standard_layout_v<R> && std::is_trivially_copyable_v<R>);
-  H heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes,
+  H heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
                      .workers = 4}};
   static_cast<void>(heap.allocate(23));
   auto const data = heap.template make_ptr<payload>(payload{1, 7});
@@ -197,7 +213,7 @@ void mixed_graph() noexcept {
 }
 
 void parallel_typed_discovery() noexcept {
-  jam::heap heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes,
+  jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
                                        .workers = 4}};
   std::barrier rendezvous{2};
   aligned_branch::rendezvous = &rendezvous;
@@ -225,31 +241,31 @@ void composite_graph() noexcept {
   using C = composite;
   using E = typename C::edge;
   using A = std::array<E, 2>;
-  using V = std::variant<std::uint32_t, E>;
-  jam::heap heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes,
+  using V = tagged;
+  jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
                                 .workers = 3}};
   static_cast<void>(heap.allocate(17));
   auto const first = heap.template make_ptr<payload>(payload{71, 11});
   auto const second = heap.template make_ptr<payload>(payload{83, 13});
-  using Part = std::variant<std::uint32_t, E, embedded>;
+  using Part = tagged;
   auto root = heap.root(heap.template make_ptr<C>(C{{Part{first}, Part{std::uint32_t{1}}, Part{embedded{second, 1}}}, 1}));
   auto array_root = heap.root(heap.template make_ptr<A>(A{first, {}}));
   auto variant_root = heap.root(heap.template make_ptr<V>(V{second}));
   for (unsigned round = 0; round != 3; ++round) {
     heap.collect();
     auto value = heap.load(root.get());
-    auto const a = std::get<E>(value.entries[0]);
-    auto const part = std::get<embedded>(value.entries[2]);
+    auto const a = value.entries[0].pointer;
+    auto const part = value.entries[2].nested;
     auto const b = part.data;
     check(part.scalar == 1, "embedded hooks share the outer allocation without reclaiming it");
     check(heap.load(a).bits == 71 && heap.load(b).bits == 83,
-          "nested array, variant and tuple views follow managed targets");
-    check(std::get<std::uint32_t>(value.entries[1]) == 1 && value.scalar == 1,
+          "nested array, tagged records and tuple views follow managed targets");
+    check(value.entries[1].scalar == 1 && value.scalar == 1,
           "scalar alternatives and tuple elements remain data");
     auto const pointers = heap.load(array_root.get());
     check(pointers[0] == a && !pointers[1], "array roots forward references and preserve nulls");
-    check(std::get<E>(heap.load(variant_root.get())) == b,
-          "variant roots visit the active reference alternative");
+    check(heap.load(variant_root.get()).pointer == b,
+          "tagged roots visit the active reference alternative");
     static_cast<void>(heap.allocate(heap.page_words()));
   }
   auto value = heap.load(root.get());
@@ -260,20 +276,54 @@ void composite_graph() noexcept {
   variant_root = {};
   heap.collect();
   value = heap.load(root.get());
-  check(std::get<std::uint32_t>(value.entries[0]) == 1 && !std::get<E>(value.entries[2]),
-        "changing a variant alternative clears the old pointer declaration");
+  check(value.entries[0].scalar == 1 && !value.entries[2].pointer,
+        "changing a tagged alternative clears the old pointer declaration");
   check(heap.used() == 1 + (sizeof(C) + 7) / 8, "inactive alternatives retain no targets");
   auto const replacement = heap.template make_ptr<payload>(payload{97, 17});
   value.entries[0] = replacement;
   heap.store(root.get(), value);
   heap.collect();
-  check(heap.load(std::get<E>(heap.load(root.get()).entries[0])).bits == 97,
+  check(heap.load(heap.load(root.get()).entries[0].pointer).bits == 97,
         "a scalar alternative can become a managed edge on the next collection");
+}
+
+struct adapter_visitor {
+  using heap_type = jam::heap;
+  jam::ptr<payload> const * expected;
+  unsigned calls = 0;
+  void operator()(jam::ptr<payload> const & field) noexcept {
+    check(&field == expected, "adapters preserve the active pointer field address");
+    ++calls;
+  }
+  template<class... Ts>
+  void operator()(Ts const &... values) noexcept {
+    (jam::tracer<Ts>::trace(*this, values), ...);
+  }
+};
+
+void variant_adapters() noexcept {
+  using edge = jam::ptr<payload>;
+  using part = std::variant<std::uint32_t, edge, embedded>;
+  std::array<part, 3> values{std::uint32_t{1}, edge{7}, embedded{edge{9}, 1}};
+  adapter_visitor visitor{&std::get<edge>(values[1])};
+  jam::tracer<part>::trace(visitor, values[0]);
+  check(visitor.calls == 0, "scalar variant alternatives contain no managed edges");
+  jam::tracer<part>::trace(visitor, values[1]);
+  check(visitor.calls == 1, "variant adapter visits its active pointer alternative");
+  visitor.expected = &std::get<embedded>(values[2]).data;
+  jam::tracer<part>::trace(visitor, values[2]);
+  check(visitor.calls == 2, "variant adapter visits embedded records by reference");
+  values[1] = std::uint32_t{1};
+  values[2] = edge{};
+  visitor.expected = &std::get<edge>(values[2]);
+  visitor(std::tie(values));
+  check(visitor.calls == 3, "nested tuple/array/variant adapters follow changed alternatives and nulls");
 }
 
 int main() {
   mixed_graph();
   parallel_typed_discovery();
   composite_graph();
+  variant_adapters();
   std::puts("typed graph checks passed");
 }

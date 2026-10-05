@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
-cmake_minimum_required(VERSION 3.30)
+cmake_minimum_required(VERSION 4.4)
 project(jam VERSION 0.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 26)
@@ -12,10 +12,9 @@ option(JAM_BUILD_TESTS "Build heap and tracing checks" ${PROJECT_IS_TOP_LEVEL})
 option(JAM_BUILD_BENCHMARKS "Build the compaction benchmark" OFF)
 option(JAM_BUILD_DOCS "Build Doxygen documentation" OFF)
 option(JAM_CONTEXT_X28 "Reserve AArch64 x28 for the implicit heap instead of TLS" OFF)
-option(JAM_USE_BMI2 "Use BMI2 bit extraction; requires a compatible x86-64 CPU" OFF)
 
-if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Darwin|Linux)$")
-  message(FATAL_ERROR "jam requires macOS or Linux virtual-memory aliases")
+if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Darwin|Linux|Windows)$")
+  message(FATAL_ERROR "jam requires macOS, Linux or Windows virtual-memory aliases")
 endif()
 
 include(CheckCXXSourceCompiles)
@@ -50,17 +49,48 @@ block()
   endif()
 endblock()
 
+# A build targets one platform page size; cross builds provide it explicitly.
+set(JAM_PAGE_BYTES "" CACHE STRING "Platform page size in bytes (detected for native builds)")
+if(NOT JAM_PAGE_BYTES)
+  if(CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "Cross builds must set JAM_PAGE_BYTES to the target page size")
+  endif()
+  try_run(jam_page_run jam_page_compile
+    SOURCE_FROM_CONTENT jam-page-size.cc [=[
+      #include <cstdio>
+      #if defined(_WIN32)
+      #include <windows.h>
+      #else
+      #include <unistd.h>
+      #endif
+      int main() {
+        #if defined(_WIN32)
+        SYSTEM_INFO info{}; GetSystemInfo(&info);
+        std::printf("%lu", static_cast<unsigned long>(info.dwPageSize));
+        #else
+        std::printf("%ld", static_cast<long>(sysconf(_SC_PAGESIZE)));
+        #endif
+      }
+    ]=]
+    RUN_OUTPUT_VARIABLE jam_page_output)
+  if(NOT jam_page_compile OR NOT jam_page_run EQUAL 0)
+    message(FATAL_ERROR "Cannot determine the platform page size; set JAM_PAGE_BYTES")
+  endif()
+  set(JAM_PAGE_BYTES "${jam_page_output}" CACHE STRING "Platform page size in bytes" FORCE)
+endif()
+if(NOT JAM_PAGE_BYTES MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR "JAM_PAGE_BYTES must be a positive integer")
+endif()
+
 include(FetchContent)
-# Populate only the textual attribute catalog. Upstream's module build and its
-# compiler, numerical and exception policies are not part of jam's interface.
+# Native owns CPU/OS admission and the source-targeted SIMD implementations.
+set(NATIVE_BUILD_TESTS OFF CACHE BOOL "Build native dependency tests")
+set(NATIVE_BUILD_DOCS OFF CACHE BOOL "Build native dependency documentation")
+set(NATIVE_ENABLE_EXCEPTIONS ON CACHE BOOL "Enable native exceptions" FORCE)
 FetchContent_Declare(jam_native
   GIT_REPOSITORY https://github.com/ekmett/native.git
-  GIT_TAG a1c56a3e249ff82e711c18d0f8cf308d9eb4b62c
-  SOURCE_SUBDIR jam-attributes-only)
+  GIT_TAG 4f5f6533417b2951b063581a3252c63de0024102)
 FetchContent_MakeAvailable(jam_native)
-if(NOT EXISTS "${jam_native_SOURCE_DIR}/src/native/attributes.h")
-  message(FATAL_ERROR "jam requires native's textual attributes.h catalog")
-endif()
 
 find_package(Threads REQUIRED)
 include(GNUInstallDirs)
@@ -72,11 +102,9 @@ target_compile_features(jam PUBLIC cxx_std_26)
 set_target_properties(jam PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
 target_sources(jam PUBLIC FILE_SET modules TYPE CXX_MODULES
   BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
-  FILES jam.ccm jam_unqualified.ccm heap.ccm work.ccm)
-target_include_directories(jam PRIVATE
-  "$<BUILD_INTERFACE:${jam_native_SOURCE_DIR}/src>"
-  "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/jam/vendor>")
-target_link_libraries(jam PUBLIC Threads::Threads)
+  FILES jam.ccm jam_unqualified.ccm heap.ccm compact.ccm work.ccm units.ccm)
+target_link_libraries(jam PUBLIC Threads::Threads native::native)
+target_compile_definitions(jam PUBLIC JAM_PAGE_BYTES=${JAM_PAGE_BYTES})
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   block()
     # A Homebrew LLVM's headers can be newer than the SDK's libc++ runtime.
@@ -88,15 +116,34 @@ if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   endblock()
 endif()
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(jam PUBLIC -fno-exceptions)
+if(WIN32)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    message(FATAL_ERROR "Windows jam builds require clang-cl with the MSVC SDK")
+  endif()
+  target_link_libraries(jam PRIVATE onecore)
+  # Checked ratio arithmetic uses Clang's 128-bit compiler runtime helpers.
+  execute_process(COMMAND "${CMAKE_CXX_COMPILER}" --print-runtime-dir
+    OUTPUT_VARIABLE jam_runtime OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+    set(jam_builtins clang_rt.builtins-aarch64)
+  else()
+    set(jam_builtins clang_rt.builtins-x86_64)
+  endif()
+  if(NOT EXISTS "${jam_runtime}/${jam_builtins}.lib")
+    message(FATAL_ERROR "jam requires ${jam_builtins}.lib from the Clang toolchain")
+  endif()
+  target_link_directories(jam PUBLIC "$<BUILD_INTERFACE:${jam_runtime}>")
+  target_link_libraries(jam PUBLIC ${jam_builtins})
+  target_compile_options(jam PUBLIC -Wno-unused-command-line-argument)
+  target_compile_options(jam PRIVATE /clang:-Wall /clang:-Wextra "$<BUILD_INTERFACE:/WX>")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(jam PRIVATE -Wall -Wextra "$<BUILD_INTERFACE:-Werror>")
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # CMake's installed BMI rule combines --precompile with an unused -c.
     target_compile_options(jam PRIVATE "$<INSTALL_INTERFACE:-Wno-unused-command-line-argument>")
   endif()
 else()
-  message(FATAL_ERROR "jam requires a compiler supporting C++26 modules and -fno-exceptions")
+  message(FATAL_ERROR "jam requires a compiler supporting C++26 modules")
 endif()
 if(JAM_CONTEXT_X28)
   if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
@@ -116,12 +163,6 @@ if(JAM_CONTEXT_X28)
   endblock()
   target_compile_options(jam PUBLIC -ffixed-x28)
   target_compile_definitions(jam PUBLIC JAM_CONTEXT_X28=1)
-endif()
-if(JAM_USE_BMI2)
-  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-    message(FATAL_ERROR "JAM_USE_BMI2 requires x86-64")
-  endif()
-  target_compile_options(jam PUBLIC -mbmi2)
 endif()
 
 if(JAM_BUILD_TESTS)
@@ -172,7 +213,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
   set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
   set(DOXYGEN_QUIET YES)
-  doxygen_add_docs(jam-docs jam.ccm jam_unqualified.ccm heap.ccm README.md LICENSE.md
+  doxygen_add_docs(jam-docs jam.ccm jam_unqualified.ccm heap.ccm units.ccm README.md LICENSE.md
     COMMENT "Build jam API documentation")
   # Removed declarations must not leave stale pages in the generated reference.
   add_custom_target(jam-docs-clean
@@ -185,8 +226,6 @@ endif()
 install(TARGETS jam EXPORT jamTargets
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   FILE_SET modules DESTINATION "${CMAKE_INSTALL_LIBDIR}/jam/modules")
-install(FILES "${jam_native_SOURCE_DIR}/src/native/attributes.h"
-  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/jam/vendor/native")
 install(FILES LICENSE.md DESTINATION "${CMAKE_INSTALL_DATADIR}/jam")
 install(EXPORT jamTargets NAMESPACE jam:: CXX_MODULES_DIRECTORY cxx-modules
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/jam")

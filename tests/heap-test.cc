@@ -14,16 +14,24 @@
 #include <numeric>
 #include <span>
 #include <string_view>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#include <crtdbg.h>
+#else
 #include <sys/resource.h>
 #include <sys/wait.h>
-#include <unistd.h>
+#endif
+#include "../etc/page-size.h"
 
 import jam;
 
-auto const page_bytes = static_cast<std::uint64_t>(::getpagesize());
+extern "C" void check_compactors() noexcept;
+
+auto const page_bytes = static_cast<std::uint64_t>(system_page_size());
 
 namespace {
 
@@ -106,20 +114,20 @@ void compact(heap_type & heap, std::vector<unsigned char> const & live,
 
 void byte_literals() noexcept {
   using namespace jam;
-  static_assert(0_KiB == 0 && 1_KiB == 1024);
-  static_assert(1_MiB == 1ull << 20 && 1_GiB == 1ull << 30);
-  heap_type heap{jam::heap_options{.capacity = 3_MiB, .reserve = 256_KiB}};
+  static_assert(0_KiB == 0_B && 1_KiB == 1024_B);
+  static_assert(1_MiB == 1048576_B && 1_GiB == 1073741824_B);
+  heap_type heap{jam::heap_options{.capacity = 3_MiB, .reserve = units::ceil<units::pages>(256_KiB)}};
   check(heap.capacity() * 8 == 3 * (1ull << 20), "capacity need not be a power of two");
   check(heap.reserved() * 8 == 256 * 1024, "binary literals retain their byte meaning");
-  heap_type rounded{jam::heap_options{.capacity = 3 * page_bytes - 1, .reserve = page_bytes - 1}};
+  heap_type rounded{jam::heap_options{.capacity = jam::units::ceil<jam::units::pages>(jam::units::bytes{3 * page_bytes - 1}), .reserve = jam::units::ceil<jam::units::pages>(jam::units::bytes{page_bytes - 1})}};
   check(rounded.capacity() == 3 * rounded.page_words() && rounded.reserved() == rounded.page_words(),
-        "capacity and reserve round up to whole pages at construction");
-  check(rounded.configuration().capacity == 3 * page_bytes && rounded.configuration().reserve == page_bytes,
-        "configuration exposes the realized initial byte sizes");
+        "explicit ceiling converts byte counts to whole pages");
+  check(rounded.configuration().capacity.count() == 3 && rounded.configuration().reserve.count() == 1,
+        "configuration retains typed page counts");
 }
 
 void alias_and_layout() noexcept {
-  heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
   auto const page = heap.page_words();
   check(page != 0 && page % 64 == 0, "VM pages contain whole 512-byte mark blocks");
   check(heap.capacity() == 8 * page && heap.reserved() == 2 * page, "capacity and reserve use words");
@@ -135,7 +143,7 @@ void alias_and_layout() noexcept {
 }
 
 void allocation_growth_preserves_reserve() noexcept {
-  heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
   auto const old_capacity = heap.capacity();
   auto const limit = old_capacity - heap.reserved();
   check(heap.allocate(limit - 1) == 1, "allocation can fill the nonreserved portion");
@@ -150,7 +158,7 @@ void allocation_growth_preserves_reserve() noexcept {
 }
 
 void cyclic_edges_and_roots() noexcept {
-  heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
   static_cast<void>(heap.allocate(3));
   auto const a = heap.allocate(5);
   static_cast<void>(heap.allocate(7));
@@ -176,7 +184,7 @@ void cyclic_edges_and_roots() noexcept {
 }
 
 void straddling_records_and_ring_wrap() noexcept {
-  heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 1 * page_bytes}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{1}}};
   auto const page = heap.page_words();
   auto const capacity = heap.capacity();
   static_cast<void>(heap.allocate(61));
@@ -210,8 +218,8 @@ void straddling_records_and_ring_wrap() noexcept {
 }
 
 void parallel_matches_scalar() noexcept {
-  heap_type scalar{jam::heap_options{.capacity = 16 * page_bytes, .reserve = 4 * page_bytes}};
-  heap_type parallel{jam::heap_options{.capacity = 16 * page_bytes, .reserve = 4 * page_bytes, .workers = 4}};
+  heap_type scalar{jam::heap_options{.capacity = jam::units::pages{16}, .reserve = jam::units::pages{4}}};
+  heap_type parallel{jam::heap_options{.capacity = jam::units::pages{16}, .reserve = jam::units::pages{4}, .workers = 4}};
   auto const count = 8 * scalar.page_words() + 71;
   static_cast<void>(scalar.allocate(count - 1));
   static_cast<void>(parallel.allocate(count - 1));
@@ -242,7 +250,7 @@ void parallel_matches_scalar() noexcept {
 }
 
 void growth_of_a_wrapped_view(std::size_t pages = 8) noexcept {
-  heap_type heap{jam::heap_options{.capacity = pages * page_bytes, .reserve = 1 * page_bytes}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{pages}, .reserve = jam::units::pages{1}}};
   auto const page = heap.page_words();
   auto const old_capacity = heap.capacity();
   auto const count = 2 * page + 137;
@@ -263,7 +271,7 @@ void growth_of_a_wrapped_view(std::size_t pages = 8) noexcept {
 }
 
 void shrinking_preserves_records_and_gap(std::size_t pages = 16) noexcept {
-  heap_type heap{jam::heap_options{.capacity = pages * page_bytes, .reserve = 2 * page_bytes}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{pages}, .reserve = jam::units::pages{2}}};
   auto const page = heap.page_words();
   static_cast<void>(heap.allocate(page + 61));
   auto const a = heap.allocate(3);
@@ -294,7 +302,7 @@ void shrinking_preserves_records_and_gap(std::size_t pages = 16) noexcept {
 }
 
 void full_parallel_waves_preserve_every_word(std::size_t pages = 16) noexcept {
-  heap_type heap{jam::heap_options{.capacity = pages * page_bytes, .reserve = 2 * page_bytes, .workers = 4}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{pages}, .reserve = jam::units::pages{2}, .workers = 4}};
   auto const capacity = heap.capacity();
   auto const count = capacity - heap.reserved();
   auto const page = heap.page_words();
@@ -325,8 +333,40 @@ void full_parallel_waves_preserve_every_word(std::size_t pages = 16) noexcept {
   }
 }
 
+void mapping_resources_are_released() noexcept {
+#if defined(_WIN32)
+  DWORD before = 0, after = 0;
+  check(::GetProcessHandleCount(::GetCurrentProcess(), &before), "query heap handle baseline");
+  for (unsigned round = 0; round != 16; ++round) {
+    void const * last_view;
+    {
+      heap_type heap{{.capacity = jam::units::pages{7}, .reserve = jam::units::pages{1}}};
+      static_cast<void>(heap.allocate(15 * heap.page_words()));
+      heap.clear_marks();
+      heap.mark(1);
+      heap.compact();
+      last_view = heap.data();
+    }
+    MEMORY_BASIC_INFORMATION region{};
+    check(::VirtualQuery(last_view, &region, sizeof(region)) && region.State == MEM_FREE,
+          "heap destruction releases the final placeholder view");
+  }
+  check(::GetProcessHandleCount(::GetCurrentProcess(), &after) && before == after,
+        "growth, shrink and destruction release every backing handle");
+#endif
+}
+void excessive_capacity_throws_before_mapping() noexcept {
+  using namespace jam;
+  try {
+    heap_type rejected{{.capacity = 33_GiB}};
+  } catch (std::length_error const &) {
+    return;
+  }
+  check(false, "oversized typed capacity throws length_error before allocation");
+}
+
 void invalid_requests_leave_heap_unchanged() noexcept {
-  heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes, .workers = 4}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}, .workers = 4}};
   static_cast<void>(heap.allocate(67));
   for (std::size_t i = 1; i < heap.used(); ++i) heap[i] = payload(i);
   auto const capacity = heap.capacity();
@@ -340,8 +380,13 @@ void invalid_requests_leave_heap_unchanged() noexcept {
     for (std::size_t i = 1; i < used; ++i)
       check(heap[i] == payload(i), "rejected requests leave existing data unchanged");
   };
-  for (unsigned scenario = 0; scenario != 7; ++scenario) {
+  for (unsigned scenario = 0; scenario != 10; ++scenario) {
     char const code[]{static_cast<char>('0' + scenario), '\0'};
+#if defined(_WIN32)
+    auto const status = ::_spawnl(_P_WAIT, executable, executable, "--invalid-request", code,
+                                static_cast<char const *>(nullptr));
+    check(status == 3, "invalid requests terminate with the CRT abort status");
+#else
     auto const child = ::fork();
     check(child != -1, "the invalid-request subprocess starts");
     if (child == 0) {
@@ -356,28 +401,37 @@ void invalid_requests_leave_heap_unchanged() noexcept {
     check(finished == child, "the invalid-request subprocess finishes");
     check(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
           "invalid geometry, zero allocations and overflow abort in release builds");
+#endif
     unchanged();
   }
 }
 
 void invalid_request(unsigned scenario) noexcept {
+  if (scenario >= 7) {
+    using namespace jam::units;
+    volatile auto maximum = std::numeric_limits<std::size_t>::max();
+    if (scenario == 7) static_cast<void>(bytes{maximum} + bytes{1});
+    if (scenario == 8) static_cast<void>(space_cast<bytes>(kibibytes{maximum}));
+    if (scenario == 9) static_cast<void>(space_cast<bytes>(space<double>{std::numeric_limits<double>::infinity()}));
+    return;
+  }
   struct geometry { std::size_t pages, reserve; };
   constexpr geometry invalid[]{{0, 1}, {1, 1}, {8, 0}, {4, 3},
     {std::size_t{1} << (std::numeric_limits<std::size_t>::digits - 1), 1}};
   if (scenario < 5) {
-    volatile std::size_t capacity_bytes = scenario == 4 ? std::numeric_limits<std::uint64_t>::max()
-                                                     : invalid[scenario].pages * page_bytes;
+    volatile std::size_t capacity_pages = scenario == 4 ? std::numeric_limits<std::uint64_t>::max()
+                                                     : invalid[scenario].pages;
     volatile std::size_t reserve = invalid[scenario].reserve;
-    heap_type rejected{jam::heap_options{.capacity = capacity_bytes, .reserve = reserve * page_bytes}};
+    heap_type rejected{jam::heap_options{.capacity = jam::units::pages{capacity_pages}, .reserve = jam::units::pages{reserve}}};
   } else {
-    heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes}};
+    heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
     volatile std::size_t words = scenario == 5 ? 0 : std::numeric_limits<std::size_t>::max();
     static_cast<void>(heap.allocate(words));
   }
 }
 
 void concurrent_range_marks_preserve_the_union() noexcept {
-  heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes, .workers = 4}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}, .workers = 4}};
   auto const count = 4 * heap.page_words() + 137;
   static_cast<void>(heap.allocate(count - 1));
   for (std::size_t i = 1; i < count; ++i) heap[i] = payload(i);
@@ -435,7 +489,7 @@ void concurrent_range_marks_preserve_the_union() noexcept {
 }
 
 void parallel_claim_traverses_each_cyclic_record_once() noexcept {
-  heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 2 * page_bytes, .workers = 4}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}, .workers = 4}};
   std::vector<std::size_t> const widths{3, 67, heap.page_words() + 65, 5, 64, 73, 193, 4};
   std::vector<offset> records;
   for (auto const width : widths) {
@@ -492,7 +546,7 @@ void parallel_claim_traverses_each_cyclic_record_once() noexcept {
 }
 
 void empty_collection_preserves_null_roots() noexcept {
-  heap_type heap{jam::heap_options{.capacity = 8 * page_bytes, .reserve = 1 * page_bytes}};
+  heap_type heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{1}}};
   static_cast<void>(heap.allocate(73));
   std::vector<unsigned char> live(heap.used(), 0), pointers(heap.used(), 0);
   std::vector<offset> roots{null, null};
@@ -503,11 +557,18 @@ void empty_collection_preserves_null_roots() noexcept {
 } // namespace
 
 int main(int argc, char * argv[]) noexcept {
+#if defined(_WIN32)
+  ::_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+  static_cast<void>(_CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE));
+  static_cast<void>(_CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR));
+  ::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+#endif
   executable = argv[0];
   if (argc == 3 && std::string_view{argv[1]} == "--invalid-request") {
     invalid_request(static_cast<unsigned>(argv[2][0] - '0'));
     return 0;
   }
+  check_compactors();
   byte_literals();
   alias_and_layout();
   allocation_growth_preserves_reserve();
@@ -521,6 +582,8 @@ int main(int argc, char * argv[]) noexcept {
   empty_collection_preserves_null_roots();
   full_parallel_waves_preserve_every_word();
   full_parallel_waves_preserve_every_word(7);
+  mapping_resources_are_released();
+  excessive_capacity_throws_before_mapping();
   invalid_requests_leave_heap_unchanged();
   concurrent_range_marks_preserve_the_union();
   parallel_claim_traverses_each_cyclic_record_once();
