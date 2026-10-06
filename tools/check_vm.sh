@@ -33,6 +33,10 @@ for mode in interpreter c1 c2; do
     -XX:CompileCommand=dontinline,GenerationSmoke::copy \
     GenerationSmoke > "evidence/$prefix-GenerationSmoke-$mode.log" 2>&1
   tail -2 "evidence/$prefix-GenerationSmoke-$mode.log"
+  "$vm" "${flags[@]}" "${compiler[@]}" -Xms128m -Xmx128m -XX:JamYoungSize=8m \
+    '-XX:CompileCommand=dontinline,CompiledBarrierSmoke::*' CompiledBarrierSmoke \
+    > "evidence/$prefix-CompiledBarrierSmoke-$mode.log" 2>&1
+  tail -2 "evidence/$prefix-CompiledBarrierSmoke-$mode.log"
 done
 "$vm" "${flags[@]}" -Xms64m -Xmx64m -XX:JamYoungSize=32m \
   -XX:JamPromoteEvery=1000 GenerationCapacitySmoke \

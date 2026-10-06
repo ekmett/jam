@@ -1,6 +1,6 @@
 # Supported configurations
 
-Use the patched JDK 25 on macOS arm64. Select Jam with
+Use the patched JDK 25 or GraalVM 25.3.4.1 on macOS 26 arm64. Select Jam with
 `-XX:+UnlockExperimentalVMOptions -XX:+UseJamGC` and set equal initial and
 maximum heap sizes. The [build guide](build.md) gives the toolchain and commands.
 
@@ -18,9 +18,10 @@ shift-three compressed oops. Each generation, including its guard and copy
 reserve, must fit within a 16 GiB domain. Class unloading and CDS heap loading
 are disabled.
 
-Interpreter, C1 and C2 execution are available. JVMCI can inspect the Jam
-identity, but `UseJVMCICompiler` is rejected until Graal supports its card
-barriers. Other operating systems and instruction sets still need validation.
+Interpreter, C1, C2 and the patched Graal compiler use Jam's card barriers.
+The GraalVM build includes patched libgraal. The VM rejects a compiler that
+does not recognize Jam before it can install Java code. Other operating
+systems and instruction sets still need validation.
 
 ## Guest API
 
@@ -33,14 +34,12 @@ metadata, so native memory use grows with lifetime registrations. Allocation
 failure while growing that metadata terminates instead of throwing Java
 `OutOfMemoryError`. Keep this in mind for long-running, weak-heavy workloads.
 
-The current JDK also depends on libraries in its build checkout. Moving the
-JDK image alone does not produce a self-contained installation; see
-[packaging](build.md#packaging).
+Use the [packaged runtime](build.md#packaging) when moving an installation
+out of its build checkout.
 
 ## Next steps
 
-Graal needs collector recognition and card-barrier selection before it can
-compile code for this heap. The thc owner can use the existing Java hooks to
+The thc owner can use the existing Java hooks to
 lower weak primitives and wrap guest finalizers in runnables. GHC C finalizers
 and weak-thread resurrection need additional runtime support.
 

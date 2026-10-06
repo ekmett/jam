@@ -146,9 +146,16 @@ Java and generalized weak policy both use jam's actual marks and movement.
 
 ## Compiler support
 
-Interpreter, C1 and C2 use Jam's card barriers. JVMCI can inspect the Jam
-identity, but Graal needs collector recognition and card-barrier selection.
-Until then, `UseJVMCICompiler` is rejected.
+Interpreter, C1 and C2 use Jam's card barriers. The
+[Graal patch](../patches/graal-jam.patch) recognizes Jam's exported collector
+identity and selects the generic card-table barrier set. Both Java Graal and
+libgraal use that selection. The VM checks the actual compiler's GC support
+before installing Java code, including code returned by a libgraal isolate.
+An unmodified compiler cannot silently treat Jam as Serial GC.
+
+Graal can keep derived pointers into objects across a safepoint. After movement,
+the collector publishes the new space tops before repairing those pointers, so
+promoted bases are valid members of the heap during repair.
 
 Native Image requires a separate SubstrateVM adapter. Its allocation lowering,
 stack maps, image heap, compressed encoding and pinning rules are different

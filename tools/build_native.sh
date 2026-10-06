@@ -10,6 +10,7 @@ compiler=${JAM_CXX:-$root/.toolchains/llvm23/bin/clang++}
 library=${JAM_LIBCXX_PREFIX:-/opt/homebrew/opt/llvm@22}
 args=(-S . -B build-jam -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja_bin"
       "-DCMAKE_CXX_COMPILER=$compiler" -DCMAKE_BUILD_TYPE=Release
+      "-DJAM_VM_HOTSPOT_SOURCE=${JAM_HOTSPOT_SOURCE:-$root/upstream/jdk25}"
       "-DFETCHCONTENT_SOURCE_DIR_JAM_NATIVE=$root/upstream/native")
 if [[ $(uname) == Darwin ]]; then
   args+=("-DCMAKE_OSX_SYSROOT=$(xcrun --show-sdk-path)"

@@ -37,7 +37,7 @@ check('jvmci-enabled', ['-XX:+UseJamGC', '-XX:+EnableJVMCI', '-XX:-UseJVMCICompi
       '--add-exports=jdk.internal.vm.ci/jdk.vm.ci.hotspot=ALL-UNNAMED'],
       ['CollectorIdentitySmoke', 'Jam', 'JVMCI'],
       ['JVMCI runtime initialized with Jam identity', 'CollectorIdentitySmoke passed: Jam Heap'])
-check('graal-rejected', ['-XX:+UseJamGC', '-XX:+EnableJVMCI', '-XX:+UseJVMCICompiler'],
-      ['-version'], ['requires Graal card-barrier support'], success=False)
+check('jvmci-compiler-selection', ['-XX:+UseJamGC', '-XX:+EnableJVMCI', '-XX:+UseJVMCICompiler',
+      '-XX:-UseJVMCINativeLibrary'], ['-version'], ['Using Jam'])
 check('encoding-rejected', ['-XX:+UseJamGC', '-XX:-UseCompressedOops'], ['-version'],
       ['requires compressed oops'], success=False)

@@ -34,12 +34,13 @@ target_link_libraries(jam-generational-test PRIVATE jam_vm)
 add_test(NAME jam-generational-test COMMAND jam-generational-test)
 
 set(JAM_VM_JAVA_HOME "" CACHE PATH "JDK providing JNI headers for the guest smoke bridge")
+set(JAM_VM_HOTSPOT_SOURCE "${CMAKE_SOURCE_DIR}/upstream/jdk25" CACHE PATH "Prepared HotSpot source providing the Jam VM exports")
 if(JAM_VM_JAVA_HOME)
   add_library(jam_jni SHARED tests/jam_jni.c tests/critical_jni.c)
   target_include_directories(jam_jni PRIVATE
     "${JAM_VM_JAVA_HOME}/include"
     "${JAM_VM_JAVA_HOME}/include/$<IF:$<PLATFORM_ID:Darwin>,darwin,linux>"
-    "${CMAKE_SOURCE_DIR}/upstream/jdk25/src/hotspot/share/include")
+    "${JAM_VM_HOTSPOT_SOURCE}/src/hotspot/share/include")
   if(APPLE)
     target_link_options(jam_jni PRIVATE -undefined dynamic_lookup)
   endif()

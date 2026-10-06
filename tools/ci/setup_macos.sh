@@ -4,7 +4,7 @@
 set -euo pipefail
 
 mode=${1:-native}
-[[ $mode == native || $mode == hotspot ]] || { echo 'Expected native or hotspot' >&2; exit 1; }
+[[ $mode == native || $mode == hotspot || $mode == graal ]] || { echo 'Expected native, hotspot or graal' >&2; exit 1; }
 [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]] || { echo 'Requires macOS arm64' >&2; exit 1; }
 : "${JAM_CI_TOOLS:?Set JAM_CI_TOOLS to the dependency installation directory}"
 mkdir -p "$JAM_CI_TOOLS"
@@ -41,7 +41,8 @@ if [[ ! -f $prefix/native-ready ]]; then
     --header 'Authorization: Bearer QQ=='
   mkdir -p "$prefix/libcxx22"
   tar -xzf "$scratch/libcxx.tar.gz" -C "$prefix/libcxx22" --strip-components=2 \
-    'llvm@22/22.1.8/include/c++' 'llvm@22/22.1.8/lib/c++' 'llvm@22/22.1.8/lib/unwind'
+    'llvm@22/22.1.8/include/c++' 'llvm@22/22.1.8/lib/c++' 'llvm@22/22.1.8/lib/unwind' \
+    'llvm@22/22.1.8/LICENSE.TXT'
   for entry in c++/libc++ c++/libc++abi unwind/libunwind; do
     library="$prefix/libcxx22/lib/$entry.1.0.dylib"
     chmod u+w "$library"
@@ -66,7 +67,7 @@ if [[ ! -f $prefix/native-ready ]]; then
   touch "$prefix/native-ready"
 fi
 
-if [[ $mode == hotspot && ! -f $prefix/hotspot-ready ]]; then
+if [[ $mode != native && ! -f $prefix/hotspot-ready ]]; then
   # Build the small GNU tools with Apple's compiler; do not change PATH to LLVM.
   download m4.tar.gz 6ac4fc31ce440debe63987c2ebbf9d7b6634e67a7c3279257dc7361de8bdb3ef \
     https://mirrors.kernel.org/gnu/m4/m4-1.4.20.tar.gz
@@ -88,6 +89,15 @@ if [[ $mode == hotspot && ! -f $prefix/hotspot-ready ]]; then
   touch "$prefix/hotspot-ready"
 fi
 
+if [[ $mode == graal && ! -f $prefix/graal-ready ]]; then
+  # The unmodified matching compiler is also used to check Jam's admission guard.
+  download graalvm.tar.gz ebfab1d74420f355a459076162012d6835fa6068bd9d2f230f1fcaf7ee0dd923 \
+    https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.3.4.1/graalvm-community-jdk-25i3-25.0.4.1_macos-aarch64_bin.tar.gz
+  mkdir -p "$prefix/graal25"
+  tar -xzf "$scratch/graalvm.tar.gz" -C "$prefix/graal25" --strip-components=1
+  touch "$prefix/graal-ready"
+fi
+
 # This file can also be sourced when reproducing a CI job locally.
 {
   printf 'export JAM_CXX=%q\n' "$prefix/llvm23/bin/clang++"
@@ -95,6 +105,9 @@ fi
   printf 'export JAM_CMAKE=%q\n' "$prefix/cmake/CMake.app/Contents/bin/cmake"
   printf 'export JAM_NINJA=%q\n' "$prefix/ninja/ninja"
   printf 'export JAM_BOOT_JDK=%q\n' "$prefix/jdk25/Contents/Home"
+  if [[ $mode == graal ]]; then
+    printf 'export JAM_STOCK_GRAAL_HOME=%q\n' "$prefix/graal25/Contents/Home"
+  fi
   printf 'export JAM_AUTOCONF=%q\n' "$prefix/gnu/bin/autoconf"
   printf 'export JAM_M4=%q\n' "$prefix/gnu/bin/m4"
   printf 'export JAM_MAKE=%q\n' "$prefix/gnu/bin/make"

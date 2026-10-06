@@ -5,4 +5,5 @@
 __pycache__/
 /.local/
 /evidence/
+/graal_dumps/
 *.log

@@ -48,7 +48,7 @@ For module-path use, enable native access for `jam.vm` instead. Load the API
 from a shared host class loader: the JVM associates a loaded native library
 with its loader. The JAR and shim are a pair for the pinned Jam-enabled JDK,
 not an independently versioned VM extension protocol. The current native
-build supports Darwin and Linux; the current runtime target is macOS arm64.
+build supports Darwin and Linux; the current runtime target is macOS 26 arm64.
 
 ## Register and dereference
 
@@ -145,10 +145,20 @@ retained graph. Repeated completion is harmless.
 
 ## Runtime requirements
 
-Use the Jam-enabled JDK and keep its backend libraries available. This API does
-not remove the Graal compiler gate: `UseJVMCICompiler` remains rejected until
-Jam's barriers are integrated. See [supported configurations](status.md) for
-current collector limits and the remaining guest-runtime work.
+Use the [Jam-enabled GraalVM](build.md#graalvm) for compiled Truffle execution.
+The packaged runtime includes the API at `lib/jam/jam-vm.jar` and its native
+libraries under `lib/jam/`. Keep thc's patched Truffle libraries on its normal
+runtime class path.
 
 thc currently enables compact object headers by default. Build its launchers
 with `-Pthc.compactObjectHeaders=false` for Jam, which requires ordinary headers.
+Set `JAVA_HOME` to the packaged GraalVM and add these JVM options when launching
+thc:
+
+```sh
+export THC_OPTS="-Xshare:off -Xms256m -Xmx256m -XX:+UnlockExperimentalVMOptions -XX:+UseJamGC"
+```
+
+This selects the collector. The thc runtime still needs to lower its weak
+primitives through this API and arrange to pump finalizers. See
+[supported configurations](status.md) for the remaining runtime work.

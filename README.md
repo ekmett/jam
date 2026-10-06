@@ -67,9 +67,10 @@ low-level claims, native loading and the thc handoff.
 * [HotSpot integration](docs/hotspot-integration.md)
 * [Supported configurations](docs/status.md)
 
-The current target is macOS arm64 on the patched JDK 25, with fixed capacities,
-stop-the-world collection and compressed oops. Graal compiler support and
-Native Image remain work to do.
+The current target is macOS 26 arm64 on the patched JDK 25 or
+[GraalVM 25.3.4.1](docs/build.md#graalvm), with fixed capacities,
+stop-the-world collection and compressed oops. Native Image needs a separate
+collector adapter.
 
 ## Source and license
 

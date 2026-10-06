@@ -4,7 +4,9 @@
 """Export the HotSpot adaptation against the pinned source archive."""
 import difflib
 from pathlib import Path
+import subprocess
 import tarfile
+import tempfile
 root = Path(__file__).resolve().parents[1]
 def difference(before, after, name):
     return ''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
@@ -28,6 +30,7 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
         'src/hotspot/share/gc/shared/gcConfiguration.cpp',
         'src/hotspot/share/jvmci/vmStructs_jvmci.cpp',
         'src/hotspot/share/jvmci/jvmciCompilerToVMInit.cpp',
+        'src/hotspot/share/jvmci/jvmciCompilerToVM.cpp',
         'src/hotspot/share/jvmci/jvmci_globals.cpp',
         'src/jdk.hotspot.agent/share/classes/sun/jvm/hotspot/memory/Universe.java',
         'src/jdk.hotspot.agent/share/classes/sun/jvm/hotspot/gc/shared/CollectedHeapName.java',
@@ -52,3 +55,24 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
         patch += difference(before, p.read_text(), name)
 (root / 'patches/hotspot-jam.patch').write_text(patch)
 print('Exported the HotSpot source patch.')
+labs_archive = root / 'upstream/labsjdk25.tar.gz'
+if labs_archive.exists():
+    with tarfile.open(labs_archive) as archive:
+        names = ['src/hotspot/share/code/nmethod.hpp',
+                 'src/hotspot/share/jvmci/jvmciCompilerToVM.cpp']
+        with tempfile.TemporaryDirectory(prefix='jam-labs-patch-') as temporary:
+            stage = Path(temporary)
+            for name in names:
+                member = next(m for m in archive.getmembers() if m.name.endswith('/' + name))
+                target = stage / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.extractfile(member).read())
+            # Compare with the common Jam patch already applied to these files.
+            shared = ''.join('--- a/' + section for section in patch.split('--- a/')[1:]
+                             if section.splitlines()[0] in names)
+            subprocess.run(['patch', '--batch', '--fuzz=0', '-p1'], cwd=stage,
+                           input=shared, text=True, check=True)
+            compatibility = ''.join(difference((stage / name).read_text(),
+                (root / 'upstream/labsjdk25' / name).read_text(), name) for name in names)
+            (root / 'patches/labsjdk-compat.patch').write_text(compatibility)
+    print('Exported the LabsJDK compatibility patch.')

@@ -3,12 +3,17 @@
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Check the clean Jam pin and reproduce the HotSpot adaptation from its patch."""
 import json
+import argparse
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--graal', action='store_true', help='Check LabsJDK and Graal adaptations')
+options = parser.parse_args()
+label = 'labsjdk25' if options.graal else 'jdk25'
 jam = root / 'upstream/jam'
 pin = json.loads((root / 'config/source-pins.json').read_text())['jam']['commit']
 head = subprocess.check_output(['git', '-C', str(jam), 'rev-parse', 'HEAD'], text=True).strip()
@@ -16,12 +21,15 @@ dirty = subprocess.check_output(['git', '-C', str(jam), 'status', '--porcelain']
 if head != pin or dirty:
     raise SystemExit('Jam must be an unmodified checkout of the pinned revision.')
 print('Jam is unmodified at the pinned revision.')
-with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
+with tarfile.open(root / 'upstream' / (label + '.tar.gz')) as archive:
     members = {m.name.split('/', 1)[1]: m for m in archive.getmembers()
                if '/' in m.name and m.isfile()}
-    patch = root / 'patches/hotspot-jam.patch'
-    adapted = root / 'upstream/jdk25'
-    paths = [line[6:] for line in patch.read_text().splitlines() if line.startswith('--- a/')]
+    patches = [root / 'patches/hotspot-jam.patch']
+    if options.graal:
+        patches.append(root / 'patches/labsjdk-compat.patch')
+    adapted = root / 'upstream' / label
+    paths = sorted({line[6:] for patch in patches for line in patch.read_text().splitlines()
+                    if line.startswith('--- a/')})
     with tempfile.TemporaryDirectory(prefix='jam-patch-') as temporary:
         stage = Path(temporary)
         for name in paths:
@@ -32,19 +40,23 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
             target.parent.mkdir(parents=True, exist_ok=True)
             if name in members:
                 target.write_bytes(archive.extractfile(members[name]).read())
-        subprocess.run(['patch', '-p1', '-i', str(patch)], cwd=stage, check=True)
+        for patch in patches:
+            subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-i', str(patch)], cwd=stage, check=True)
         for name in paths:
             if (stage / name).read_bytes() != (adapted / name).read_bytes():
                 raise SystemExit(f'Patch round trip differs: {name}')
-    print(f'{patch.name}: {len(paths)} files reproduced exactly')
+    print(f'{", ".join(patch.name for patch in patches)}: {len(paths)} files reproduced exactly')
     epsilon_prefix = 'src/hotspot/share/gc/epsilon/'
     expected = {name for name in members if name.startswith(epsilon_prefix)}
-    actual = {str(p.relative_to(root / 'upstream/jdk25'))
-              for p in (root / 'upstream/jdk25' / epsilon_prefix).rglob('*') if p.is_file()}
+    actual = {str(p.relative_to(adapted))
+              for p in (adapted / epsilon_prefix).rglob('*') if p.is_file()}
     if actual != expected:
         raise SystemExit('Epsilon source file set differs from the pinned original')
     expected.add('src/jdk.hotspot.agent/share/classes/sun/jvm/hotspot/gc/epsilon/EpsilonHeap.java')
     for name in expected:
-        if (root / 'upstream/jdk25' / name).read_bytes() != archive.extractfile(members[name]).read():
+        if (adapted / name).read_bytes() != archive.extractfile(members[name]).read():
             raise SystemExit(f'Original Epsilon source changed: {name}')
     print('Epsilon collector and SA heap sources are byte-for-byte upstream.')
+if options.graal:
+    import sys
+    subprocess.run([sys.executable, str(root / 'tools/prepare_graal.py'), '--check'], check=True)

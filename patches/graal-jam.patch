@@ -1,0 +1,151 @@
+diff --git a/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/DeferredBarrierAdditionTest.java b/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/DeferredBarrierAdditionTest.java
+index 485ec398..e6fe58d4 100644
+--- a/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/DeferredBarrierAdditionTest.java
++++ b/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/DeferredBarrierAdditionTest.java
+@@ -74,8 +74,8 @@ public class DeferredBarrierAdditionTest extends HotSpotGraalCompilerTest {
+ 
+     @Before
+     public void checkGC() {
+-        assumeTrue("this test only works for G1 and the serial collector",
+-                        config.gc == HotSpotGraalRuntime.HotSpotGC.G1 || config.gc == HotSpotGraalRuntime.HotSpotGC.Serial);
++        assumeTrue("this test only works for G1, Serial and Jam",
++                        config.gc == HotSpotGraalRuntime.HotSpotGC.G1 || config.gc == HotSpotGraalRuntime.HotSpotGC.Serial || config.gc == HotSpotGraalRuntime.HotSpotGC.Jam);
+     }
+ 
+     @Test
+diff --git a/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/GraalHotSpotVMConfigAccessTest.java b/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/GraalHotSpotVMConfigAccessTest.java
+index 0e5a63d3..766cd12f 100644
+--- a/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/GraalHotSpotVMConfigAccessTest.java
++++ b/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/GraalHotSpotVMConfigAccessTest.java
+@@ -29,12 +29,17 @@ import java.util.function.Supplier;
+ 
+ import jdk.graal.compiler.api.test.Graal;
+ import jdk.graal.compiler.hotspot.GraalHotSpotVMConfig;
++import jdk.graal.compiler.hotspot.HotSpotGraalCompiler;
++import jdk.graal.compiler.hotspot.HotSpotGraalRuntime.HotSpotGC;
+ import jdk.graal.compiler.hotspot.HotSpotGraalRuntimeProvider;
++import jdk.graal.compiler.nodes.gc.CardTableBarrierSet;
+ import jdk.graal.compiler.runtime.RuntimeProvider;
+ import org.junit.Assert;
+ import org.junit.Test;
+ 
+ import jdk.vm.ci.common.JVMCIError;
++import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
++import jdk.vm.ci.hotspot.HotSpotVMConfigAccess;
+ 
+ public class GraalHotSpotVMConfigAccessTest {
+     @Test
+@@ -55,6 +60,36 @@ public class GraalHotSpotVMConfigAccessTest {
+         testErrorInternal(() -> config.getFlag("unknownFlagObject", Object.class), "unknownFlagObject");
+     }
+ 
++    @Test
++    public void testCollectorAdmission() {
++        HotSpotGraalRuntimeProvider rt = (HotSpotGraalRuntimeProvider) Graal.getRequiredCapability(RuntimeProvider.class);
++        GraalHotSpotVMConfig config = rt.getVMConfig();
++        HotSpotGraalCompiler compiler = (HotSpotGraalCompiler) HotSpotJVMCIRuntime.runtime().getCompiler();
++        int selected = config.getConstant("CollectedHeap::" + config.gc.name(), Integer.class);
++        Assert.assertTrue(compiler.isGCSupported(selected));
++        Assert.assertFalse(compiler.isGCSupported(-1));
++        if (config.getStore().getConstants().containsKey("CollectedHeap::Jam")) {
++            int jam = config.getConstant("CollectedHeap::Jam", Integer.class);
++            Assert.assertTrue(compiler.isGCSupported(jam));
++            Assert.assertNotEquals(config.getConstant("CollectedHeap::Serial", Integer.class).intValue(), jam);
++            Assert.assertNotEquals(config.getConstant("CollectedHeap::Epsilon", Integer.class).intValue(), jam);
++        }
++    }
++
++    @Test
++    public void testSelectedBarrierSet() {
++        HotSpotGraalRuntimeProvider rt = (HotSpotGraalRuntimeProvider) Graal.getRequiredCapability(RuntimeProvider.class);
++        GraalHotSpotVMConfig config = rt.getVMConfig();
++        boolean selected = new HotSpotVMConfigAccess(config.getStore()).getFlag("UseJamGC", Boolean.class, false);
++        Assert.assertEquals(selected, HotSpotGC.Jam.isSelected(config));
++        Assert.assertEquals(selected, config.gc == HotSpotGC.Jam);
++        if (selected) {
++            Assert.assertEquals(CardTableBarrierSet.class, rt.getHostProviders().getPlatformConfigurationProvider().getBarrierSet().getClass());
++            Assert.assertTrue(config.useCompressedOops);
++            Assert.assertEquals(3, config.getOopEncoding().getShift());
++        }
++    }
++
+     private static void testErrorInternal(Supplier<Object> fn, String expectedName) {
+         try {
+             Object obj = fn.get();
+diff --git a/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/WriteBarrierAdditionTest.java b/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/WriteBarrierAdditionTest.java
+index e2c91af7..bc7a5263 100644
+--- a/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/WriteBarrierAdditionTest.java
++++ b/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/WriteBarrierAdditionTest.java
+@@ -87,7 +87,7 @@ public class WriteBarrierAdditionTest extends HotSpotGraalCompilerTest {
+      * The set of GCs known at the time of writing of this test. The number of expected barrier
+      * might need to be adjusted for new GCs implementations.
+      */
+-    private static EnumSet<HotSpotGC> knownSupport = EnumSet.of(HotSpotGC.G1, HotSpotGC.Parallel, HotSpotGC.Serial);
++    private static EnumSet<HotSpotGC> knownSupport = EnumSet.of(HotSpotGC.G1, HotSpotGC.Parallel, HotSpotGC.Serial, HotSpotGC.Jam);
+ 
+     private final GraalHotSpotVMConfig config = runtime().getVMConfig();
+ 
+@@ -116,7 +116,7 @@ public class WriteBarrierAdditionTest extends HotSpotGraalCompilerTest {
+ 
+     @Before
+     public void checkAssemblyBarriers() {
+-        Assume.assumeFalse("doesn't work with assembly barriers ", AssemblyGCBarriers.getValue(getInitialOptions()));
++        Assume.assumeFalse("doesn't work with G1 assembly barriers", config.useG1GC() && AssemblyGCBarriers.getValue(getInitialOptions()));
+     }
+ 
+     private int expectedBarriers;
+diff --git a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotBackendFactory.java b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotBackendFactory.java
+index 4ccb902a..80353fec 100644
+--- a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotBackendFactory.java
++++ b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotBackendFactory.java
+@@ -274,17 +274,13 @@ public abstract class HotSpotBackendFactory implements ArchitectureSpecific {
+         boolean useDeferredInitBarriers = config.useDeferredInitBarriers;
+         ResolvedJavaType objectArrayType = metaAccess.lookupJavaType(Object[].class);
+         ResolvedJavaField referentField = HotSpotReplacementsUtil.referentField(metaAccess);
+-        if (config.gc == HotSpotGraalRuntime.HotSpotGC.Z) {
+-            return new HotSpotZBarrierSet(objectArrayType, referentField);
+-        } else if (config.gc == HotSpotGraalRuntime.HotSpotGC.Shenandoah) {
+-            return new HotSpotShenandoahBarrierSet(objectArrayType, referentField, config);
+-        } else if (config.gc == HotSpotGraalRuntime.HotSpotGC.Epsilon) {
+-            return new NoBarrierSet();
+-        } else if (config.useG1GC()) {
+-            return new HotSpotG1BarrierSet(objectArrayType, referentField, useDeferredInitBarriers, config);
+-        } else {
+-            return new CardTableBarrierSet(objectArrayType, useDeferredInitBarriers);
+-        }
++        return switch (config.gc) {
++            case Z -> new HotSpotZBarrierSet(objectArrayType, referentField);
++            case Shenandoah -> new HotSpotShenandoahBarrierSet(objectArrayType, referentField, config);
++            case Epsilon -> new NoBarrierSet();
++            case G1 -> new HotSpotG1BarrierSet(objectArrayType, referentField, useDeferredInitBarriers, config);
++            case Serial, Parallel, Jam -> new CardTableBarrierSet(objectArrayType, useDeferredInitBarriers);
++        };
+     }
+ 
+     private static class HotSpotG1BarrierSet extends G1BarrierSet {
+diff --git a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotGraalRuntime.java b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotGraalRuntime.java
+index c180c566..8d8ee5cc 100644
+--- a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotGraalRuntime.java
++++ b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotGraalRuntime.java
+@@ -234,6 +234,7 @@ public final class HotSpotGraalRuntime implements HotSpotGraalRuntimeProvider {
+         Parallel("UseParallelGC"),
+         G1("UseG1GC"),
+         Epsilon("UseEpsilonGC"),
++        Jam(true, false, true, config -> config.getStore().getFlags().containsKey("UseJamGC") && config.getFlag("UseJamGC", Boolean.class)),
+         // GR-54355 ZGC and Shenandoah require extra work to support vectorization
+         Z("UseZGC", false),
+         Shenandoah("UseShenandoahGC", false);
+@@ -294,7 +295,12 @@ public final class HotSpotGraalRuntime implements HotSpotGraalRuntimeProvider {
+          */
+         static HotSpotGC forName(int name, GraalHotSpotVMConfig config) {
+             for (HotSpotGC gc : HotSpotGC.values()) {
+-                if (config.getConstant("CollectedHeap::" + gc.name(), Integer.class, -1, gc.expectNamePresent) == name) {
++                String constant = "CollectedHeap::" + gc.name();
++                // An optional collector may be absent on an unmodified HotSpot VM.
++                if (!gc.expectNamePresent && !config.getStore().getConstants().containsKey(constant)) {
++                    continue;
++                }
++                if (config.getConstant(constant, Integer.class) == name) {
+                     return gc;
+                 }
+             }

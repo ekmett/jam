@@ -105,3 +105,61 @@ jobs:
           bash tools/check_vm.sh
           python3 tools/check_gc_registration.py
           python3 tools/check_bridge.py
+      - name: Package and relocate the JDK
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          python3 tools/package_jdk.py \
+            --java-home upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk \
+            --output build/jam-jdk
+          mv build/jam-jdk "$RUNNER_TEMP/jam-jdk"
+          python3 tools/check_package.py --java-home "$RUNNER_TEMP/jam-jdk"
+
+  graal:
+    name: GraalVM integration
+    needs: native
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: macos-26
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select dependency directory
+        run: echo "JAM_CI_TOOLS=$RUNNER_TEMP/jam-vm-toolchain" >> "$GITHUB_ENV"
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/jam-vm-toolchain
+          key: macos-26-arm64-xcode26.6-graal-${{ hashFiles('tools/ci/setup_macos.sh') }}
+          restore-keys: |
+            macos-26-arm64-xcode26.6-hotspot-${{ hashFiles('tools/ci/setup_macos.sh') }}
+            macos-26-arm64-xcode26.6-native-${{ hashFiles('tools/ci/setup_macos.sh') }}
+      - name: Install pinned build dependencies
+        run: bash tools/ci/setup_macos.sh graal
+      - name: Prepare pinned LabsJDK and Graal sources
+        run: |
+          python3 tools/fetch_sources.py --graal
+          python3 tools/prepare_jdk.py --graal
+          python3 tools/prepare_graal.py
+          python3 tools/check_patches.py --graal
+      - name: Build native collector and LabsJDK
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          export JAM_HOTSPOT_SOURCE="$PWD/upstream/labsjdk25"
+          bash tools/build_native.sh
+          bash tools/build_hotspot.sh --graal
+      - name: Build and package GraalVM
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          bash tools/build_graal.sh
+      - name: Check compiler barriers and derived pointers
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          bash tools/check_graal_compiler.sh
+      - name: Run compiled heap and weak-pointer regressions
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          python3 tools/check_graal.py --unsupported-libgraal "$JAM_STOCK_GRAAL_HOME/lib"
+      - name: Relocate GraalVM and check the guest API
+        run: |
+          mv build/graalvm "$RUNNER_TEMP/jam-graalvm"
+          python3 tools/check_package.py --java-home "$RUNNER_TEMP/jam-graalvm"

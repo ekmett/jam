@@ -108,7 +108,7 @@
  
 --- a/src/hotspot/share/gc/jam/jamArguments.cpp
 +++ b/src/hotspot/share/gc/jam/jamArguments.cpp
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,100 @@
 +/*
 + * Copyright (c) 2017, 2018, Red Hat, Inc. All rights reserved.
 + * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -142,9 +142,6 @@
 +#include "runtime/globals.hpp"
 +#include "runtime/globals_extension.hpp"
 +#include "runtime/java.hpp"
-+#if INCLUDE_JVMCI
-+#include "jvmci/jvmci_globals.hpp"
-+#endif
 +
 +size_t JamArguments::conservative_max_heap_alignment() {
 +  return MAX2(size_t(UseLargePages ? os::large_page_size() : os::vm_page_size()),
@@ -155,12 +152,6 @@
 +  GCArguments::initialize();
 +
 +  assert(UseJamGC, "Sanity");
-+
-+#if INCLUDE_JVMCI
-+  if (UseJVMCICompiler) {
-+    vm_exit_during_initialization("Generational jam requires Graal card-barrier support; UseJVMCICompiler is not yet supported");
-+  }
-+#endif
 +
 +  if (!UseCompressedOops || ObjectAlignmentInBytes != 8 || UseLargePages ||
 +      UseCompactObjectHeaders || AllocateHeapAt != nullptr) {
@@ -375,7 +366,7 @@
 +#endif // SHARE_GC_JAM_JAMBARRIERSET_HPP
 --- a/src/hotspot/share/gc/jam/jamHeap.cpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.cpp
-@@ -0,0 +1,796 @@
+@@ -0,0 +1,797 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -1135,11 +1126,12 @@
 +  for (int i = 0; i < state.old_slots.length(); ++i) {
 +    adjust.do_oop(state.old_slots.at(i));
 +  }
-+  COMPILER2_OR_JVMCI_PRESENT(DerivedPointerTable::update_pointers());
 +  jam_vm_finish(_jam);
 +  _space->set_top((HeapWord*)(CompressedOops::base() + jam_vm_used(_jam, false) * HeapWordSize));
 +  _young_space->set_top((HeapWord*)(CompressedOops::base() + jam_young_displacement +
 +                                   jam_vm_used(_jam, true) * HeapWordSize));
++  // Promoted bases must be inside the published old space before validation.
++  COMPILER2_OR_JVMCI_PRESENT(DerivedPointerTable::update_pointers());
 +  if (!minor || promoted) rebuild_old_metadata(!minor);
 +  if (minor) ++_minor_collections; else ++_major_collections;
 +  if (promoted) ++_promotions;
@@ -2374,6 +2366,34 @@
  
  /* Returns the number of real-time milliseconds that have elapsed since the
   * least-recently-inspected heap object was last inspected by the garbage
+--- a/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp
++++ b/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp
+@@ -33,6 +33,7 @@
+ #include "compiler/compilerOracle.hpp"
+ #include "compiler/disassembler.hpp"
+ #include "compiler/oopMap.hpp"
++#include "gc/shared/collectedHeap.hpp"
+ #include "interpreter/bytecodeStream.hpp"
+ #include "interpreter/linkResolver.hpp"
+ #include "interpreter/oopMapCache.hpp"
+@@ -1158,6 +1159,17 @@
+ 
+   CodeBlob* cb = nullptr;
+   JVMCIObject installed_code_handle = JVMCIENV->wrap(installed_code);
++  if (Universe::heap()->kind() == CollectedHeap::Jam &&
++      JVMCIENV->isa_HotSpotNmethod(installed_code_handle)) {
++    // Check the compiler inside this runtime/isolate, including an older libgraal.
++    // Runtime stubs can be installed during compiler construction; Java methods
++    // must not become executable without the compiler admitting Jam's barriers.
++    bool supported = JVMCIENV->runtime()->is_gc_supported(JVMCIENV, CollectedHeap::Jam);
++    if (JVMCI_HAS_PENDING_EXCEPTION) return 0;
++    if (!supported) {
++      JVMCI_THROW_MSG_0(InternalError, "JVMCI compiler does not support Jam GC");
++    }
++  }
+   JVMCIPrimitiveArray speculations_handle = JVMCIENV->wrap(speculations_obj);
+ 
+   int speculations_len = JVMCIENV->get_length(speculations_handle);
 --- a/src/hotspot/share/jvmci/jvmciCompilerToVMInit.cpp
 +++ b/src/hotspot/share/jvmci/jvmciCompilerToVMInit.cpp
 @@ -387,6 +387,7 @@
@@ -2391,8 +2411,8 @@
  
  bool JVMCIGlobals::gc_supports_jvmci() {
 -  return UseSerialGC || UseParallelGC || UseG1GC || UseZGC || UseShenandoahGC || UseEpsilonGC;
-+  // Jam supports the VM-side interface. JamArguments separately rejects the
-+  // JVMCI compiler until the external compiler supplies matching card barriers.
++  // Jam supports JVMCI metadata. Code installation checks that the compiler
++  // in the current runtime also supports the selected collector.
 +  return UseSerialGC || UseParallelGC || UseG1GC || UseZGC || UseShenandoahGC || UseEpsilonGC || UseJamGC;
  }
  

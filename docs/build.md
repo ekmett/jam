@@ -4,7 +4,7 @@ jam-vm builds two things: a native jam backend and a patched JDK. The backend
 uses C++26 modules. The JDK uses its normal C++14 toolchain and calls the
 backend through [a C header](../adapter/jam_vm.h).
 
-Start with macOS arm64. Other platform paths still need validation; see
+Start with macOS 26 arm64. Other platform paths still need validation; see
 [supported configurations](status.md) for the current limits.
 
 ## Tools
@@ -40,7 +40,8 @@ export JAM_BOOT_JDK=/absolute/path/to/jdk-25
 ```
 
 On macOS, use a JDK bundle's `Contents/Home` directory. `JAM_LIBCXX_PREFIX`
-defaults to `/opt/homebrew/opt/llvm@22`. `JAM_JOBS` defaults to eight. The native
+defaults to `/opt/homebrew/opt/llvm@22`. `JAM_JOBS` defaults to eight for the JDK
+and native backend, and three for GraalVM. The native
 test runner expects `ctest` next to the selected `cmake` binary.
 
 ## Prepare the sources
@@ -96,6 +97,36 @@ attempts, defaulting to three minors. `JamWorkers` selects jam's worker count;
 the recorded VM tests use four. HotSpot object scanning currently runs on the
 VM thread while jam's copy work can run in parallel.
 
+## GraalVM
+
+For Truffle languages, build the GraalVM variant. It pairs LabsJDK with Graal
+25.3.4.1, the release used by thc. Both the VM and compiler need the Jam patch;
+putting stock libgraal beside a Jam-enabled JDK is not sufficient.
+
+Starting from a fresh checkout, with the tools above configured:
+
+```sh
+python3 tools/fetch_sources.py --graal
+python3 tools/prepare_jdk.py --graal
+python3 tools/prepare_graal.py
+export JAM_HOTSPOT_SOURCE="$PWD/upstream/labsjdk25"
+bash tools/build_native.sh
+bash tools/build_hotspot.sh --graal
+bash tools/build_graal.sh
+```
+
+This builds `build/graalvm/`, including patched libgraal, the Jam backend and
+the weak API. Use it as `JAVA_HOME` and select Jam as above. The compiler uses
+Jam's card table for old-to-young stores. Compressed oops remain enabled.
+
+The build uses the pinned `mx` checkout and keeps downloaded build dependencies
+in `.toolchains/mx-cache/`. `JAM_GRAAL_OUTPUT` selects another output directory;
+the packaging step refuses to overwrite an existing installation.
+
+The distribution includes Native Image tooling, but programs produced by
+`native-image` do not yet use Jam. That requires the separate SubstrateVM
+adapter described in [supported configurations](status.md#next-steps).
+
 ## Development checks
 
 ```sh
@@ -114,10 +145,22 @@ HotSpot sources from the patch.
 
 ## Packaging
 
-The current JDK links to `libjam_vm` in the checkout's `build-jam/` directory.
-On the recorded Darwin setup the backend also depends on Homebrew's libc++.
-Copying only `images/jdk/` elsewhere does not produce a self-contained runtime.
-Bundling those libraries with relative loader paths is still work to do.
+The GraalVM build already packages its runtime. To package the plain JDK:
+
+```sh
+jdk="$PWD/upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk"
+python3 tools/build_bridge.py --java-home "$jdk"
+python3 tools/package_jdk.py --java-home "$jdk" --output build/jam-jdk
+```
+
+The output is a JDK home that can be moved out of the checkout. `lib/jam/`
+contains the backend, JNI bridge, Java API and C++ runtime libraries. The
+packager rewrites native library paths and signs the modified binaries for
+local use. It preserves upstream licenses under `legal/`.
+
+For the weak API, put `lib/jam/jam-vm.jar` on the application's class path and
+`lib/jam` on `java.library.path`. See [integrating thc](thc-integration.md) for
+registration and finalizer pumping.
 
 HotSpot's collector registration is compiled into `libjvm`. A stock JVM cannot
 discover Jam through JNI, JVMTI or `-agentpath`. Once the adapter is present,

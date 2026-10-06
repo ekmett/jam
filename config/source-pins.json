@@ -52,7 +52,7 @@
   },
   "graal": {
     "repo": "oracle/graal",
-    "commit": "712fedf45c5ac02fa6780fe5fe25323b988214b3",
+    "commit": "7b025988a922a73286d1326e1eddc1ca39d3f569",
     "files": [
       "substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/heap/Heap.java",
       "substratevm/src/com.oracle.svm.core.genscavenge/src/com/oracle/svm/core/genscavenge/GCImpl.java",
@@ -62,13 +62,14 @@
       "compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotGraalRuntime.java"
     ],
     "sha256": {
-      "substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/heap/Heap.java": "fda49b048768643943f8875ec99a01b621e6a88882da0ae58c81427d7cae547d",
-      "substratevm/src/com.oracle.svm.core.genscavenge/src/com/oracle/svm/core/genscavenge/GCImpl.java": "b0b1543326f8898586f52364193a680534a1a20da645f47e01b7558590571c0b",
-      "substratevm/src/com.oracle.svm.core.genscavenge/src/com/oracle/svm/core/genscavenge/ReferenceObjectProcessing.java": "bea3e3081e55db769b8c4e76730e90409dd90cd72285c58d7c3eafa9759bf23d",
+      "substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/heap/Heap.java": "772cae3d46210a15746455789cbc92721020de0dac849ffe8a7e099d5dcd4b7d",
+      "substratevm/src/com.oracle.svm.core.genscavenge/src/com/oracle/svm/core/genscavenge/GCImpl.java": "b3f5b1fb48fd54f78c42c6fdf080aeae538fbb87ab641ccc700b92861b1cd42e",
+      "substratevm/src/com.oracle.svm.core.genscavenge/src/com/oracle/svm/core/genscavenge/ReferenceObjectProcessing.java": "bf9eef84e2f6a0f98fa98e0a3f6ebf47065f88fb33f9a1cab1e8825beb9ad156",
       "substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/heap/ReferenceAccess.java": "ac5cefc35880092c2c552a8ea95fe93a6d1ecbe0f6fdc580753c53c27e17d885",
       "substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/heap/ReferenceAccessImpl.java": "a15119014975887556f76ea894046c373255bb398cc69c222488ad9b8444b7ce",
-      "compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotGraalRuntime.java": "9a89ebedb5b68eeff3c35312fc61a4696c859d8e3847a4924bf7d359d5a2409b"
-    }
+      "compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/HotSpotGraalRuntime.java": "61fa234e7063610f10bffa7f46a9c4db03a6c73523b8fd1fa73a6c2d9d7000bb"
+    },
+    "version": "25.3.4.1"
   },
   "ghc": {
     "repo": "ghc/ghc",
@@ -89,5 +90,16 @@
   "native": {
     "repo": "ekmett/native",
     "commit": "4f5f6533417b2951b063581a3252c63de0024102"
+  },
+  "labsjdk25": {
+    "repo": "graalvm/labs-openjdk",
+    "commit": "f471c3eca82192dcdb1078687723652cf2ed63e7",
+    "archive_sha256": "3898f7d1120a1dbbe124d6611c9fc323a5e0134ab8e5d589611d51eeff42f475",
+    "version": "25.0.4.1+1-jvmci-25.3-b22"
+  },
+  "mx": {
+    "repo": "graalvm/mx",
+    "commit": "2675b13e58f97d6d37a4090cdcb5a52c280e1d8c",
+    "version": "7.85.1"
   }
 }
