@@ -869,7 +869,7 @@ private:
     weak_entry * previous_running = nullptr;
   };
   template<class F> struct finalizer_entry : weak_entry {
-    void (*runner)(F &) noexcept;
+    void (*runner)(F *) noexcept;
   };
 
 public:
@@ -1875,13 +1875,13 @@ public:
     return jam::root<T>{root_handle{*this, at.get(), &heap::template trace_record<T>}};
   }
   /// \brief Associate a weak key and value with a managed finalizer and stateless runner.
-  /// \pre All pointers belong to this heap; finalizer is nonnull and byte-relocatable.
-  /// The runner borrows F after collection. Growth/collection invalidates that borrow.
+  /// \pre Nonnull pointers belong to this heap; finalizer state is byte-relocatable; runner is nonnull.
+  /// The runner receives a borrowed F* or nullptr after collection. Growth/collection invalidates a nonnull borrow.
   /// State belongs in F and its manifest/trace; the runner is a noexcept function pointer.
   /// Dropping the returned external handle does not cancel finalization.
   template<traceable K, traceable V, traceable F>
   [[nodiscard]] jam::weak<V> mk_weak(ptr<K> const & key, ptr<V> const & value,
-      ptr<F> const & finalizer, std::type_identity_t<void (*)(F &) noexcept> runner) noexcept;
+      ptr<F> const & finalizer, std::type_identity_t<void (*)(F *) noexcept> runner) noexcept;
   /// \brief Collect typed roots, running minor_collections minors between majors.
   /// The first minor_collections calls are minor; the next call is major.
   /// Explicit major collection resets the countdown; explicit minors leave it unchanged.
@@ -2164,9 +2164,9 @@ public:
 
 template<traceable K, traceable V, traceable F>
 jam::weak<V> heap::mk_weak(ptr<K> const & key, ptr<V> const & value,
-    ptr<F> const & finalizer, std::type_identity_t<void (*)(F &) noexcept> runner) noexcept {
+    ptr<F> const & finalizer, std::type_identity_t<void (*)(F *) noexcept> runner) noexcept {
   require_mutator();
-  if (!finalizer || !runner) detail::heap_failure("mk_weak requires a finalizer and runner");
+  if (!runner) detail::heap_failure("mk_weak requires a runner");
   auto entry = std::make_shared<finalizer_entry<F>>();
   entry->owner = this;
   entry->key = {key.get(), &trace_record<K>};
@@ -2175,17 +2175,17 @@ jam::weak<V> heap::mk_weak(ptr<K> const & key, ptr<V> const & value,
   entry->runner = runner;
   entry->invoke = [](heap & owner, weak_entry & base) noexcept {
     auto & entry = static_cast<finalizer_entry<F> &>(base);
-    entry.runner(*owner.template record_address<F>(entry.finalizer.at));
+    entry.runner(entry.finalizer.at ? owner.template record_address<F>(entry.finalizer.at) : nullptr);
   };
   weak_entries.push_back(entry);
   return jam::weak<V>{std::move(entry)};
 }
 
 /// \brief Register a weak key/value pair and managed finalizer in the current heap.
-/// The captureless runner receives F& and obeys normal borrow rules; no destructor is invoked.
+/// The captureless runner receives a nullable F* and obeys normal borrow rules; no destructor is invoked.
 export template<traceable K, traceable V, traceable F>
 [[nodiscard]] native_inline weak<V> mk_weak(ptr<K> const & key, ptr<V> const & value,
-    ptr<F> const & finalizer, std::type_identity_t<void (*)(F &) noexcept> runner) noexcept {
+    ptr<F> const & finalizer, std::type_identity_t<void (*)(F *) noexcept> runner) noexcept {
   return heap::current()->mk_weak(key, value, finalizer, runner);
 }
 

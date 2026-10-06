@@ -9,10 +9,10 @@ key dies. `mk_weak(key, value, finalizer, runner)` registers that association an
 returns a `weak<V>` handle.
 
 The API is `mk_weak(ptr<K>, ptr<V>, ptr<F>, runner) -> weak<V>`.
-All three pointers belong to the current heap; `F` and the runner must be nonnull.
+Nonnull managed pointers belong to the current heap; the runner must be nonnull.
 A null key is dead, and a null value is allowed. The finalizer lives on the heap too;
 its manifest or trace describes any captures. The runner is a captureless,
-`noexcept` function taking `F&` and returning `void`. A captureless lambda converts
+`noexcept` function taking `F*` and returning `void`. A captureless lambda converts
 to that function pointer; put managed captures in `F`, not in the runner:
 
 ```cpp
@@ -32,16 +32,20 @@ int main() {
   heap_scope scope{h};
   auto key = mk<unsigned>(42u);
   auto action = mk<cleanup>(key, &calls);
-  auto association = mk_weak(key, key, action, [](cleanup & f) noexcept {
-    ++*f.calls;
-    assert(*f.key == 42);
-    // Publishing f.key in a root or a live object would resurrect it.
+  auto association = mk_weak(key, key, action, [](cleanup * f) noexcept {
+    ++*f->calls;
+    assert(*f->key == 42);
+    // Publishing f->key in a root or a live object would resurrect it.
     // This registration will not run again.
   });
   collect_major();
   assert(calls == 1 && association.expired());
 }
 ```
+
+Pass `ptr<F>{}` for an action with no managed state. The runner still executes
+once, receiving `nullptr`; null state does not cancel the callback. For a nonnull
+state, the runner receives its current heap address after forwarding.
 
 The registration alone does not keep its key alive, even if the value or
 finalizer points back to the key. When the key is live, the collector traces the
@@ -53,8 +57,8 @@ that case only if something else traces it, such as a finalizer capture.
 
 Callbacks run on the collecting thread, after compaction, with the owning heap
 bound and ordinary mutation available. A runner gets a borrow of its forwarded
-finalizer object. That borrow expires on allocation that grows the heap or on
-collection, just like any other `T&`. Copy needed external state and register
+finalizer object, or `nullptr` when no state was supplied. A nonnull borrow
+expires on allocation that grows the heap or on collection, like any other `T*`. Copy needed external state and register
 roots for managed captures before doing either. Do not keep using `f` afterward.
 Rooting an object preserves the object, not an old reference to its address.
 
