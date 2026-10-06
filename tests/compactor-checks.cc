@@ -17,7 +17,7 @@ import native;
 
 extern "C" void check_compactors() noexcept {
   using jam::detail::heap_block;
-  constexpr std::size_t blocks = 8, cells = blocks * 32;
+  constexpr std::size_t blocks = 9, cells = blocks * 32;
   constexpr std::uint64_t sentinel = 0xa5a5a5a5a5a5a5a5ULL;
   auto const cpu = native::observe_cpu();
   auto const variants = jam::detail::compactor_variants();
@@ -28,15 +28,33 @@ extern "C" void check_compactors() noexcept {
       std::printf("compactor %s: not supported by this CPU/OS\n", variant.name);
       continue;
     }
+    // The reference retains groups explicitly; it does not call the production
+    // dilation helper. Layout zero also checks the null alignment-table fast path.
+    for (unsigned layout = 0; layout != 5; ++layout)
     for (unsigned pattern = 0; pattern != 256; ++pattern) {
-      std::array<heap_block, blocks> metadata{};
+      std::array<heap_block, blocks> metadata{}, reference{};
+      alignas(4) std::array<std::uint8_t, (blocks + 7) / 8 * 4> alignment{};
+      auto const * flags = layout ? alignment.data() : nullptr;
+      auto expand = [](std::uint32_t bits, unsigned k) noexcept {
+        std::uint32_t result = 0;
+        auto const width = 1u << k;
+        for (unsigned begin = 0; begin != 32; begin += width) {
+          auto const group = ((1u << width) - 1) << begin;
+          if (bits & group) result |= group;
+        }
+        return result;
+      };
       std::vector<std::uint32_t> live;
       std::uint32_t destination = 0;
       for (unsigned block = 0; block != blocks; ++block) {
         auto const mask = std::rotl(pattern * 0x01010101u, static_cast<int>(block));
         metadata[block].live = mask | (block == 0 ? 1u : 0u);
+        auto const k = layout ? (block + layout - 1) % 4 : 0;
+        alignment[block / 2] |= static_cast<std::uint8_t>(((1u << k) - 1) << ((block % 2) * 4));
+        destination = (destination + (1u << k) - 1) & ~((1u << k) - 1);
         metadata[block].destination = destination;
-        destination += std::popcount(metadata[block].live);
+        reference[block] = {expand(metadata[block].live, k), destination, 0};
+        destination += std::popcount(reference[block].live);
         for (unsigned bit = 0; bit != 32; ++bit)
           if (metadata[block].live & (1u << bit)) live.push_back(block * 32 + bit);
       }
@@ -52,11 +70,14 @@ extern "C" void check_compactors() noexcept {
         }
         source[cell] = std::uint64_t{fields[0]} | (std::uint64_t{fields[1]} << 32);
       }
+      for (unsigned block = 0; block != blocks; ++block)
+        reference[block].pointers = metadata[block].pointers;
+      jam::detail::forwarding_tables own_tables{metadata.data(), nullptr, flags, nullptr};
       // Unaligned destinations and untouched prefix/suffix expose overstores.
       std::array<std::uint64_t, cells + 2> expected, actual;
       expected.fill(sentinel); actual.fill(sentinel);
-      baseline.move(source.data(), expected.data() + 1, metadata.data(), 0, blocks);
-      variant.move(source.data(), actual.data() + 1, metadata.data(), 0, blocks);
+      baseline.move(source.data(), expected.data() + 1, reference.data(), 0, blocks);
+      variant.move(source.data(), actual.data() + 1, metadata.data(), 0, blocks, own_tables, flags);
       check(actual == expected);
       check(actual[0] == sentinel);
       for (auto i = destination + 1; i != actual.size(); ++i) check(actual[i] == sentinel);
@@ -72,42 +93,58 @@ extern "C" void check_compactors() noexcept {
             mixed[cell] |= std::uint64_t{0x80000000u} << shift;
         }
       for (bool minor : {false, true}) {
-        auto young = metadata;
-        for (auto & item : young) item.destination += minor ? 0x80000000u : 17u;
-        jam::detail::forwarding_tables tables{minor ? nullptr : metadata.data(), young.data()};
+        auto young = metadata, young_reference = reference;
+        auto young_alignment = alignment;
+        auto const * young_flags = layout ? young_alignment.data() : nullptr;
+        std::uint32_t next = minor ? 0x80000000u : 24u;
+        for (unsigned block = 0; block != blocks; ++block) {
+          auto const k = layout ? (block + layout) % 4 : 0;
+          auto const shift = (block % 2) * 4;
+          young_alignment[block / 2] = static_cast<std::uint8_t>((young_alignment[block / 2] & ~(15u << shift))
+              | (((1u << k) - 1) << shift));
+          next = (next + (1u << k) - 1) & ~((1u << k) - 1);
+          young[block].destination = young_reference[block].destination = next;
+          young_reference[block].live = expand(young[block].live, k);
+          next += std::popcount(young_reference[block].live);
+        }
+        jam::detail::forwarding_tables tables{minor ? nullptr : metadata.data(), young.data(),
+          minor ? nullptr : flags, young_flags};
+        jam::detail::forwarding_tables reference_tables{minor ? nullptr : reference.data(), young_reference.data()};
         expected.fill(sentinel); actual.fill(sentinel);
-        baseline.move(mixed.data(), expected.data() + 1, metadata.data(), 0, blocks, tables);
-        variant.move(mixed.data(), actual.data() + 1, metadata.data(), 0, blocks, tables);
+        baseline.move(mixed.data(), expected.data() + 1, reference.data(), 0, blocks, reference_tables);
+        variant.move(mixed.data(), actual.data() + 1, metadata.data(), 0, blocks, tables, flags);
         check(actual == expected);
       }
-      baseline.move(source.data(), expected.data() + 1, metadata.data(), 0, blocks);
       // Loading several chunks ahead must still permit leftward in-place moves.
       auto overlapping = source;
-      variant.move(overlapping.data(), overlapping.data(), metadata.data(), 0, blocks);
-      for (unsigned i = 0; i != destination; ++i) check(overlapping[i] == expected[i + 1]);
+      auto expected_overlap = source;
+      baseline.move(expected_overlap.data(), expected_overlap.data(), reference.data(), 0, blocks);
+      variant.move(overlapping.data(), overlapping.data(), metadata.data(), 0, blocks, own_tables, flags);
+      check(overlapping == expected_overlap);
       auto packed_expected = metadata, packed_actual = metadata;
       for (auto & item : packed_expected) item.pointers = 0;
       for (auto & item : packed_actual) item.pointers = 0;
-      baseline.pack(metadata.data(), packed_expected.data(), blocks);
-      variant.pack(metadata.data(), packed_actual.data(), blocks);
+      baseline.pack(reference.data(), packed_expected.data(), blocks);
+      variant.pack(metadata.data(), packed_actual.data(), blocks, flags);
       for (std::size_t i = 0; i != blocks; ++i) {
         check(packed_actual[i].pointers == packed_expected[i].pointers);
         check(packed_actual[i].live == metadata[i].live);
         check(packed_actual[i].destination == metadata[i].destination);
       }
       auto packed_in_place = metadata;
-      variant.pack(packed_in_place.data(), packed_in_place.data(), blocks);
+      variant.pack(packed_in_place.data(), packed_in_place.data(), blocks, flags);
       for (std::size_t i = 0; i != blocks; ++i) {
         check(packed_in_place[i].pointers == packed_expected[i].pointers);
         check(packed_in_place[i].live == metadata[i].live);
         check(packed_in_place[i].destination == metadata[i].destination);
       }
       // The pointer-free path must pack every mask without interpreting data.
-      auto pointer_free = metadata;
+      auto pointer_free = metadata, reference_free = reference;
       for (auto & item : pointer_free) item.pointers = 0;
+      for (auto & item : reference_free) item.pointers = 0;
       expected.fill(sentinel); actual.fill(sentinel);
-      baseline.move(source.data(), expected.data() + 1, pointer_free.data(), 0, blocks);
-      variant.move(source.data(), actual.data() + 1, pointer_free.data(), 0, blocks);
+      baseline.move(source.data(), expected.data() + 1, reference_free.data(), 0, blocks);
+      variant.move(source.data(), actual.data() + 1, pointer_free.data(), 0, blocks, own_tables, flags);
       check(actual == expected);
     }
     // Inactive lanes contain deliberately invalid offsets. Neither ordinary
@@ -124,6 +161,17 @@ extern "C" void check_compactors() noexcept {
     baseline.move(masked_source.data(), masked_expected.data() + 1, masked_metadata.data(), 0, 1);
     variant.move(masked_source.data(), masked_actual.data() + 1, masked_metadata.data(), 0, 1);
     check(masked_actual == masked_expected);
-    std::printf("compactor %s: 256 mask/forwarding/store checks passed\n", variant.name);
+    // Every dead cell is retained by dilation, but its stale declarations are
+    // still data. Also exercise the final padded dword of the nibble table.
+    alignas(4) std::array<std::uint8_t, 4> masked_alignment{3, 0, 0, 0};
+    auto masked_reference = masked_metadata;
+    masked_reference[0].live = ~std::uint32_t{0};
+    masked_reference[0].pointers &= 0x1111111111111111ULL;
+    masked_expected.fill(sentinel); masked_actual.fill(sentinel);
+    baseline.move(masked_source.data(), masked_expected.data() + 1, masked_reference.data(), 0, 1);
+    variant.move(masked_source.data(), masked_actual.data() + 1, masked_metadata.data(), 0, 1,
+        {masked_metadata.data(), nullptr, masked_alignment.data(), nullptr}, masked_alignment.data());
+    check(masked_actual == masked_expected);
+    std::printf("compactor %s: 1280 mask/alignment/forwarding/store checks passed\n", variant.name);
   }
 }

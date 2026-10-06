@@ -14,12 +14,18 @@ Allocation and liveness use eight-byte cells. Each 256-byte rank block has
 16 bytes of metadata: live cells, a forwarding base and pointer slots. Alignment
 adds one byte per 512 bytes. Records may require 8-, 16-, 32- or 64-byte alignment.
 Dilation retains the necessary alignment groups, including padding. Those cells
-count toward used space.
+count toward used space, but the live mask keeps the exact claims throughout
+forwarding. The prefix pass writes each joined group's effective alignment into
+the existing alignment nibbles. Each consumer derives the dilated mask in
+registers; no second liveness bitmap is needed.
 
-Forwarding combines a block's destination base with the count of earlier live
-cells. The prefix pass respects alignment and records spanning blocks before
+Forwarding checks the target's exact claim, then combines its block's destination
+base with the count of earlier retained cells, including alignment padding.
+The prefix pass respects alignment and records spanning blocks before
 workers forward arbitrary pointers. Pointer masks distinguish offsets from data,
-including the two possible 32-bit pointer fields in each cell.
+including the two possible 32-bit pointer fields in each cell. Cells retained
+only for alignment are copied as data; stale pointer declarations in them are
+discarded before dilation.
 
 Typed collection rebuilds pointer declarations each time it traces an allocation,
 so dynamic layouts can change which fields are pointers. Minor collection leaves

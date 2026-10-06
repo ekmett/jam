@@ -1137,6 +1137,7 @@ public:
     // Low3 bits are a thermometer exponent (0,1,3,7); bit3 joins the next block.
     // Atomic OR therefore implements max(k), even for simultaneous markers.
     std::vector<std::uint8_t> alignment;
+    bool has_alignment = false;
     std::size_t cursor = 1;
     std::size_t origin = 0;
     bool collecting = false;
@@ -1170,7 +1171,7 @@ public:
           page_word_count(s.page_words), reserve_word_count(s.reserved),
           minimum_capacity(s.minimum), storage(s.bytes, address, units::bytes{s.policy.maximum}.count()),
           view_base(reinterpret_cast<word *>(storage.data())), metadata(s.bytes / (8 * block_words)) {
-      alignment.resize((metadata.size() + 1) / 2);
+      alignment.resize(((metadata.size() + 7) / 8) * 4);
     }
     static constexpr unsigned exponent(std::size_t bytes) noexcept {
       if (!std::has_single_bit(bytes) || bytes < 8 || bytes > 64u)
@@ -1212,13 +1213,8 @@ public:
       x = (x | (x << 1)) & 0x5555555555555555ULL;
       return x | (x << 1);
     }
-    static constexpr bitmap expand(bitmap live, unsigned k) noexcept {
-      // OR across each 2^k-cell chunk, then fill it. No pdep loop on AArch64.
-      for (unsigned shift = 1; shift < (1u << k); shift <<= 1) {
-        word const low = ~word{0} / ((word{1} << shift) + 1);
-        live = static_cast<bitmap>(live | ((live >> shift) & low) | ((live & low) << shift));
-      }
-      return live;
+    std::uint8_t const * alignment_table() const noexcept {
+      return has_alignment ? alignment.data() : nullptr;
     }
     [[nodiscard]] offset base(block const & item) const noexcept {
       return item.destination;
@@ -1229,7 +1225,7 @@ public:
       auto const & item = metadata[value >> block_shift];
       auto const bit = static_cast<bitmap>(bitmap{1} << (value & (block_words - 1)));
       assert((item.live & bit) != 0);
-      return base(item) + static_cast<offset>(std::popcount(static_cast<bitmap>(item.live & (bit - 1))));
+      return base(item) + static_cast<offset>(std::popcount(detail::retained(item, alignment_table(), value >> block_shift) & (bit - 1)));
     }
     void resize(std::size_t words) noexcept {
       assert(words % page_word_count == 0 && words >= minimum_capacity && words <= maximum_bytes / 8);
@@ -1238,7 +1234,7 @@ public:
       std::copy_n(metadata.begin(), (cursor + block_words - 1) / block_words, next_metadata.begin());
       auto const next_origin = words - reserve_word_count;
       auto next = storage.resized(origin * 8, cursor * 8, words * 8, next_origin * 8);
-      alignment.resize((next_metadata.size() + 1) / 2);
+      alignment.resize(((next_metadata.size() + 7) / 8) * 4);
       storage.replace(next); metadata.swap(next_metadata);
       origin = next_origin;
       view_base = reinterpret_cast<word *>(storage.data()) + origin;
@@ -1332,6 +1328,7 @@ public:
         item.destination = 0;
       }
       std::fill(alignment.begin(), alignment.end(), 0);
+      has_alignment = false;
     }
     /** \brief Mark a complete reachable record; concurrent markers are permitted.
      * \ingroup jam_heap
@@ -1417,6 +1414,7 @@ public:
       // and chains with 1/4 workers, so scan overhead could erase the benefit.
       // Sparse retention and higher alignments were not covered; reprofile those
       // workloads before adding a parallel scan.
+      has_alignment = false;
       std::size_t live_words = start;
       for (std::size_t begin = 0; begin < old_blocks;) {
         auto end = begin + 1;
@@ -1427,10 +1425,15 @@ public:
         live_words = (live_words + (std::size_t{1} << k) - 1) & ~((std::size_t{1} << k) - 1);
         for (auto i = begin; i != end; ++i) {
           auto & item = metadata[i];
-          item.pointers &= pointer_cells(item.live); // exact liveness, before dilation
-          item.live = expand(item.live, k);
+          item.pointers &= pointer_cells(item.live);
+          // Publish the joined group's effective k in the existing nibbles.
+          // live remains the exact claims; dilation is only a register value.
+          auto const shift = (i & 1) * 4;
+          alignment[i >> 1] = static_cast<std::uint8_t>((alignment[i >> 1] & ~(7u << shift))
+              | (((1u << k) - 1) << shift));
+          has_alignment |= k != 0;
           item.destination = static_cast<offset>(live_words);
-          live_words += std::popcount(item.live);
+          live_words += std::popcount(detail::dilate(item.live, k));
         }
         begin = end;
       }
@@ -1448,7 +1451,7 @@ public:
       auto move_page = [&](std::size_t page) noexcept {
         auto const begin = page * (page_word_count / block_words);
         auto const end = std::min(old_blocks, begin + page_word_count / block_words);
-        compactor.move(source, target, metadata.data(), begin, end, tables);
+        compactor.move(source, target, metadata.data(), begin, end, tables, alignment_table());
       };
       if (workers.available_workers() > 1 && source_pages > 1) {
         auto done = std::make_unique<std::atomic<bool>[]>(source_pages);
@@ -1490,12 +1493,12 @@ public:
       for (std::size_t i = 0; i != old_blocks; ++i) {
         auto const next = std::size_t(metadata[i].destination & offset_mask);
         std::fill(target + previous_end, target + next, word{0});
-        previous_end = next + std::popcount(metadata[i].live);
+        previous_end = next + std::popcount(detail::retained(metadata[i], alignment_table(), i));
       }
     }
     void pack_into(std::vector<block> & output) const noexcept {
       auto const old_blocks = (cursor + block_words - 1) / block_words;
-      compactor.pack(metadata.data(), output.data(), old_blocks);
+      compactor.pack(metadata.data(), output.data(), old_blocks, alignment_table());
     }
     void ensure(std::size_t words) noexcept {
       auto const maximum = units::bytes{policy.maximum}.count() / sizeof(word);
@@ -1519,6 +1522,7 @@ public:
       }
       for (auto i = blocks; i < old_blocks; ++i) metadata[i] = {};
       std::fill(alignment.begin(), alignment.end(), 0);
+      has_alignment = false;
       auto const smaller = std::max(minimum_capacity, (capacity() / page_word_count / 2) * page_word_count);
       if (policy.shrink_shift && smaller < capacity()
           && cursor < (capacity() >> policy.shrink_shift)
@@ -1527,13 +1531,14 @@ public:
     void reset() noexcept {
       for (auto & item : metadata) item = {};
       std::fill(alignment.begin(), alignment.end(), 0);
+      has_alignment = false;
       cursor = 1; data()[0] = 0;
     }
     void compact_impl(std::span<offset> roots) noexcept {
       auto const live_words = prepare(0, true);
       auto const next_origin = rotated_origin();
       auto * target = at_origin(next_origin);
-      move_to(target, {metadata.data(), nullptr});
+      move_to(target, {metadata.data(), nullptr, alignment_table(), nullptr});
       for (auto & root : roots) root = forward(root);
       zero_gaps(target, 0);
       pack_into(metadata);
@@ -1607,7 +1612,8 @@ private:
     auto const live_words = end - (minor && !promote ? std::size_t(young_bit) : 0);
     destination.ensure(live_words);
     // Growth may rebase metadata, so form the shared forwarding tables afterward.
-    detail::forwarding_tables tables{minor ? nullptr : arena.metadata.data(), nursery.metadata.data()};
+    detail::forwarding_tables tables{minor ? nullptr : arena.metadata.data(), nursery.metadata.data(),
+      minor ? nullptr : arena.alignment_table(), nursery.alignment_table()};
     auto const next_origin = minor && promote ? destination.origin : destination.rotated_origin();
     auto * target = destination.at_origin(next_origin);
     if (!minor) {

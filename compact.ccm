@@ -30,6 +30,14 @@ native_inline native_const native_target("avx512f")
 __m512i shift_left(__m512i value, __m512i counts) noexcept {
   return _mm512_sllv_epi32(value, counts);
 }
+native_inline native_const native_target("avx2")
+__m256i shift_right(__m256i value, __m256i counts) noexcept {
+  return _mm256_srlv_epi32(value, counts);
+}
+native_inline native_const native_target("avx512f")
+__m512i shift_right(__m512i value, __m512i counts) noexcept {
+  return _mm512_srlv_epi32(value, counts);
+}
 // Native's AVX2 compress_store currently copies through a stack buffer.
 native_inline native_target("avx2")
 void store_prefix(std::uint32_t * target, __m256i value, unsigned count) noexcept {
@@ -45,31 +53,56 @@ import native;
 
 export namespace jam::detail {
 struct heap_block {
-  std::uint32_t live = 0;
+  std::uint32_t live = 0; // Exact claims; retained alignment cells are derived.
   std::uint32_t destination = 0;
   std::uint64_t pointers = 0;
 };
+
+// Fill every 2^k-cell group containing a claimed cell, without changing claims.
+[[nodiscard]] native_inline constexpr std::uint32_t dilate(std::uint32_t live, unsigned k) noexcept {
+  for (unsigned shift = 1; shift < (1u << k); shift <<= 1) {
+    auto const low = ~std::uint32_t{0} / ((std::uint32_t{1} << shift) + 1);
+    live |= ((live >> shift) & low) | ((live & low) << shift);
+  }
+  return live;
+}
+
+// The low three bits of each nibble encode k as a thermometer (0, 1, 3, 7).
+// Null means every k is zero. Tables are padded to complete dwords for gathers.
+[[nodiscard]] native_inline constexpr std::uint32_t retained(heap_block const & item,
+    std::uint8_t const * alignment, std::size_t index) noexcept {
+  if (!alignment) return item.live;
+  auto const flags = (alignment[index >> 1] >> ((index & 1) * 4)) & 7u;
+  return dilate(item.live, std::popcount(flags));
+}
 
 // Null old metadata means an old target is stationary during a minor collection.
 struct forwarding_tables {
   heap_block const * old;
   heap_block const * young;
+  std::uint8_t const * old_alignment = nullptr;
+  std::uint8_t const * young_alignment = nullptr;
 };
 
 // Dispatch remains per range, shared by both generations.
 struct compactor {
   void (*move_impl)(std::uint64_t const *, std::uint64_t *, heap_block const *,
-                    std::size_t, std::size_t, forwarding_tables) noexcept;
-  void (*pack)(heap_block const *, heap_block *, std::size_t) noexcept;
+                    std::size_t, std::size_t, forwarding_tables, std::uint8_t const *) noexcept;
+  void (*pack_impl)(heap_block const *, heap_block *, std::size_t, std::uint8_t const *) noexcept;
   native::isa<> requirement;
   char const * name;
   void move(std::uint64_t const * source, std::uint64_t * target, heap_block const * metadata,
             std::size_t begin, std::size_t end) const noexcept {
-    move_impl(source, target, metadata, begin, end, {metadata, nullptr});
+    move_impl(source, target, metadata, begin, end, {metadata, nullptr}, nullptr);
   }
   void move(std::uint64_t const * source, std::uint64_t * target, heap_block const * metadata,
-            std::size_t begin, std::size_t end, forwarding_tables tables) const noexcept {
-    move_impl(source, target, metadata, begin, end, tables);
+            std::size_t begin, std::size_t end, forwarding_tables tables,
+            std::uint8_t const * alignment = nullptr) const noexcept {
+    move_impl(source, target, metadata, begin, end, tables, alignment);
+  }
+  void pack(heap_block const * metadata, heap_block * output, std::size_t count,
+            std::uint8_t const * alignment = nullptr) const noexcept {
+    pack_impl(metadata, output, count, alignment);
   }
 };
 }
@@ -92,10 +125,12 @@ constexpr bitmap forward(forwarding_tables tables, bitmap value) noexcept {
   if (!value) return 0;
   auto const * metadata = value >> 31 ? tables.young : tables.old;
   if (!metadata) { assert(!(value >> 31)); return value; }
-  auto const & item = metadata[(value & 0x7fffffffu) >> 5];
+  auto const index = (value & 0x7fffffffu) >> 5;
+  auto const & item = metadata[index];
+  auto const * alignment = value >> 31 ? tables.young_alignment : tables.old_alignment;
   auto const bit = bitmap{1} << (value & 31);
   assert(item.live & bit);
-  return item.destination + std::popcount(item.live & (bit - 1));
+  return item.destination + std::popcount(retained(item, alignment, index) & (bit - 1));
 }
 
 // Four cells per lookup; one 4 KiB table shared by the portable variants.
@@ -125,9 +160,12 @@ constexpr word portable_pack(heap_block const & item) noexcept {
 }
 
 void baseline_move(word const * source, word * target, heap_block const * metadata,
-                   std::size_t begin, std::size_t end, forwarding_tables tables) noexcept {
+                   std::size_t begin, std::size_t end, forwarding_tables tables,
+                   std::uint8_t const * alignment) noexcept {
   for (auto i = begin; i != end; ++i) {
-    auto const & item = metadata[i];
+    auto item = metadata[i];
+    item.pointers &= pointer_cells(item.live);
+    item.live = retained(item, alignment, i);
     auto destination = item.destination & 0x7fffffffu;
     if (item.live == ~bitmap{0} && !item.pointers) {
       std::memcpy(target + destination, source + i * 32, 256);
@@ -152,8 +190,10 @@ void baseline_move(word const * source, word * target, heap_block const * metada
   bool const in_place = metadata == output; \
   std::size_t cleared = 0; \
   for (std::size_t i = 0; i != old_blocks; ++i) { \
-    auto const item = metadata[i]; \
+    auto item = metadata[i]; \
+    item.pointers &= pointer_cells(item.live); \
     if (!item.pointers) continue; \
+    item.live = retained(item, alignment, i); \
     word packed; \
     auto const first = static_cast<unsigned>(std::countr_zero(item.live)); \
     auto const run = item.live >> first; \
@@ -181,7 +221,8 @@ void baseline_move(word const * source, word * target, heap_block const * metada
   } \
   if (in_place) while (cleared < old_blocks) output[cleared++].pointers = 0;
 
-void baseline_pack(heap_block const * metadata, heap_block * output, std::size_t old_blocks) noexcept {
+void baseline_pack(heap_block const * metadata, heap_block * output, std::size_t old_blocks,
+                   std::uint8_t const * alignment) noexcept {
   JAM_PACK_MASKS(portable_pack(item))
 }
 
@@ -269,9 +310,25 @@ if constexpr ((ISA).has(native::x86_feature::avx512vpopcntdq) \
           ((b = native::mask_vpgatherdd<4>(b, \
               native::reinterpret_bits<std::int32_t>(native::mask_bits(g)), base_address, ix)), ...); \
         } \
+        auto const * alignment_table = generation ? tables.young_alignment : tables.old_alignment; \
+        if (alignment_table) { \
+          auto const * address = reinterpret_cast<bitmap const *>(alignment_table); \
+          if constexpr (lanes == 16) \
+            ((r = native::mask_vpgatherdd<4>(r, g, address, \
+                native::reinterpret_bits<std::int32_t>((v & V(0x7fffffffu)) >> native::imm<8>))), ...); \
+          else \
+            ((r = native::mask_vpgatherdd<4>(r, native::reinterpret_bits<std::int32_t>(native::mask_bits(g)), address, \
+                native::reinterpret_bits<std::int32_t>((v & V(0x7fffffffu)) >> native::imm<8>))), ...); \
+        } \
+      } \
+      ((assert(none(m & ((l & V::from_native(shift_left(V(1).to_native(), (v & V(31)).to_native()))) == V(0)))), static_cast<void>(m)), ...); \
+      if (tables.old_alignment || tables.young_alignment) { \
+        ((r = V::from_native(shift_right(r.to_native(), (((v >> native::imm<5>) & V(7)) << native::imm<2>).to_native())) & V(7)), ...); \
+        ((l = native::select((r & V(1)) != V(0), l | ((l >> native::imm<1>) & V(0x55555555u)) | ((l & V(0x55555555u)) << native::imm<1>), l)), ...); \
+        ((l = native::select((r & V(2)) != V(0), l | ((l >> native::imm<2>) & V(0x33333333u)) | ((l & V(0x33333333u)) << native::imm<2>), l)), ...); \
+        ((l = native::select((r & V(4)) != V(0), l | ((l >> native::imm<4>) & V(0x0f0f0f0fu)) | ((l & V(0x0f0f0f0fu)) << native::imm<4>), l)), ...); \
       } \
       ((r = V::from_native(shift_left(V(1).to_native(), (v & V(31)).to_native()))), ...); \
-      ((assert(none(m & ((l & r) == V(0)))), static_cast<void>(m)), ...); \
       ((r = l & (r - V(1))), ...); \
       if constexpr ((ISA).has(native::x86_feature::avx512vpopcntdq)) \
         ((r = native::vpopcntd(r)), ...); \
@@ -305,13 +362,16 @@ if constexpr ((ISA).has(native::x86_feature::avx512vpopcntdq) \
   template<native::isa<> A> \
     requires (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
   void name##_move(word const * source, word * target, heap_block const * metadata, \
-                   std::size_t begin, std::size_t end, forwarding_tables tables) noexcept { \
+                   std::size_t begin, std::size_t end, forwarding_tables tables, \
+                   std::uint8_t const * alignment) noexcept { \
     constexpr unsigned lanes = JAM_LANES(ISA); \
     using V = native::simd<bitmap, lanes, ISA>; \
     using M = typename V::mask; \
     for (auto i = begin; i != end; ++i) { \
-      auto const & item = metadata[i]; \
+      auto item = metadata[i]; \
       if (!item.live) continue; \
+      item.pointers &= pointer_cells(item.live); \
+      item.live = retained(item, alignment, i); \
       auto destination = item.destination & 0x7fffffffu; \
       if (item.live == ~bitmap{0} && !item.pointers) { \
         std::memcpy(target + destination, source + i * 32, 256); \
@@ -336,7 +396,8 @@ if constexpr ((ISA).has(native::x86_feature::avx512vpopcntdq) \
   } \
   template<native::isa<> A> \
     requires (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
-  void name##_pack(heap_block const * metadata, heap_block * output, std::size_t old_blocks) noexcept { \
+  void name##_pack(heap_block const * metadata, heap_block * output, std::size_t old_blocks, \
+                   std::uint8_t const * alignment) noexcept { \
     JAM_PACK_MASKS(JAM_EXTRACT(ISA)) \
   }
 NATIVE_TARGET_VARIANTS(vector, JAM_COMPACTOR, JAM_TARGETS)
