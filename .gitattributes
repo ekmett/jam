@@ -1,0 +1,2 @@
+# Preserve raw diagnostics and the mandatory blank-context prefix in patches.
+*.patch -whitespace

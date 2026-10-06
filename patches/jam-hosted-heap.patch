@@ -1,0 +1,245 @@
+--- a/heap.ccm
++++ b/heap.ccm
+@@ -320,6 +320,28 @@
+ #else
+     return static_cast<std::size_t>(::getpagesize());
+ #endif
++  }
++  /// \brief Publish a logical arc into a caller-owned, page-aligned reservation.
++  /// \pre Mutators are stopped. Target does not overlap either private ring view.
++  /// The caller owns the target reservation and must retire it before this mapping.
++  void publish(std::size_t start, std::byte * target, std::size_t count) const noexcept {
++    if (start >= capacity || start % page_size() || count % page_size() ||
++        count > capacity || reinterpret_cast<std::uintptr_t>(target) % page_size())
++      heap_failure("invalid published heap arc");
++    while (count) {
++      auto const where = std::lower_bound(spans.begin(), spans.end(), start,
++        [](span const & s, std::size_t value) noexcept { return s.end <= value; });
++      assert(where != spans.end() && where->begin <= start);
++      auto const part = std::min(count, where->end - start);
++#if defined(_WIN32)
++      alias(*where, target, part, start - where->begin);
++#else
++      alias(address + start, target, part);
++#endif
++      start = (start + part) % capacity;
++      target += part;
++      count -= part;
++    }
+   }
+   /// \brief Exchange mappings without moving payload bytes.
+   void swap(heap_mapping & other) noexcept {
+@@ -1139,6 +1161,10 @@
+         pending.push(worker, {target, nullptr});
+       return target;
+     }
++    /// \brief Enqueue an external/wide target without declaring a narrow source slot.
++    native_inline void target(offset at) noexcept {
++      if (at && (!arena.minor_collection || (at & young_bit))) pending.push(worker, {at, nullptr});
++    }
+     /// \brief Walk an embedded value without claiming cells again.
+     /// Parts share the current allocation's pointer mask. Tuple views may name
+     /// those parts, but ptr fields must retain their original heap addresses.
+@@ -1662,6 +1688,11 @@
+   weak_entry * running_finalizer = nullptr;
+   bool collecting = false;
+   bool minor_collection = false;
++  enum class external_phase { idle, marking, prepared };
++  external_phase external_state = external_phase::idle;
++  std::size_t external_old_words = 0, external_young_words = 0;
++  bool external_promote = false;
++
+   std::unordered_map<std::uint32_t, trace_function> remembered;
+   // Callback identity distinguishes weak slots from raw strong slots (nullptr).
+   // Weak slots participate in forwarding, never in the initial marking frontier.
+@@ -1802,6 +1833,134 @@
+   }
+ 
+ public:
++  /// \brief Publish one generation at a stable VM-owned address.
++  /// \pre Fixed capacity, no shrink, stopped mutators; skip/count are page multiples.
++  /// target corresponds to cell skip, not cell zero. The host owns the reservation.
++  void external_publish(bool young, void * target, std::size_t skip, std::size_t count) const noexcept {
++    auto const & g = young ? nursery : arena;
++    auto const & config = young ? policy.young : policy.old;
++    if (config.capacity != config.maximum || config.shrink_shift ||
++        skip > g.capacity() || count > g.capacity() - skip)
++      detail::heap_failure("published heap requires a fixed generation");
++    g.storage.publish(((g.origin + skip) % g.capacity()) * 8,
++      static_cast<std::byte *>(target), count * 8);
++  }
++  /// \brief Allocate raw host records in either generation, preserving the tag bit.
++  /// \pre Positive extent fits the selected generation; no active collection.
++  [[nodiscard]] offset external_allocate(bool young, std::size_t words) noexcept {
++    require_mutator();
++    return (young ? nursery.allocate(words) : arena.allocate(words)) | (young ? young_bit : 0);
++  }
++  /// \brief Allocated cells including the guard, for a host-owned generation.
++  [[nodiscard]] std::size_t external_used(bool young) const noexcept {
++    return (young ? nursery : arena).used();
++  }
++  /// \brief Private ring origin; published addresses do not rotate.
++  [[nodiscard]] std::size_t external_origin(bool young) const noexcept {
++    return (young ? nursery : arena).start();
++  }
++  /// \brief Start a VM-owned marking epoch; the VM supplies barriers and weak policy.
++  /// \pre No jam roots, weak registrations, remembered slots or active collection.
++  void external_begin(bool minor) noexcept {
++    require_mutator();
++    if (roots_head || !weak_entries.empty() || !pending_finalizers.empty() ||
++        running_finalizer || !remembered.empty())
++      detail::heap_failure("external collection requires exclusively VM-owned roots");
++    std::atomic_signal_fence(std::memory_order_seq_cst);
++    collecting = true;
++    minor_collection = minor;
++    external_state = external_phase::marking;
++    nursery.clear_marks();
++    for (auto & item : nursery.metadata) item.pointers = 0;
++    if (!minor) {
++      arena.clear_marks();
++      for (auto & item : arena.metadata) item.pointers = 0;
++    }
++  }
++  /// \brief Drain roots using jam's ordinary frontier and persistent worker pool.
++  /// \pre Marking phase; callbacks claim full objects before enumerating fields.
++  /// marker_limit=1 keeps callbacks on the caller (e.g. a registered VM thread).
++  /// old_owners admits dirty old source jobs in a minor; their targets remain young-only.
++  template<class Trace>
++  void external_trace(std::span<offset const> roots, Trace && trace,
++                      std::size_t marker_limit = 1, bool old_owners = false) noexcept
++      requires std::is_nothrow_invocable_v<Trace &, visitor &, offset> {
++    if (external_state != external_phase::marking || !marker_limit)
++      detail::heap_failure("external trace outside marking phase");
++    std::vector<trace_job> initial;
++    initial.reserve(roots.size());
++    for (auto at : roots)
++      if (at && (!minor_collection || old_owners || (at & young_bit))) initial.push_back({at, nullptr});
++    drain_jobs(trace, initial, marker_limit);
++  }
++  /// \brief Exact collected-generation liveness; old objects are live during minors.
++  [[nodiscard]] bool external_marked(offset at) const noexcept {
++    if (external_state != external_phase::marking)
++      detail::heap_failure("external liveness outside marking phase");
++    return marked(at);
++  }
++  /// \brief Freeze both forwarding tables after resolving all reference policies.
++  /// \param prefix Guard cells in each generation, including null. Guards never promote.
++  /// \return False if whole-nursery promotion does not fit. No forwarding is then visible;
++  /// retry without promotion in the same epoch. Majors retain both generations separately.
++  [[nodiscard]] bool external_prepare(bool promote, std::size_t prefix) noexcept {
++    if (external_state != external_phase::marking || !prefix)
++      detail::heap_failure("external prepare outside marking phase");
++    external_promote = minor_collection && promote;
++    if (!minor_collection) {
++      if (prefix > 1) arena.mark(1, prefix - 1);
++      external_old_words = arena.prepare(0, true);
++    } else external_old_words = arena.cursor;
++    if (external_promote) {
++      external_old_words = nursery.prepare(arena.cursor, false);
++      if (external_old_words > arena.capacity() - arena.reserved()) return false;
++      external_young_words = prefix;
++    } else {
++      if (prefix > 1) nursery.mark(1, prefix - 1);
++      external_young_words = nursery.prepare(young_bit, true) - young_bit;
++    }
++    external_state = external_phase::prepared;
++    return true;
++  }
++  /// \brief Repair a root while original objects and both forwarding tables remain intact.
++  [[nodiscard]] offset external_forward(offset at) const noexcept {
++    if (external_state != external_phase::prepared)
++      detail::heap_failure("external forward outside prepared phase");
++    return forward(at, minor_collection);
++  }
++  /// \brief Move with the original SIMD kernel and pack only after both moves finish.
++  /// \pre VM roots and old remembered fields have been repaired. Republish both aliases
++  /// before resuming mutators. Majors need no combined-live-size fit in either generation.
++  void external_finish() noexcept {
++    if (external_state != external_phase::prepared)
++      detail::heap_failure("external finish outside prepared phase");
++    detail::forwarding_tables tables{minor_collection ? nullptr : arena.metadata.data(), nursery.metadata.data(),
++      minor_collection ? nullptr : arena.alignment_table(), nursery.alignment_table()};
++    auto const old_origin = minor_collection ? arena.origin : arena.rotated_origin();
++    auto const young_origin = nursery.rotated_origin();
++    if (!minor_collection) {
++      auto * target = arena.at_origin(old_origin);
++      arena.move_to(target, tables);
++      arena.zero_gaps(target, 0);
++    }
++    auto * target = external_promote ? arena.data() : nursery.at_origin(young_origin);
++    nursery.move_to(target, tables);
++    nursery.zero_gaps(target, external_promote ? arena.cursor : 0);
++    // Both moves consumed the original tables. Packing may overwrite them now.
++    if (!minor_collection) arena.pack_into(arena.metadata);
++    nursery.pack_into(external_promote ? arena.metadata : nursery.metadata);
++    if (!minor_collection || external_promote) arena.adopt(old_origin, external_old_words);
++    if (external_promote) nursery.reset();
++    else nursery.adopt(young_origin, external_young_words);
++    collecting = false;
++    minor_collection = false;
++    external_state = external_phase::idle;
++    if (external_promote && external_young_words > 1)
++      static_cast<void>(nursery.allocate(external_young_words - 1));
++    std::atomic_signal_fence(std::memory_order_seq_cst);
++  }
++  /// \brief Runtime-selected compaction implementation, including SIMD ISA admission.
++  [[nodiscard]] char const * compactor_name() const noexcept { return compactor.name; }
+   /// \brief Number of distinct old source slots retained in the current GC epoch.
+   [[nodiscard]] std::size_t remembered_size() const noexcept { return remembered.size(); }
+   /// \brief Explicitly register a pointer after a caller-managed unsafe write.
+@@ -1941,6 +2100,28 @@
+   }
+ private:
+   template<class Trace>
++  void drain_jobs(Trace & trace, std::vector<trace_job> & initial, std::size_t marker_limit) noexcept {
++      if (initial.empty()) return;
++      auto const marker_count = std::min(marker_limit, workers.available_workers());
++      detail::frontier<trace_job> pending{marker_count, initial};
++      struct context {
++        heap * arena;
++        std::remove_reference_t<Trace> * trace;
++        detail::frontier<trace_job> * pending;
++      } state{this, std::addressof(trace), &pending};
++      workers.run(marker_count, [](void * raw, std::size_t worker) noexcept {
++        auto & state = *static_cast<context *>(raw);
++        heap_scope binding{*state.arena};
++        visitor visit{*state.arena, *state.pending, worker};
++        trace_job job;
++        while (state.pending->pop(worker, job)) {
++          if (job.trace) job.trace(visit, job.at);
++          else std::invoke(*state.trace, visit, job.at);
++        }
++      }, &state);
++      initial.clear();
++  }
++  template<class Trace>
+   void run_collection(Trace && trace, bool minor, bool promote) noexcept {
+     require_mutator();
+     // Compiler-only safepoint: publish mutator stores before tracing. Worker
+@@ -1970,25 +2151,7 @@
+     for (auto const & entry : pending_finalizers) seed_finalizer(*entry);
+     for (auto * entry = running_finalizer; entry; entry = entry->previous_running) seed_finalizer(*entry);
+     auto drain = [&]() noexcept {
+-      if (initial.empty()) return;
+-      auto const marker_count = workers.available_workers();
+-      detail::frontier<trace_job> pending{marker_count, initial};
+-      struct context {
+-        heap * arena;
+-        std::remove_reference_t<Trace> * trace;
+-        detail::frontier<trace_job> * pending;
+-      } state{this, std::addressof(trace), &pending};
+-      workers.run(marker_count, [](void * raw, std::size_t worker) noexcept {
+-        auto & state = *static_cast<context *>(raw);
+-        heap_scope binding{*state.arena};
+-        visitor visit{*state.arena, *state.pending, worker};
+-        trace_job job;
+-        while (state.pending->pop(worker, job)) {
+-          if (job.trace) job.trace(visit, job.at);
+-          else std::invoke(*state.trace, visit, job.at);
+-        }
+-      }, &state);
+-      initial.clear();
++      drain_jobs(trace, initial, workers.available_workers());
+     };
+     drain();
+     std::stable_sort(weak_entries.begin(), weak_entries.end(), [](auto const & a, auto const & b) noexcept {

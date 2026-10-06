@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install documentation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes pandoc python3
+      - name: Build and check documentation
+        env:
+          DOCS_REVISION: ${{ github.sha }}
+        run: make docs
+      - name: Upload static site
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: jam-vm-docs
+          path: build/site/
+          include-hidden-files: true
+          if-no-files-found: error

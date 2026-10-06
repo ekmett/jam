@@ -1,0 +1,154 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+module;
+#include <native/attributes.h>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <new>
+#include <span>
+export module thc.jam:heap;
+import jam;
+import :weak;
+
+namespace thc::detail {
+[[noreturn]] inline void invalid(char const * message) noexcept {
+  std::fprintf(stderr, "jam-vm: %s\n", message);
+  std::abort();
+}
+inline jam::heap_options options(std::size_t prefix, std::size_t old_bytes,
+                                std::size_t young_bytes, std::size_t reserve,
+                                std::size_t workers) noexcept {
+  constexpr auto page = JAM_PAGE_BYTES;
+  if (!prefix || !old_bytes || !young_bytes || !reserve || !workers ||
+      prefix % page || old_bytes % page || young_bytes % page || reserve % page ||
+      prefix > (1ull << 34) || reserve > (1ull << 34) - prefix ||
+      old_bytes > (1ull << 34) - prefix - reserve ||
+      young_bytes > (1ull << 34) - prefix - reserve ||
+      prefix + old_bytes < reserve || prefix + young_bytes < reserve)
+    invalid("invalid fixed generation geometry");
+  auto generation = [&](std::size_t bytes) noexcept {
+    auto const capacity = jam::units::pages{(prefix + bytes + reserve) / page};
+    return jam::generation_options{.capacity = capacity,
+      .reserve = jam::units::pages{reserve / page}, .maximum = capacity, .shrink_shift = 0};
+  };
+  jam::heap_options result;
+  result.old = generation(old_bytes);
+  result.young = generation(young_bytes);
+  result.workers = workers;
+  result.minor_collections = 0; // The host schedules epochs.
+  return result;
+}
+}
+
+export namespace thc {
+/// \brief Host-owned jam heap: two canonical windows, original rings and SIMD kernels.
+/// encode(p)=(p-base)/8, decode(o)=base+8*o; bit31 selects the young window.
+/// A retaining minor fixes every old offset; a major preserves the generation bit.
+/// \pre Mutators are stopped or the host allocation lock is held. Canonical PROT_NONE
+/// reservation spans both generations through base+16GiB+prefix+young_bytes.
+class hosted_heap {
+  jam::heap storage;
+  weak_registry registry;
+  std::byte * const base;
+  std::size_t const prefix_words;
+  std::size_t const words[2];
+  bool minor = false;
+  bool promoted = false;
+  void publish(bool old_moved = true) noexcept {
+    for (unsigned young = old_moved ? 0 : 1; young != 2; ++young)
+      storage.external_publish(young, base + (young ? young_displacement : 0) + prefix_words * 8,
+                               prefix_words, words[young]);
+  }
+public:
+  static constexpr std::uint32_t young_bit = 0x80000000u;
+  static constexpr std::size_t young_displacement = 1ull << 34;
+  /// \brief Construct fixed-capacity generations and publish their usable cells.
+  hosted_heap(void * address, std::size_t prefix, std::size_t old_bytes,
+              std::size_t young_bytes, std::size_t reserve, std::size_t workers) noexcept
+      : storage(detail::options(prefix, old_bytes, young_bytes, reserve, workers)),
+        base(static_cast<std::byte *>(address)), prefix_words(prefix / 8),
+        words{old_bytes / 8, young_bytes / 8} {
+    if (!base || reinterpret_cast<std::uintptr_t>(base) % JAM_PAGE_BYTES)
+      detail::invalid("compressed base must be page aligned and nonzero");
+    if (prefix_words > 1) for (bool young : {false, true})
+      static_cast<void>(storage.external_allocate(young, prefix_words - 1));
+    publish();
+  }
+  /// \brief Allocate raw words, returning null on capacity exhaustion.
+  [[nodiscard]] std::uint32_t allocate(std::size_t count, bool young) noexcept {
+    if (!count || count > prefix_words + words[young] - storage.external_used(young)) return 0;
+    return storage.external_allocate(young, count);
+  }
+  /// \brief Allocated cells including the selected generation's guard.
+  [[nodiscard]] std::size_t used(bool young) const noexcept { return storage.external_used(young); }
+  /// \brief Private ring origin in cells, for diagnostics.
+  [[nodiscard]] std::size_t origin(bool young) const noexcept { return storage.external_origin(young); }
+  /// \brief Name of jam's admitted scalar or SIMD compaction kernel.
+  [[nodiscard]] char const * compactor() const noexcept { return storage.compactor_name(); }
+  /// \brief Borrow the serialized generalized weak registry.
+  template<class Self> [[nodiscard]] auto & weaks(this Self & self) noexcept { return self.registry; }
+  /// \brief Begin major or minor marking, retaining ordinary old liveness in a minor.
+  void begin(bool minor_epoch) noexcept {
+    minor = minor_epoch;
+    storage.external_begin(minor);
+    registry.begin();
+  }
+  /// \brief Scanner capability; batched fields are absolute four-byte slot indices.
+  /// Slot indices need 33 bits because a young cell's generation bit is shifted left.
+  class visitor {
+    hosted_heap & owner;
+    jam::heap::visitor & underlying;
+    bool old_owners;
+  public:
+    /// \brief Bind a capability to the current jam tracing callback.
+    visitor(hosted_heap & owner, jam::heap::visitor & underlying, bool old_owners) noexcept
+        : owner(owner), underlying(underlying), old_owners(old_owners) {}
+    /// \brief Claim a full extent; dirty old owner jobs are already deduplicated by the VM.
+    [[nodiscard]] bool claim(std::uint32_t at, std::size_t count) noexcept {
+      if (owner.minor && old_owners && !(at & young_bit)) return true;
+      return underlying.claim(at, count);
+    }
+    /// \brief Trace wide/external targets without declaring narrow source slots.
+    void targets(std::span<std::uint32_t const> targets) noexcept {
+      for (auto at : targets) underlying.target(at);
+      underlying.poll();
+    }
+    /// \brief Declare all narrow fields; follow only strong edges in this policy pass.
+    void fields(std::span<std::uint64_t const> slots, bool follow) noexcept {
+      for (auto slot : slots) {
+        auto const cell = static_cast<std::uint32_t>(slot / 2);
+        auto const half = static_cast<unsigned>(slot % 2);
+        if (follow) underlying.field(cell, half);
+        else owner.storage.pointer(cell, half);
+      }
+      underlying.poll();
+    }
+  };
+  /// \brief Drain roots with jam's work frontier. Old-owner tracing is serial and explicit.
+  template<class Scan>
+  void trace(std::span<std::uint32_t const> roots, Scan && scan,
+             std::size_t workers = 1, bool old_owners = false) noexcept {
+    if (old_owners && (!minor || workers != 1)) detail::invalid("invalid old-owner scan");
+    storage.external_trace(roots, [&](jam::heap::visitor & underlying, std::uint32_t at) noexcept {
+      visitor visit{*this, underlying, old_owners};
+      scan(visit, at);
+    }, workers, old_owners);
+  }
+  /// \brief Query epoch liveness after all tracing workers have drained.
+  [[nodiscard]] bool marked(std::uint32_t at) const noexcept { return storage.external_marked(at); }
+  /// \brief Freeze destinations and repair the registry; failed promotion changes no handles.
+  [[nodiscard]] bool prepare(bool promote) noexcept {
+    if (!storage.external_prepare(promote, prefix_words)) return false;
+    promoted = minor && promote;
+    registry.forward([&](std::uint32_t at) noexcept { return storage.external_forward(at); });
+    return true;
+  }
+  /// \brief Resolve an offset using frozen tables; null and dead targets resolve to null.
+  [[nodiscard]] std::uint32_t forward(std::uint32_t at) const noexcept { return storage.external_forward(at); }
+  /// \brief Move, then publish both rings before the host resumes mutators.
+  void finish() noexcept { storage.external_finish(); publish(!minor || promoted); }
+};
+}

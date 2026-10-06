@@ -1,0 +1,8 @@
+/upstream/
+/build*/
+*.dSYM/
+/.toolchains/
+__pycache__/
+/.local/
+/evidence/
+*.log
