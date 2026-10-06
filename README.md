@@ -4,7 +4,7 @@
 <!-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
 jam is a compacting generational garbage collector for C++26. Build lists, trees
-or graphs, keep rots, and let the collector reclaim what you can no longer
+or graphs, keep roots, and let the collector reclaim what you can no longer
 reach. Sharing and cycles are fine. A pointer takes four bytes, and objects need
 no GC header or intrusive base class.
 
