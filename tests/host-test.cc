@@ -27,6 +27,7 @@ struct node { offset left, right; std::uint64_t id; };
 struct fixture {
   jam::heap storage;
   jam::heap::host host;
+  std::size_t alignment = 8;
   explicit fixture(unsigned workers) : storage(options(workers)), host(storage, page_words) {}
   node & at(offset p) noexcept { return *reinterpret_cast<node *>(&storage[p]); }
   offset make(generation g, std::uint64_t id, offset next = 0) noexcept {
@@ -38,7 +39,7 @@ struct fixture {
     auto const caller = std::this_thread::get_id();
     host.trace({&p, 1}, [&](jam::heap::visitor & visit, offset q) noexcept {
       if (workers == 1) check(std::this_thread::get_id() == caller, "serial trace stays on caller");
-      if (!(old_owners && !(q & young_bit)) && !visit.claim(q, 2)) return;
+      if (!(old_owners && !(q & young_bit)) && !visit.claim(q, 2, alignment)) return;
       visit.field(q, 0); visit.field(q, 1);
     }, workers, old_owners);
   }
@@ -80,17 +81,19 @@ void cycles(unsigned workers) {
     f.at(old).left = 0;
   }
 }
-void retry_and_subdivision() {
+void retry_and_subdivision(std::size_t alignment) {
   fixture f(4);
+  f.alignment = alignment;
+  auto const stride = static_cast<offset>(alignment == 8 ? 2 : alignment / 8);
   // One raw TLAB allocation contains many individually claimed objects.
-  constexpr auto count = page_words * 3;
-  auto old = f.host.allocate(generation::old, count * 2);
-  auto young = f.host.allocate(generation::young, count * 2);
+  auto const count = page_words * 6 / stride;
+  auto old = f.host.allocate(generation::old, count * stride);
+  auto young = f.host.allocate(generation::young, count * stride);
   for (offset i = 0; i != count; ++i) {
-    f.at(old + 2*i) = {i ? old + 2*i - 2 : 0, 0, i};
-    f.at(young + 2*i) = {i ? young + 2*i - 2 : 0, 0, i};
+    f.at(old + stride*i) = {i ? old + stride*i - stride : 0, 0, i};
+    f.at(young + stride*i) = {i ? young + stride*i - stride : 0, 0, i};
   }
-  old += 2*(count - 1); young += 2*(count - 1);
+  old += stride*(count - 1); young += stride*(count - 1);
   f.host.begin(false);
   f.trace(old, false, 4); f.trace(young, false, 4);
   check(f.host.prepare(), "independent major fits despite combined live size");
@@ -104,6 +107,7 @@ void retry_and_subdivision() {
   for (auto p : {old, young}) {
     for (auto i = count; i; --i) {
       check(p && f.at(p).id == std::uint64_t(i - 1), "retry preserves graph");
+      check((p & ~young_bit) % (alignment / 8) == 0, "retry preserves alignment");
       p = f.at(p).left;
     }
     check(!p, "chain terminates");
@@ -154,7 +158,7 @@ void publication() {
 }
 #endif
 int main() {
-  cycles(1); cycles(4); retry_and_subdivision(); external_targets();
+  cycles(1); cycles(4); retry_and_subdivision(8); retry_and_subdivision(64); external_targets();
 #if !defined(_WIN32)
   publication();
 #endif
