@@ -58,7 +58,7 @@ calling thread and completes each claim even when execution throws. The
 [integration guide](docs/thc-integration.md) covers explicit finalization,
 low-level claims, native loading and the thc handoff.
 
-## Documentation
+## [Documentation](https://ekmett.github.io/jam-vm/)
 
 * [Build and run](docs/build.md)
 * [Integrating thc](docs/thc-integration.md)

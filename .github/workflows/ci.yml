@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+name: Build and test
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'tools/build_docs.py'
+      - 'tools/check_docs.py'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'tools/build_docs.py'
+      - 'tools/check_docs.py'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAM_JOBS: '3'
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+jobs:
+  native:
+    name: Native and guest bridge
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select dependency directory
+        run: echo "JAM_CI_TOOLS=$RUNNER_TEMP/jam-vm-toolchain" >> "$GITHUB_ENV"
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/jam-vm-toolchain
+          key: macos-26-arm64-xcode26.6-native-${{ hashFiles('tools/ci/setup_macos.sh') }}
+      - name: Install pinned build dependencies
+        run: bash tools/ci/setup_macos.sh native
+      - name: Fetch native sources
+        run: python3 tools/ci/fetch_native.py
+      - name: Build and test native collector
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          env -u JAM_BOOT_JDK bash tools/build_native.sh
+          build-jam/jam-vm-test --require-simd
+          build-jam/jam-generational-test --require-simd
+      - name: Build and test guest bridge on stock Java
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          python3 tools/build_bridge.py
+          "$JAM_BOOT_JDK/bin/javac" -cp build/bridge/jam-vm.jar -d build-bridge-test tests/bridge/WeakBridgeSmoke.java
+          "$JAM_BOOT_JDK/bin/java" -Xshare:off --enable-native-access=ALL-UNNAMED \
+            "-Djava.library.path=$PWD/build/bridge/lib" \
+            -cp build-bridge-test:build/bridge/jam-vm.jar WeakBridgeSmoke unavailable
+
+  hotspot:
+    name: HotSpot integration
+    needs: native
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select dependency directory
+        run: echo "JAM_CI_TOOLS=$RUNNER_TEMP/jam-vm-toolchain" >> "$GITHUB_ENV"
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/jam-vm-toolchain
+          key: macos-26-arm64-xcode26.6-hotspot-${{ hashFiles('tools/ci/setup_macos.sh') }}
+          restore-keys: macos-26-arm64-xcode26.6-native-${{ hashFiles('tools/ci/setup_macos.sh') }}
+      - name: Install pinned build dependencies
+        run: bash tools/ci/setup_macos.sh hotspot
+      - name: Prepare pinned JDK sources
+        run: |
+          python3 tools/fetch_sources.py --full
+          python3 tools/prepare_jdk.py
+      - name: Build native collector and test JNI bridge
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          bash tools/build_native.sh
+      - name: Build Jam JDK
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          bash tools/build_hotspot.sh
+      - name: Run VM, collector identity and guest regressions
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          export JAM_JAVA="$PWD/upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk/bin/java"
+          export JAM_JAVAC="$(dirname "$JAM_JAVA")/javac"
+          export JAM_STOCK_JAVA="$JAM_BOOT_JDK/bin/java"
+          bash tools/check_vm.sh
+          python3 tools/check_gc_registration.py
+          python3 tools/check_bridge.py

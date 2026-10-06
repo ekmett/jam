@@ -149,3 +149,6 @@ Use the Jam-enabled JDK and keep its backend libraries available. This API does
 not remove the Graal compiler gate: `UseJVMCICompiler` remains rejected until
 Jam's barriers are integrated. See [supported configurations](status.md) for
 current collector limits and the remaining guest-runtime work.
+
+thc currently enables compact object headers by default. Build its launchers
+with `-Pthc.compactObjectHeaders=false` for Jam, which requires ordinary headers.
