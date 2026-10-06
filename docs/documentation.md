@@ -1,9 +1,5 @@
 # Building the documentation
 
-The documentation uses thc's shared presentation: Pandoc-rendered Markdown,
-a navigation rail, serif prose and light/dark appearance controls. The theme
-is checked in, so a docs build does not need to fetch thc or build either JVM.
-
 Install **Python 3.10+**, **Pandoc 3.x** and Make. From the repository root:
 
 ```sh
@@ -32,9 +28,8 @@ Edit the Markdown in `docs/`. The front page and shared assets live in
 navigation labels. Add a guide there to include it in the site.
 
 Use repository-relative Markdown links. The builder maps published guides to
-their HTML pages and other repository files to GitHub. Logs, source trees and
-research notes stay in the repository; the site includes only the selected
-guides and theme assets. Missing repository targets fail the build.
+their HTML pages and other repository files to GitHub. The site includes only
+the selected guides and assets. Missing or ignored targets fail the build.
 
 The checker validates the page inventory, local links, anchors, shared assets
 and source revision. It does not contact external websites. Browser behavior
@@ -53,15 +48,11 @@ revision. This keeps a built artifact tied to its source.
 ## CI
 
 The [Documentation workflow](../.github/workflows/docs.yml) runs on pushes to
-`main`, pull requests and manual dispatch. It installs Pandoc and Python,
+`main`, pull requests and manual dispatch. It installs Pandoc,
 runs `make docs`, and uploads `build/site/` as the `jam-vm-docs` artifact.
 It needs no C++ compiler, GraalVM installation or prepared upstream sources.
 
-The workflow builds an artifact. It does not deploy GitHub Pages. The checked
-directory can be served by any static host; adding publication is a separate
-repository setting and workflow step.
-
-The theme comes from thc revision
-`a94dd433054c098b82c52d606f55d279913a634f`. Its license is copied into the built
-site. See [the notices](../NOTICE.md) for provenance and the small jam-vm
-adaptations.
+Builds from `main` publish the checked site to
+[ekmett.github.io/jam-vm](https://ekmett.github.io/jam-vm/).
+Pull requests build and check the same site without deploying it.
+The repository's Pages publishing source must be set to **GitHub Actions**.

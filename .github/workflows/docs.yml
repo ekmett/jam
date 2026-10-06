@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -20,10 +24,14 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - name: Install documentation tools
+      - name: Install Pandoc
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes pandoc python3
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/pandoc.tar.gz" \
+            https://github.com/jgm/pandoc/releases/download/3.12/pandoc-3.12-linux-amd64.tar.gz
+          echo '67d7d011fed8c8543306022b985b9b2499ab9b74818df91d8727c7e9ebc5ba06  pandoc.tar.gz' \
+            | (cd "$RUNNER_TEMP" && sha256sum --check)
+          tar -xzf "$RUNNER_TEMP/pandoc.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/pandoc-3.12/bin" >> "$GITHUB_PATH"
       - name: Build and check documentation
         env:
           DOCS_REVISION: ${{ github.sha }}
@@ -35,3 +43,25 @@ jobs:
           path: build/site/
           include-hidden-files: true
           if-no-files-found: error
+      - name: Package GitHub Pages
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: build/site/
+
+  deploy:
+    if: github.repository == 'ekmett/jam-vm' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6.0.0
+      - name: Publish documentation
+        id: deployment
+        uses: actions/deploy-pages@v5.0.1
