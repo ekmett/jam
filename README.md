@@ -71,10 +71,6 @@ The current target is macOS arm64 on the patched JDK 25, with fixed capacities,
 stop-the-world collection and compressed oops. Graal compiler support and
 Native Image remain work to do.
 
-The docs use [thc's presentation](https://ekmett.github.io/thc/). With Python
-3.10+ and Pandoc 3.x installed, `make docs` builds them in `build/site/`.
-See [building the documentation](docs/documentation.md) for preview commands.
-
 ## Source and license
 
 The [source manifest](config/source-pins.json) pins jam, native, OpenJDK and the
