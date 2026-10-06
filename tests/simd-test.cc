@@ -58,7 +58,7 @@ void check_simd() { \
     auto outer = heap.root(heap.mk<H>(input, W{input}, std::uint64_t{0xdeadbeef})); \
     auto const old = direct.get().get(); \
     for (unsigned round = 0; round != 3; ++round) { \
-      heap.collect(); \
+      heap.collect_major(); \
       check(direct.get().get() < old, "SIMD root allocation moves"); \
       auto const p = heap.load(direct.get()); \
       auto const w = heap.load(packed.get()); \
@@ -114,7 +114,7 @@ void check_simd() { \
     std::array<std::uint32_t, N> mixed_data{}; \
     gathered.store(mixed_data.data()); \
     check(mixed_data[0] == 71 && mixed_data[1] == 11, "gather combines old and young bases"); \
-    heap.collect_young(); \
+    heap.collect_minor(); \
     check((*direct)[0]->data == 71 && (*packed).registers[1][0] == (*direct)[0] \
           && outer->pointers[0] == (*direct)[0] && outer->packs.registers[0][0] == (*direct)[0], \
           "minor collection forwards every heap-resident vector lane"); \
@@ -123,11 +123,11 @@ void check_simd() { \
     direct->remember(); \
     jam::assign(*packed, W{replacement}); \
     replacement.store(&outer->pointers[0]); \
-    heap.collect_young(true); \
+    heap.collect_minor(true); \
     check(!(*direct)[0].is_young() && (*direct)[N - 1]->data == 81 \
           && (*packed).registers[1][0] == (*direct)[0] && outer->pointers[N - 1] == (*direct)[0], \
           "bulk stores and explicit registration survive promotion"); \
-    heap.collect(); \
+    heap.collect_major(); \
     check((*direct)[0]->data == 81 && outer->packs.registers[0][0]->data == 71, \
           "full collection retains both generations after vector writes"); \
   } \

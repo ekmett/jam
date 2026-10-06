@@ -693,11 +693,13 @@ export struct generation_options {
 /// \ingroup jam_heap
 export struct heap_options {
   /// \brief Generation zero, below young in virtual memory.
-  generation_options old;
+  generation_options old{};
   /// \brief Generation one; ordinary typed allocation starts here.
-  generation_options young;
+  generation_options young{};
   /// \brief Workers shared by marking and compaction, including the caller.
   std::size_t workers = 1;
+  /// \brief Minor collections between scheduled majors; zero means always major.
+  std::size_t minor_collections = 7;
 };
 
 /** \brief A circular, double-mapped arena with bounded parallel compaction.
@@ -1489,6 +1491,7 @@ private:
   generation arena;
   generation nursery;
   heap_options const policy;
+  std::size_t minors_left;
   root_handle * roots_head = nullptr;
   bool collecting = false;
   bool minor_collection = false;
@@ -1508,7 +1511,7 @@ private:
         reservation(units::bytes{config.old.maximum}.count(), units::bytes{config.young.maximum}.count()),
         arena(config.old, compactor, workers, reservation.data()),
         nursery(config.young, compactor, workers, reservation.data() + 2 * units::bytes{config.old.maximum}.count()),
-        policy(config) {}
+        policy(config), minors_left(config.minor_collections) {}
   generation & containing(offset at) noexcept { return at & young_bit ? nursery : arena; }
   generation const & containing(offset at) const noexcept { return at & young_bit ? nursery : arena; }
   native_inline bool old_slot(void const * address, std::uint32_t & slot) const noexcept {
@@ -1628,7 +1631,9 @@ public:
     assert(!at || at.local_offset() < containing(at.get()).cursor);
     return jam::root<T>{root_handle{*this, at.get(), &heap::template trace_record<T>}};
   }
-  /// \brief Trace typed roots and their typed edges, then compact.
+  /// \brief Collect typed roots, running minor_collections minors between majors.
+  /// The first minor_collections calls are minor; the next call is major.
+  /// Explicit major collection resets the countdown; explicit minors leave it unchanged.
   /// \ingroup jam_heap
   /// Nonnull untyped roots or untyped visitor.field edges require collect(trace).
   /// External ptr copies expire, including stack variables and loaded snapshots.
@@ -1636,11 +1641,17 @@ public:
   void collect() noexcept {
     collect([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); });
   }
-  /// \brief Collect young without walking old; optionally append all survivors to old.
-  void collect_young(bool promote = false) noexcept {
-    run_collection([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); }, true, promote);
+  /// \brief Trace both generations and compact survivors into old; reset the countdown.
+  /// \ingroup jam_heap
+  void collect_major() noexcept {
+    collect_major([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); });
   }
-  /** \brief Trace registered roots in parallel, then compact and rewrite them.
+  /// \brief Collect young without walking old; optionally promote survivors; preserve the countdown.
+  /// \ingroup jam_heap
+  void collect_minor(bool promote = false) noexcept {
+    collect_minor([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); }, promote);
+  }
+  /** \brief Scheduled collection with a fallback tracer for untyped records.
    * \ingroup jam_heap
    * \param trace A noexcept callable accepting visitor& and a record offset.
    * \pre Mutators are stopped, and the tracer permits concurrent invocation.
@@ -1655,7 +1666,27 @@ public:
   template<class Trace>
   void collect(Trace && trace) noexcept
       requires std::is_nothrow_invocable_v<Trace &, visitor &, offset> {
+    require_mutator();
+    if (minors_left) {
+      --minors_left;
+      collect_minor(std::forward<Trace>(trace));
+    } else collect_major(std::forward<Trace>(trace));
+  }
+  /// \brief Major collection with a fallback tracer; reset the countdown.
+  /// \ingroup jam_heap
+  /// Uses the same tracing and synchronization contract as collect(trace).
+  template<class Trace>
+  void collect_major(Trace && trace) noexcept
+      requires std::is_nothrow_invocable_v<Trace &, visitor &, offset> {
     run_collection(std::forward<Trace>(trace), false, false);
+  }
+  /// \brief Minor collection with a fallback tracer and optional promotion; preserve the countdown.
+  /// \ingroup jam_heap
+  /// Uses the same tracing and synchronization contract as collect(trace).
+  template<class Trace>
+  void collect_minor(Trace && trace, bool promote = false) noexcept
+      requires std::is_nothrow_invocable_v<Trace &, visitor &, offset> {
+    run_collection(std::forward<Trace>(trace), true, promote);
   }
 private:
   template<class Trace>
@@ -1698,6 +1729,7 @@ private:
     }, &state);
     compact_impl({}, minor, promote);
     collecting = false; minor_collection = false;
+    if (!minor) minors_left = policy.minor_collections;
     std::atomic_signal_fence(std::memory_order_seq_cst);
   }
 public:
@@ -1832,8 +1864,10 @@ void assign(std::array<ptr<T>, N> & target, std::array<ptr<T>, N> const & source
 
 /// \brief Collect the current heap; only registered roots remain meaningful outside it.
 export inline void collect() noexcept { heap::current()->collect(); }
+/// \brief Collect both generations of the current heap; reset its collection countdown.
+export inline void collect_major() noexcept { heap::current()->collect_major(); }
 /// \brief Collect the current heap's young generation; optionally promote survivors.
-export inline void collect_young(bool promote = false) noexcept { heap::current()->collect_young(promote); }
+export inline void collect_minor(bool promote = false) noexcept { heap::current()->collect_minor(promote); }
 
 template<class T>
 constexpr ptr<T>::ptr(offset at) noexcept : position(at) {

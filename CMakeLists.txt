@@ -176,7 +176,7 @@ endif()
 if(JAM_BUILD_DOCS)
   find_package(Doxygen 1.18 REQUIRED COMPONENTS doxygen dot)
   set(DOXYGEN_PROJECT_NAME jam)
-  set(DOXYGEN_PROJECT_BRIEF "A compacting heap with intrusive tracing roots for C++26")
+  set(DOXYGEN_PROJECT_BRIEF "A compacting generational garbage collector for C++26")
   set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/docs")
   set(DOXYGEN_GENERATE_HTML YES)
   set(DOXYGEN_GENERATE_LATEX NO)
@@ -215,6 +215,8 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
   set(DOXYGEN_QUIET YES)
   doxygen_add_docs(jam-docs jam.ccm jam_unqualified.ccm heap.ccm units.ccm simd.ccm README.md LICENSE.md
+    docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md
+    docs/simd.md docs/collector.md docs/building.md
     COMMENT "Build jam API documentation")
   # Removed declarations must not leave stale pages in the generated reference.
   add_custom_target(jam-docs-clean

@@ -230,13 +230,13 @@ void zero_is_reserved() noexcept {
     check(at != 0, "allocation never returns the null offset");
     heap[at] = 42;
     auto root = heap.root(at);
-    heap.collect([&](auto & visit, auto start) noexcept {
+    heap.collect_major([&](auto & visit, auto start) noexcept {
       static_cast<void>(visit.claim(start));
     });
     check(root.get() == 1 && heap[root.get()] == 42,
           "compaction preserves cell zero and forwards the first object to one");
     root = {};
-    heap.collect([](auto &, auto) noexcept { std::abort(); });
+    heap.collect_major([](auto &, auto) noexcept { std::abort(); });
     check(heap.used() == 1, "empty collection retains only the reserved null cell");
   }
 }

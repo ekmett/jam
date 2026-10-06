@@ -68,7 +68,7 @@ void cycles_and_shared_children() noexcept {
   auto root = heap.root(a);
   for (unsigned round = 0; round != 4; ++round) {
     std::array<std::atomic<unsigned>, 4> visits{};
-    heap.collect([&](heap_type::visitor & visitor, offset start) noexcept {
+    heap.collect_major([&](heap_type::visitor & visitor, offset start) noexcept {
       if (!visitor.claim(start, 3)) return;
       auto const id = heap[start + 2];
       check(id >= 1 && id <= visits.size(), "a discovered record retains its payload tag");
@@ -112,7 +112,7 @@ void copied_and_moved_roots_survive_vector_relocation() noexcept {
   for (unsigned i = 0; i != 31; ++i) roots.push_back(i % 2 ? a : b);
   auto copies = roots;
   for (unsigned round = 0; round != 3; ++round) {
-    heap.collect(trace_leaf);
+    heap.collect_major(trace_leaf);
     check(heap.used() == 4 && a.get() == 1 && b.get() == 1,
           "copied intrusive hooks all follow their shared record");
     for (auto const & root : roots)
@@ -132,8 +132,8 @@ void assignment_changes_the_root_owner() noexcept {
   auto assigned = first.root(leaf(first, 111));
   auto source = second.root(leaf(second, 222));
   assigned = source;
-  first.collect(trace_leaf);
-  second.collect(trace_leaf);
+  first.collect_major(trace_leaf);
+  second.collect_major(trace_leaf);
   check(first.used() == 1, "cross-heap copy assignment unregisters the previous owner's hook");
   check(second.used() == 4 && assigned.get() == source.get()
         && second[assigned.get() + 2] == 222,
@@ -142,8 +142,8 @@ void assignment_changes_the_root_owner() noexcept {
   assigned = std::move(replacement);
   check(replacement.get() == heap_type::null, "cross-heap move assignment empties its source");
   source = root_handle{};
-  first.collect(trace_leaf);
-  second.collect(trace_leaf);
+  first.collect_major(trace_leaf);
+  second.collect_major(trace_leaf);
   check(first.used() == 4 && first[assigned.get() + 2] == 333,
         "cross-heap move assignment transfers the new root hook");
   check(second.used() == 1, "the old owner's record dies after its last root_handle is reset");
@@ -151,8 +151,8 @@ void assignment_changes_the_root_owner() noexcept {
   auto copied_null = attached_null;
   assigned = copied_null;
   check(assigned.get() == heap_type::null, "copying an attached null root_handle changes owners safely");
-  first.collect(trace_leaf);
-  second.collect(trace_leaf);
+  first.collect_major(trace_leaf);
+  second.collect_major(trace_leaf);
   check(first.used() == 1 && second.used() == 1, "null hooks never keep a record alive");
   root_handle empty;
   copied_null = empty;
@@ -172,12 +172,12 @@ void dropped_roots_reclaim_records() noexcept {
     auto copy = dropped;
     check(copy.get() == dropped.get(), "the dropped record initially has two public roots");
   }
-  heap.collect(trace_leaf);
+  heap.collect_major(trace_leaf);
   check(heap.used() == 4 && heap[kept.get() + 2] == 444,
         "destructing the last public hook reclaims only its unreachable record");
   kept = root_handle{};
   std::atomic<unsigned> visits{0};
-  heap.collect([&](heap_type::visitor &, offset) noexcept {
+  heap.collect_major([&](heap_type::visitor &, offset) noexcept {
     visits.fetch_add(1, std::memory_order_relaxed);
   });
   check(heap.used() == 1 && visits.load(std::memory_order_relaxed) == 0,
@@ -192,7 +192,7 @@ void empty_collections_ignore_null_roots() noexcept {
   for (unsigned round = 0; round != 3; ++round) {
     static_cast<void>(heap.allocate(3 + round));
     std::atomic<unsigned> visits{0};
-    heap.collect([&](heap_type::visitor &, offset) noexcept {
+    heap.collect_major([&](heap_type::visitor &, offset) noexcept {
       visits.fetch_add(1, std::memory_order_relaxed);
     });
     check(heap.used() == 1 && visits.load(std::memory_order_relaxed) == 0,
@@ -224,7 +224,7 @@ void mixed_alignment_traces_preserve_records() noexcept {
   auto const tail1 = heap[records[2] + 2];
   auto root = heap.root(records[0]);
   std::array<std::atomic<unsigned>, 3> visits{};
-  heap.collect([&](aligned_heap::visitor & visitor, aligned_offset start) noexcept {
+  heap.collect_major([&](aligned_heap::visitor & visitor, aligned_offset start) noexcept {
     std::size_t index = 0;
     while (index != records.size() && records[index] != start) ++index;
     check(index != records.size(), "every mixed-alignment target names a record start");
@@ -258,7 +258,7 @@ void a_single_root_discovers_parallel_branches() noexcept {
   auto root = heap.root(parent);
   std::array<std::thread::id, 2> threads{};
   std::array<std::atomic<unsigned>, 3> visits{};
-  heap.collect([&](heap_type::visitor & visitor, offset start) noexcept {
+  heap.collect_major([&](heap_type::visitor & visitor, offset start) noexcept {
     if (!visitor.claim(start, 3)) return;
     auto const id = heap[start + 2];
     check(id < visits.size(), "the parallel branch tracer sees a valid record tag");

@@ -50,13 +50,13 @@ void nested_scopes() {
       b = jam::mk<node>(nullptr, std::uint64_t{200});
       auto copy = a; // Registration uses the root's owner, not the current heap.
       copy = {};
-      jam::collect();
+      jam::collect_major();
       check(b->value == 200);
     }
     check(jam::heap::current() == &first && a->next->value == 41);
     static_cast<void>(first.allocate(first.capacity()));
     check(a->value == 100); // Dereference observes the remapped base after growth.
-    jam::collect();
+    jam::collect_major();
     check(a->value == 100 && a->next->value == 41);
   }
   check(jam::heap::current() == previous);
@@ -68,7 +68,7 @@ void nested_scopes() {
   }
   {
     jam::heap_scope reenter{first};
-    jam::collect();
+    jam::collect_major();
     check(first.used() == 1);
   }
   {
@@ -84,7 +84,7 @@ void const_root() {
   root<node> const root = mk<node>(nullptr, std::uint64_t{23});
   auto copy = root; // Linking another root also updates the const root's hook.
   auto const before = root.get().get();
-  collect();
+  collect_major();
   check(root.get().get() < before && root->value == 23);
   ptr<node> p = root;
   check(copy.get() == p && p->value == 23);
@@ -115,7 +115,7 @@ void collection_boundary(std::size_t workers) {
   first->next = second;
   first->value = 101;
   second->value = 202;
-  jam::collect();
+  jam::collect_major();
   check(jam::heap::current() == &heap && heap.start() != old_start);
   check(first.get().get() < first_before && second.get().get() < second_before);
   check(first->next == second.get() && second->next == first.get());
@@ -124,7 +124,7 @@ void collection_boundary(std::size_t workers) {
   check(first.get() <= second.get() && second.get() > first.get());
   check((first.get() <=> first.get()) == 0);
   first->value = 303;
-  heap.collect(); // Explicit collection has the same visibility boundary.
+  heap.collect_major(); // Explicit collection has the same visibility boundary.
   check(second->next->value == 303 && first->next->value == 202);
   check(first.get() < second.get() && nullptr < first.get());
   check(first.get() <= second.get() && second.get() > first.get());
@@ -139,7 +139,7 @@ void thread_scopes() {
     jam::root<node> root = jam::mk<node>(nullptr, value);
     gate.arrive_and_wait();
     check(jam::heap::current() == &heap && root->value == value);
-    jam::collect();
+    jam::collect_major();
     gate.arrive_and_wait();
     check(root->value == value);
   };

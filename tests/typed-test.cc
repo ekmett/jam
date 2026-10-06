@@ -221,7 +221,7 @@ void mixed_graph() noexcept {
 
   for (unsigned round = 0; round != 4; ++round) {
     N::visits.store(0, std::memory_order_relaxed);
-    heap.collect();
+    heap.collect_major();
     check(N::visits.load(std::memory_order_relaxed) == 2,
           "cycles and duplicate roots trace each typed record exactly once");
     auto const first = heap.load(root.get());
@@ -240,7 +240,7 @@ void mixed_graph() noexcept {
   roots.clear();
   root = {};
   moved = {};
-  heap.collect();
+  heap.collect_major();
   check(heap.used() == 1, "dropping the last typed roots reclaims the graph");
 }
 
@@ -254,7 +254,7 @@ void parallel_typed_discovery() noexcept {
   auto root = heap.root(heap.mk<fork_node>(fork_node{left, right}));
   static_assert(std::is_same_v<decltype(root), jam::root<fork_node>>);
   for (unsigned round = 0; round != 3; ++round) {
-    heap.collect();
+    heap.collect_major();
     auto const fork = heap.load(root.get());
     check((fork.left.get() * 8) % 64 == 0 && (fork.right.get() * 8) % 64 == 0,
           "target types preserve their allocation alignment during compaction");
@@ -279,7 +279,7 @@ void composite_graph() noexcept {
   auto array_root = heap.root(heap.template mk<A>(A{first, {}}));
   auto variant_root = heap.root(heap.template mk<V>(V{second}));
   for (unsigned round = 0; round != 3; ++round) {
-    heap.collect();
+    heap.collect_major();
     auto value = heap.load(root.get());
     auto const a = value.entries[0].pointer;
     auto const part = value.entries[2].nested;
@@ -301,7 +301,7 @@ void composite_graph() noexcept {
   heap.store(root.get(), value);
   array_root = {};
   variant_root = {};
-  heap.collect();
+  heap.collect_major();
   value = heap.load(root.get());
   check(value.entries[0].scalar == 1 && !value.entries[2].pointer,
         "changing a tagged alternative clears the old pointer declaration");
@@ -309,7 +309,7 @@ void composite_graph() noexcept {
   auto const replacement = heap.template mk<payload>(payload{97, 17});
   value.entries[0] = replacement;
   heap.store(root.get(), value);
-  heap.collect();
+  heap.collect_major();
   check(heap.load(heap.load(root.get()).entries[0].pointer).bits == 97,
         "a scalar alternative can become a managed edge on the next collection");
 }
@@ -384,7 +384,7 @@ void deep_cooperative_graph() noexcept {
       walking_node::heap_begin = reinterpret_cast<std::uintptr_t>(generation.data());
       walking_node::heap_end = walking_node::heap_begin + generation.used() * 8;
       walking_node::calls.store(0);
-      heap.collect();
+      heap.collect_major();
       check(walking_node::calls.load() == count * 3, "cooperative traversal visits each record once");
       auto p = root.get();
       for (unsigned i = 0; i != count; ++i) {
@@ -469,7 +469,7 @@ void cooperative_tree() noexcept {
     tree_node::seen = seen.data();
     for (unsigned round = 0; round != 3; ++round) {
       for (auto & n : seen) n.store(0);
-      heap.collect();
+      heap.collect_major();
       for (unsigned i = 1; i <= count; ++i) {
         check(seen[i].load() == 1, "all enqueued subtrees are processed before compaction");
         auto const node = heap.load(jam::ptr<tree_node>{1 + 2 * (i - 1)});
@@ -510,7 +510,7 @@ void cooperative_claims() noexcept {
     heap.store(b, patterned_node{data, 1, 1, {}, 1, a});
     auto root = heap.root(a.get());
     for (unsigned round = 0; round != 3; ++round) {
-      heap.collect([&](jam::heap::visitor & visit, jam::heap::offset at) noexcept {
+      heap.collect_major([&](jam::heap::visitor & visit, jam::heap::offset at) noexcept {
         auto const * current = visit.claim_target(jam::ptr<patterned_node>{at});
         unsigned count = 0;
         while (current) {
@@ -556,7 +556,7 @@ void cooperative_claims() noexcept {
     bool const cycle = round == 1;
     auto const head_at = jam::ptr<self_link>{root.get()};
     heap.store(heap.load(head_at).next, self_link{cycle ? head_at : nullptr});
-    heap.collect([](jam::heap::visitor & visit, jam::heap::offset at) noexcept {
+    heap.collect_major([](jam::heap::visitor & visit, jam::heap::offset at) noexcept {
       unsigned count = 0;
       for (auto const * p = visit.claim_target(jam::ptr<self_link>{at}); p;
            p = visit.claim(p->next)) ++count;
@@ -579,7 +579,7 @@ void manifest_graph() noexcept {
     }
     auto root = heap.root(at);
     for (unsigned round = 0; round != 3; ++round) {
-      heap.collect();
+      heap.collect_major();
       auto p = root.get();
       for (unsigned i = length; i; --i) {
         auto const value = heap.load(p);
@@ -591,7 +591,7 @@ void manifest_graph() noexcept {
             "manifest walk retains the complete graph without garbage");
     }
     heap.store(root.get(), manifest_node{root.get(), root.get(), 17});
-    heap.collect();
+    heap.collect_major();
     auto const value = heap.load(root.get());
     check(heap.used() == 3 && value.left == root.get() && value.right == root.get(),
           "manifest cycles stop at an earlier claim and forward both slots");
@@ -601,7 +601,7 @@ void manifest_graph() noexcept {
       return heap.mk<manifest_node>(left, right, depth);
     };
     auto tree = heap.root(build(12));
-    heap.collect();
+    heap.collect_major();
     std::vector<jam::ptr<manifest_node>> pending{tree.get()};
     unsigned count = 0;
     while (!pending.empty()) {
@@ -660,7 +660,7 @@ void nested_manifest_graph() noexcept {
     auto root = heap.root(first);
     for (unsigned round = 0; round != 3; ++round) {
       manifest_override::calls = 0;
-      heap.collect();
+      heap.collect_major();
       auto const x = heap.load(root.get());
       auto const y = heap.load(x.links[1]);
       check(x.scalar == 1 && y.scalar == 1 && y.dynamic.scalar == 1,
@@ -703,7 +703,7 @@ void native_storage() {
     auto outer = heap.root(heap.mk<native_record<T>>(direct.get(), expected));
     auto const before = direct.get().get();
     for (unsigned round = 0; round != 3; ++round) {
-      heap.collect();
+      heap.collect_major();
       auto const * p = heap.address(direct.get());
       auto const * q = heap.address(outer.get());
       check(direct.get().get() < before, "native payload actually moves during collection");
