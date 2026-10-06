@@ -27,6 +27,7 @@ module;
 #include <variant>
 #include <utility>
 #include <vector>
+#include <deque>
 #include <unordered_map>
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -378,6 +379,8 @@ namespace jam {
 export class heap;
 export template<class T> class root;
 export template<class T> class ptr;
+export template<class T> class weak_ptr;
+export template<class T> class weak;
 
 /// \brief A visitor for jam's compressed, alignment-preserving heap.
 /// \ingroup jam_heap
@@ -611,9 +614,74 @@ public:
   [[nodiscard]] constexpr auto operator<=>(ptr const &) const noexcept = default;
 };
 
+/// \brief A four-byte weak heap field; tracing updates its slot without retaining its target.
+/// \ingroup jam_heap
+/// Construct from a ptr or root. Collection clears the field when its target is
+/// unclaimed; minor collection leaves old targets alone. Use lock() to retain a
+/// target across collection. There is no control block or external registration:
+/// stack copies expire at collection just like ptr, even if the target survives.
+/// The field must be listed in its owner's manifest or trace hook.
+export template<class T>
+class weak_ptr {
+public:
+  /// \brief Target record type; may be incomplete.
+  using element_type = T;
+  /// \brief The same generation-tagged cell index used by ptr.
+  using offset = std::uint32_t;
+private:
+  mutable offset position = 0;
+  native_inline constexpr void update_barrier() noexcept;
+public:
+  /// \brief Construct an empty weak pointer.
+  constexpr weak_ptr() noexcept = default;
+  /// \brief Implicitly construct an empty weak pointer.
+  constexpr weak_ptr(std::same_as<std::nullptr_t> auto) noexcept {}
+  /// \brief Observe a strong pointer without retaining its target.
+  native_inline constexpr weak_ptr(ptr<T> const & value) noexcept;
+  /// \brief Observe a registered root without retaining its target.
+  native_inline weak_ptr(root<T> const & value) noexcept;
+  /// \brief Observe a derived pointer through its supported base conversion.
+  template<class U> requires (!std::same_as<T, U>) && std::convertible_to<ptr<U>, ptr<T>>
+  native_inline constexpr weak_ptr(ptr<U> const & value) noexcept : weak_ptr(ptr<T>{value}) {}
+  /// \brief Copy and register an old-to-young weak slot when necessary.
+  native_inline constexpr weak_ptr(weak_ptr const & other) noexcept;
+  native_inline constexpr weak_ptr & operator=(weak_ptr const & other) noexcept;
+  /// \brief Transfer the weak pointer, leaving the source empty.
+  native_inline constexpr weak_ptr(weak_ptr && other) noexcept;
+  /// \brief Transfer the weak pointer; self-move leaves it unchanged.
+  native_inline constexpr weak_ptr & operator=(weak_ptr && other) noexcept;
+  /// \brief Remove a dying old slot from the remembered set.
+  native_inline constexpr ~weak_ptr() noexcept;
+  /// \brief Exchange targets while preserving each slot's weak barrier.
+  native_inline constexpr void swap(weak_ptr & other) noexcept;
+  /// \brief Exchange weak pointers through ADL.
+  friend native_inline constexpr void swap(weak_ptr & a, weak_ptr & b) noexcept { a.swap(b); }
+  /// \brief Assign encoded bits without registration; the caller owns the barrier.
+  constexpr weak_ptr & unsafe_assign(offset bits) noexcept { position = bits; return *this; }
+  /// \brief Assign without registration; the caller must remember old-to-young slots.
+  constexpr weak_ptr & unsafe_assign(weak_ptr const & other) noexcept { return unsafe_assign(other.position); }
+  /// \brief Read the encoded offset; an external copy expires on collection.
+  [[nodiscard]] native_inline native_pure constexpr offset get() const noexcept { return position; }
+  /// \brief Whether this field targets the young generation.
+  [[nodiscard]] constexpr bool is_young() const noexcept { return (position & 0x80000000u) != 0; }
+  /// \brief Whether null or cleared by collection; this does not initiate collection.
+  [[nodiscard]] constexpr bool expired() const noexcept { return position == 0; }
+  /// \brief Retain the current target as a strong root, or return an empty root.
+  /// \pre The current heap owns this valid field; mutation and collection are quiescent.
+  [[nodiscard]] native_inline root<T> lock() const noexcept requires traceable<T>;
+  /// \brief Compare current encoded offsets within one heap.
+  [[nodiscard]] constexpr auto operator<=>(weak_ptr const &) const noexcept = default;
+};
+/// \brief Deduce the target type from a strong pointer.
+export template<class T> weak_ptr(ptr<T> const &) -> weak_ptr<T>;
+/// \brief Deduce the target type from a root.
+export template<class T> weak_ptr(root<T> const &) -> weak_ptr<T>;
+
 namespace detail {
 template<class T> inline constexpr bool is_ptr = false;
 template<class T> inline constexpr bool is_ptr<ptr<T>> = true;
+template<class T> inline constexpr bool is_weak_ptr = false;
+template<class T> inline constexpr bool is_weak_ptr<weak_ptr<T>> = true;
 template<class T, class Visitor>
 concept visits = requires(Visitor & visit, std::remove_reference_t<T> const & value) {
   tracer<std::remove_cvref_t<T>>::trace(visit, value);
@@ -630,6 +698,16 @@ struct tracer<ptr<T>> {
       noexcept(noexcept(visit(value))) {
     visit(value);
   }
+};
+
+/// \brief Declare a weak field for forwarding without following its target.
+/// \ingroup jam_heap
+export template<class T>
+struct tracer<weak_ptr<T>> {
+  /// \brief Preserve the original field address for pointer-mask declaration.
+  template<visitor Visitor>
+  static constexpr void trace(Visitor & visit, weak_ptr<T> const & value)
+      noexcept(noexcept(visit(value))) { visit(value); }
 };
 
 namespace detail {
@@ -744,6 +822,8 @@ export struct heap_options {
  */
 export class heap {
   template<class T> friend class ptr;
+  template<class T> friend class weak_ptr;
+  template<class T> friend class weak;
 
 public:
   /// \brief Read the current thread's dynamically bound heap.
@@ -769,6 +849,8 @@ public:
   /// \brief The compact pointer type for this heap.
   /// \ingroup jam_heap
   template<class T> using ptr = jam::ptr<T>;
+  /// \brief The weak field type for this heap.
+  template<class T> using weak_ptr = jam::weak_ptr<T>;
   static_assert(sizeof(std::size_t) == 8, "jam requires 64-bit addressing");
   static_assert(sizeof(block) == 16);
   static_assert(std::atomic_ref<bitmap>::is_always_lock_free);
@@ -779,6 +861,16 @@ public:
 private:
   using trace_function = void (*)(visitor &, offset);
   struct trace_job { offset at; trace_function trace; };
+  struct weak_entry {
+    heap * owner;
+    trace_job key, value, finalizer;
+    void (*invoke)(heap &, weak_entry &) noexcept;
+    bool active = true;
+    weak_entry * previous_running = nullptr;
+  };
+  template<class F> struct finalizer_entry : weak_entry {
+    void (*runner)(F &) noexcept;
+  };
 
 public:
   /** \brief An external intrusive root, rewritten by each moving collection.
@@ -918,8 +1010,10 @@ public:
         } else visit.enqueue(value);
       }
       template<class U>
+      native_inline void operator()(weak_ptr<U> const & value) noexcept { visit(value); }
+      template<class U>
       native_inline void operator()(U const & value) noexcept
-          requires (!detail::is_ptr<U>) && detail::visits<U, visitor> {
+          requires (!detail::is_ptr<U> && !detail::is_weak_ptr<U>) && detail::visits<U, visitor> {
         if constexpr (std::derived_from<tracer<U>, detail::structural_tracer>)
           tracer<U>::trace(*this, value);
         else visit(value); // Custom hooks keep the actual heap visitor.
@@ -1002,6 +1096,12 @@ public:
       arena.pointer((record_offset & young_bit) | static_cast<offset>(heap_delta / sizeof(word)),
                     static_cast<unsigned>((heap_delta % sizeof(word)) / sizeof(offset)));
     }
+    /// \brief Declare a weak slot without following or claiming its target.
+    /// \pre The field belongs to the current successfully claimed record.
+    template<class T>
+    native_inline void pointer(weak_ptr<T> const & value) noexcept {
+      pointers(word{1}, pointer_slot(&value));
+    }
     /// \brief OR a pattern of pointer slots into the current record's metadata.
     /// Bit zero names the 32-bit slot at first_slot, relative to the record start.
     /// Zero bits leave existing declarations unchanged. No targets are claimed.
@@ -1044,7 +1144,7 @@ public:
     /// those parts, but ptr fields must retain their original heap addresses.
     template<class T>
     native_inline void operator()(T const & value) noexcept
-        requires (!detail::is_ptr<T>) && detail::visits<T, visitor> {
+        requires (!detail::is_ptr<T> && !detail::is_weak_ptr<T>) && detail::visits<T, visitor> {
       tracer<T>::trace(*this, value);
     }
     /// \brief Declare a typed field and enqueue its nonnull target.
@@ -1059,6 +1159,9 @@ public:
       enqueue(value);
       return value;
     }
+    /// \brief Declare a weak field for forwarding; never enqueue its target.
+    template<class T>
+    native_inline void operator()(weak_ptr<T> const & value) noexcept { pointer(value); }
     /// \brief Visit parts in order, preserving their addresses; an empty pack does nothing.
     template<class... Ts>
     native_inline void operator()(Ts const &... values) noexcept
@@ -1088,10 +1191,9 @@ private:
   template<class T>
   native_inline T * record_address(offset at) noexcept {
     require_record<T>();
-    auto & g = containing(at);
-    auto const local = at & offset_mask;
-    assert(at && local < g.cursor && record_words<T> <= g.cursor - local);
-    auto * p = g.data() + local;
+    assert(at && (at & offset_mask) < containing(at).cursor
+           && record_words<T> <= containing(at).cursor - (at & offset_mask));
+    auto * p = decode(at);
     if constexpr (std::is_trivially_copyable_v<T>) {
       return static_cast<T *>(std::memmove(p, p, sizeof(T)));
     } else {
@@ -1224,7 +1326,7 @@ public:
       assert(value < cursor);
       auto const & item = metadata[value >> block_shift];
       auto const bit = static_cast<bitmap>(bitmap{1} << (value & (block_words - 1)));
-      assert((item.live & bit) != 0);
+      if (!(item.live & bit)) return null;
       return base(item) + static_cast<offset>(std::popcount(detail::retained(item, alignment_table(), value >> block_shift) & (bit - 1)));
     }
     void resize(std::size_t words) noexcept {
@@ -1377,7 +1479,8 @@ public:
      * \ingroup jam_heap
      * \param roots Mutable offsets outside the heap, including null.
      * The construction policy selects the participating workers, including the caller.
-     * \pre Nonnull roots and live fields target marked cells. Mutators and markers
+     * \pre Nonnull strong roots and fields target marked cells; weak fields may
+     * target unmarked allocations. Mutators and markers
      * are stopped. Payloads are relocatable and roots do not alias the heap.
      * The view steps backward by the reserve. Copying never gets more than N
      * native source pages ahead of the earliest unfinished page; completed pages
@@ -1554,9 +1657,15 @@ private:
   heap_options const policy;
   std::size_t minors_left;
   root_handle * roots_head = nullptr;
+  std::vector<std::shared_ptr<weak_entry>> weak_entries;
+  std::deque<std::shared_ptr<weak_entry>> pending_finalizers;
+  weak_entry * running_finalizer = nullptr;
   bool collecting = false;
   bool minor_collection = false;
   std::unordered_map<std::uint32_t, trace_function> remembered;
+  // Callback identity distinguishes weak slots from raw strong slots (nullptr).
+  // Weak slots participate in forwarding, never in the initial marking frontier.
+  static void weak_slot(visitor &, offset) noexcept {}
   static constexpr unsigned block_shift = 5;
   static constexpr offset young_bit = 0x80000000u;
   static constexpr offset offset_mask = 0x7fffffffu;
@@ -1575,6 +1684,16 @@ private:
         policy(config), minors_left(config.minor_collections) {}
   [[nodiscard]] native_inline generation & containing(offset at) noexcept { return at & young_bit ? nursery : arena; }
   [[nodiscard]] native_inline generation const & containing(offset at) const noexcept { return at & young_bit ? nursery : arena; }
+  template<class Self>
+  [[nodiscard]] native_inline native_pure
+  auto decode(this Self & self native_lifetimebound, offset bits) noexcept
+      -> std::conditional_t<std::is_const_v<Self>, std::byte const, std::byte> * {
+    using byte = std::conditional_t<std::is_const_v<Self>, std::byte const, std::byte>;
+    // Carry selects the generation; the wrapped sum strips its tag and doubles the cell offset.
+    std::uint32_t doubled;
+    auto * base = (__builtin_add_overflow(bits, bits, &doubled) ? self.nursery : self.arena).data();
+    return reinterpret_cast<byte *>(base) + std::size_t(doubled) * 4;
+  }
   native_inline bool old_slot(void const * address, std::uint32_t & slot) const noexcept {
     auto const delta = reinterpret_cast<std::uintptr_t>(address) - reinterpret_cast<std::uintptr_t>(arena.storage.data());
     auto const bytes = arena.storage.bytes();
@@ -1604,6 +1723,39 @@ private:
     if (!value || (minor && !(value & young_bit))) return value;
     return containing(value).forward(value & offset_mask);
   }
+  // Read only with the marking frontier drained; workers may otherwise own these bits.
+  bool marked(offset at) const noexcept {
+    if (!at) return false;
+    if (minor_collection && !(at & young_bit)) return true;
+    auto const local = at & offset_mask;
+    return (containing(at).metadata[local >> block_shift].live >> (local % block_words)) & 1;
+  }
+  void run_finalizer(std::shared_ptr<weak_entry> const & entry) noexcept {
+    entry->previous_running = running_finalizer;
+    running_finalizer = entry.get();
+    {
+      heap_scope binding{*this};
+      entry->invoke(*this, *entry);
+    }
+    running_finalizer = entry->previous_running;
+    entry->owner = nullptr;
+  }
+  void drain_finalizers() noexcept {
+    if (running_finalizer) return;
+    while (!pending_finalizers.empty()) {
+      auto entry = std::move(pending_finalizers.front());
+      pending_finalizers.pop_front();
+      run_finalizer(entry);
+    }
+  }
+  void finalize(std::shared_ptr<weak_entry> const & entry) noexcept {
+    require_mutator();
+    if (!entry->active) return;
+    entry->active = false;
+    std::erase(weak_entries, entry);
+    run_finalizer(entry);
+    drain_finalizers();
+  }
   void compact_impl(std::span<offset> roots, bool minor = false, bool promote = false) noexcept {
     auto const old_end = minor ? arena.cursor : arena.prepare(0, true);
     auto const young_start = minor && !promote ? std::size_t(young_bit) : old_end;
@@ -1624,14 +1776,23 @@ private:
     nursery.zero_gaps(target, minor && !promote ? 0 : old_end);
     for (auto & root : roots) root = forward(root, minor);
     for (auto * root = roots_head; root; root = root->next) root->position = forward(root->position, minor);
-    if (minor) for (auto const & [slot, trace] : remembered) {
-      static_cast<void>(trace);
+    if (minor) for (auto entry = remembered.begin(); entry != remembered.end();) {
+      auto const slot = entry->first;
       auto * address = reinterpret_cast<std::byte *>(arena.data()) + std::size_t(slot) * sizeof(offset);
       offset value;
       std::memcpy(&value, address, sizeof(value));
       value = forward(value, true);
       std::memcpy(address, &value, sizeof(value)); // Collector writes bypass barriers.
+      if (value) ++entry; else entry = remembered.erase(entry);
     }
+    auto forward_entry = [&](weak_entry & entry) noexcept {
+      entry.key.at = forward(entry.key.at, minor);
+      entry.value.at = entry.active ? forward(entry.value.at, minor) : null;
+      entry.finalizer.at = forward(entry.finalizer.at, minor);
+    };
+    for (auto const & entry : weak_entries) forward_entry(*entry);
+    for (auto const & entry : pending_finalizers) forward_entry(*entry);
+    for (auto * entry = running_finalizer; entry; entry = entry->previous_running) forward_entry(*entry);
     // Both generations and every external/remembered root have consumed the
     // forwarding tables. Packing may now overwrite their pointer masks.
     if (!minor) arena.pack_into(arena.metadata);
@@ -1660,6 +1821,24 @@ public:
     for (std::size_t i = 0; i != values.size(); ++i)
       if (values[i].is_young()) remember_slot(first + static_cast<std::uint32_t>(i), &heap::template trace_record<T>);
   }
+  /// \brief Register a weak old-to-young slot for rewriting, never for marking.
+  template<class T> native_inline void remember(weak_ptr<T> const & value) noexcept {
+    std::uint32_t slot;
+    if (!old_slot(&value, slot)) return;
+    if (value.is_young()) remember_slot(slot, &weak_slot); else forget_slot(slot);
+  }
+  /// \brief Register weak slots after bulk unsafe assignment, dropping stale entries.
+  template<class T> native_inline void remember(std::span<weak_ptr<T>> values) noexcept {
+    if (values.empty()) return;
+    std::uint32_t first;
+    if (!old_slot(values.data(), first)) return;
+    require_mutator();
+    assert(std::size_t(first) + values.size() <= 2 * arena.cursor);
+    for (std::size_t i = 0; i != values.size(); ++i) {
+      auto const slot = first + static_cast<std::uint32_t>(i);
+      if (values[i].is_young()) remember_slot(slot, &weak_slot); else forget_slot(slot);
+    }
+  }
   /// \brief Construct a heap and one persistent pool sized for both collection phases.
   /// \ingroup jam_heap
   /// \pre Capacity holds at least twice the reserve; workers are positive.
@@ -1677,7 +1856,8 @@ public:
   heap & operator=(heap const &) = delete;
   /// \brief Release the arena; every attached root must already be destroyed.
   ~heap() noexcept {
-    if (roots_head) detail::heap_failure("heap destroyed with attached roots");
+    if (roots_head || running_finalizer) detail::heap_failure("heap destroyed with attached roots or callbacks");
+    for (auto const & entry : weak_entries) { entry->active = false; entry->owner = nullptr; }
   }
   /// \brief Register a record or null as an intrusive public root.
   /// \pre A nonnull offset names an allocated record understood by the tracer.
@@ -1694,6 +1874,14 @@ public:
     assert(!at || at.local_offset() < containing(at.get()).cursor);
     return jam::root<T>{root_handle{*this, at.get(), &heap::template trace_record<T>}};
   }
+  /// \brief Associate a weak key and value with a managed finalizer and stateless runner.
+  /// \pre All pointers belong to this heap; finalizer is nonnull and byte-relocatable.
+  /// The runner borrows F after collection. Growth/collection invalidates that borrow.
+  /// State belongs in F and its manifest/trace; the runner is a noexcept function pointer.
+  /// Dropping the returned external handle does not cancel finalization.
+  template<traceable K, traceable V, traceable F>
+  [[nodiscard]] jam::weak<V> mk_weak(ptr<K> const & key, ptr<V> const & value,
+      ptr<F> const & finalizer, std::type_identity_t<void (*)(F &) noexcept> runner) noexcept;
   /// \brief Collect typed roots, running minor_collections minors between majors.
   /// The first minor_collections calls are minor; the next call is major.
   /// Explicit major collection resets the countdown; explicit minors leave it unchanged.
@@ -1771,29 +1959,60 @@ private:
     if (minor) for (auto const & [slot, callback] : remembered) {
       offset value;
       std::memcpy(&value, reinterpret_cast<std::byte const *>(arena.data()) + std::size_t(slot) * sizeof(offset), sizeof(value));
-      if (value & young_bit) initial.push_back({value, callback});
+      if ((value & young_bit) && callback != &weak_slot) initial.push_back({value, callback});
     }
-    auto const marker_count = workers.available_workers();
-    detail::frontier<trace_job> pending{marker_count, initial};
-    struct context {
-      heap * arena;
-      std::remove_reference_t<Trace> * trace;
-      detail::frontier<trace_job> * pending;
-    } state{this, std::addressof(trace), &pending};
-    workers.run(marker_count, [](void * raw, std::size_t worker) noexcept {
-      auto & state = *static_cast<context *>(raw);
-      heap_scope binding{*state.arena};
-      visitor visit{*state.arena, *state.pending, worker};
-      trace_job job;
-      while (state.pending->pop(worker, job)) {
-        if (job.trace) job.trace(visit, job.at);
-        else std::invoke(*state.trace, visit, job.at);
+    auto seed = [&](trace_job job) noexcept {
+      if (job.at && !marked(job.at)) initial.push_back(job);
+    };
+    auto seed_finalizer = [&](weak_entry const & entry) noexcept {
+      seed(entry.key); seed(entry.finalizer);
+    };
+    for (auto const & entry : pending_finalizers) seed_finalizer(*entry);
+    for (auto * entry = running_finalizer; entry; entry = entry->previous_running) seed_finalizer(*entry);
+    auto drain = [&]() noexcept {
+      if (initial.empty()) return;
+      auto const marker_count = workers.available_workers();
+      detail::frontier<trace_job> pending{marker_count, initial};
+      struct context {
+        heap * arena;
+        std::remove_reference_t<Trace> * trace;
+        detail::frontier<trace_job> * pending;
+      } state{this, std::addressof(trace), &pending};
+      workers.run(marker_count, [](void * raw, std::size_t worker) noexcept {
+        auto & state = *static_cast<context *>(raw);
+        heap_scope binding{*state.arena};
+        visitor visit{*state.arena, *state.pending, worker};
+        trace_job job;
+        while (state.pending->pop(worker, job)) {
+          if (job.trace) job.trace(visit, job.at);
+          else std::invoke(*state.trace, visit, job.at);
+        }
+      }, &state);
+      initial.clear();
+    };
+    drain();
+    std::stable_sort(weak_entries.begin(), weak_entries.end(), [](auto const & a, auto const & b) noexcept {
+      return a->key.at < b->key.at;
+    });
+    std::size_t retained = 0;
+    for (auto const & entry : weak_entries) {
+      if (marked(entry->key.at)) {
+        seed(entry->value); seed(entry->finalizer);
+        weak_entries[retained++] = entry;
+      } else {
+        // Retire before retaining K/F: this entry never rearms, even on resurrection.
+        entry->active = false;
+        pending_finalizers.push_back(entry);
+        seed_finalizer(*entry);
       }
-    }, &state);
+      drain();
+    }
+    weak_entries.resize(retained);
     compact_impl({}, minor, promote);
     collecting = false; minor_collection = false;
     if (!minor) minors_left = policy.minor_collections;
     std::atomic_signal_fence(std::memory_order_seq_cst);
+    drain_finalizers();
   }
 public:
   /// \brief Allocate and copy a typed record, returning an unrooted reference.
@@ -1830,9 +2049,9 @@ public:
   template<class T>
   [[nodiscard]] T load(ptr<T> const & at) const noexcept requires traceable<T> {
     require_record<T>();
-    auto const & g = containing(at.get());
-    assert(at && at.local_offset() < g.cursor && record_words<T> <= g.cursor - at.local_offset());
-    return *std::launder(reinterpret_cast<T const *>(g.data() + at.local_offset()));
+    assert(at && at.local_offset() < containing(at.get()).cursor
+           && record_words<T> <= containing(at.get()).cursor - at.local_offset());
+    return *std::launder(reinterpret_cast<T const *>(decode(at.get())));
   }
   /// \brief Replace a typed record's bytes without changing its extent or type.
   /// \ingroup jam_heap
@@ -1870,7 +2089,10 @@ public:
   }
   native_inline void pointer(offset where, unsigned slot = 0) noexcept { containing(where).pointer(where & offset_mask, slot); }
   void compact(std::span<offset> roots = {}) noexcept {
-    require_mutator(); std::atomic_signal_fence(std::memory_order_seq_cst);
+    require_mutator();
+    if (!weak_entries.empty() || !pending_finalizers.empty() || running_finalizer)
+      detail::heap_failure("raw compact requires no weak registrations or pending finalizers");
+    std::atomic_signal_fence(std::memory_order_seq_cst);
     collecting = true; compact_impl(roots); collecting = false;
     std::atomic_signal_fence(std::memory_order_seq_cst);
   }
@@ -1912,6 +2134,61 @@ public:
   [[nodiscard]] native_inline explicit operator bool() const noexcept { return base::get() != heap::null; }
 };
 
+/// \brief An external conditional weak-value handle; registration survives dropped handles.
+/// \ingroup jam_heap
+/// Keep this handle outside the managed heap. Copies share one registration.
+/// Finalization expires all copies before the callback runs; resurrection does not rearm it.
+export template<class V>
+class weak {
+  friend class heap;
+  std::shared_ptr<heap::weak_entry> entry;
+  explicit weak(std::shared_ptr<heap::weak_entry> value) noexcept : entry(std::move(value)) {}
+public:
+  weak() noexcept = default;
+  /// \brief Whether the registration has retired or its heap has been destroyed.
+  [[nodiscard]] bool expired() const noexcept { return !entry || !entry->active; }
+  /// \brief Retain the current value, or return an empty root for a retired registration.
+  /// Dereferencing the root requires the owning heap current.
+  [[nodiscard]] root<V> lock() const noexcept {
+    if (expired()) return {};
+    return entry->owner->root(ptr<V>{entry->value.at});
+  }
+  /// \brief Retire the registration and run its callback now, at most once.
+  /// Also drains any finalizers scheduled by nested collection once the callback returns.
+  void finalize() const noexcept {
+    // A callback may destroy the very handle used to invoke it.
+    auto keep = entry;
+    if (keep && keep->active) keep->owner->finalize(keep);
+  }
+};
+
+template<traceable K, traceable V, traceable F>
+jam::weak<V> heap::mk_weak(ptr<K> const & key, ptr<V> const & value,
+    ptr<F> const & finalizer, std::type_identity_t<void (*)(F &) noexcept> runner) noexcept {
+  require_mutator();
+  if (!finalizer || !runner) detail::heap_failure("mk_weak requires a finalizer and runner");
+  auto entry = std::make_shared<finalizer_entry<F>>();
+  entry->owner = this;
+  entry->key = {key.get(), &trace_record<K>};
+  entry->value = {value.get(), &trace_record<V>};
+  entry->finalizer = {finalizer.get(), &trace_record<F>};
+  entry->runner = runner;
+  entry->invoke = [](heap & owner, weak_entry & base) noexcept {
+    auto & entry = static_cast<finalizer_entry<F> &>(base);
+    entry.runner(*owner.template record_address<F>(entry.finalizer.at));
+  };
+  weak_entries.push_back(entry);
+  return jam::weak<V>{std::move(entry)};
+}
+
+/// \brief Register a weak key/value pair and managed finalizer in the current heap.
+/// The captureless runner receives F& and obeys normal borrow rules; no destructor is invoked.
+export template<traceable K, traceable V, traceable F>
+[[nodiscard]] native_inline weak<V> mk_weak(ptr<K> const & key, ptr<V> const & value,
+    ptr<F> const & finalizer, std::type_identity_t<void (*)(F &) noexcept> runner) noexcept {
+  return heap::current()->mk_weak(key, value, finalizer, runner);
+}
+
 /// \brief Allocate a record in the current heap; register a root before collection.
 export template<traceable T, class... Args>
 [[nodiscard]] native_inline ptr<T> mk(Args &&... args) noexcept {
@@ -1930,12 +2207,75 @@ native_inline constexpr void assign(std::array<ptr<T>, N> & target, std::array<p
   if !consteval { if (auto * h = heap::current()) h->remember(std::span<ptr<T>>{target}); }
 }
 
+/// \brief Bulk-copy weak pointer bits without registration; caller owns the barriers.
+export template<class T, std::size_t N>
+native_inline constexpr void unsafe_assign(std::array<weak_ptr<T>, N> & target,
+                                          std::array<weak_ptr<T>, N> const & source) noexcept {
+  for (std::size_t i = 0; i != N; ++i) target[i].unsafe_assign(source[i]);
+}
+/// \brief Copy weak fields and update remembered entries with one old-range check.
+export template<class T, std::size_t N>
+native_inline constexpr void assign(std::array<weak_ptr<T>, N> & target,
+                                   std::array<weak_ptr<T>, N> const & source) noexcept {
+  unsafe_assign(target, source);
+  if !consteval { if (auto * h = heap::current()) h->remember(std::span<weak_ptr<T>>{target}); }
+}
+
 /// \brief Collect the current heap; only registered roots remain meaningful outside it.
 export native_inline void collect() noexcept { heap::current()->collect(); }
 /// \brief Collect both generations of the current heap; reset its collection countdown.
 export native_inline void collect_major() noexcept { heap::current()->collect_major(); }
 /// \brief Collect the current heap's young generation; optionally promote survivors.
 export native_inline void collect_minor(bool promote = false) noexcept { heap::current()->collect_minor(promote); }
+
+template<class T>
+constexpr void weak_ptr<T>::update_barrier() noexcept {
+  if !consteval { if (auto * h = heap::current()) h->remember(*this); }
+}
+template<class T>
+constexpr weak_ptr<T>::weak_ptr(ptr<T> const & value) noexcept : position(value.get()) {
+  if (is_young()) update_barrier();
+}
+template<class T>
+weak_ptr<T>::weak_ptr(root<T> const & value) noexcept : weak_ptr(value.get()) {}
+template<class T>
+constexpr weak_ptr<T>::weak_ptr(weak_ptr const & other) noexcept : position(other.position) {
+  if (is_young()) update_barrier();
+}
+template<class T>
+constexpr weak_ptr<T> & weak_ptr<T>::operator=(weak_ptr const & other) noexcept {
+  auto const changed = position ^ other.position;
+  position = other.position;
+  if (changed & 0x80000000u) update_barrier();
+  return *this;
+}
+template<class T>
+constexpr weak_ptr<T>::weak_ptr(weak_ptr && other) noexcept : position(std::exchange(other.position, 0)) {
+  if (is_young()) { update_barrier(); other.update_barrier(); }
+}
+template<class T>
+constexpr weak_ptr<T> & weak_ptr<T>::operator=(weak_ptr && other) noexcept {
+  if (this == &other) return *this;
+  *this = static_cast<weak_ptr const &>(other);
+  auto const previous = std::exchange(other.position, 0);
+  if (previous & 0x80000000u) other.update_barrier();
+  return *this;
+}
+template<class T>
+constexpr weak_ptr<T>::~weak_ptr() noexcept {
+  if !consteval { if (auto * h = heap::current()) h->forget(this); }
+}
+template<class T>
+constexpr void weak_ptr<T>::swap(weak_ptr & other) noexcept {
+  auto const changed = position ^ other.position;
+  std::swap(position, other.position);
+  if (changed & 0x80000000u) { update_barrier(); other.update_barrier(); }
+}
+template<class T>
+root<T> weak_ptr<T>::lock() const noexcept requires traceable<T> {
+  if (!position) return {};
+  return root<T>{ptr<T>{position}};
+}
 
 template<class T>
 constexpr void ptr<T>::update_barrier() noexcept {
@@ -2007,6 +2347,6 @@ native_inline void ptr<T>::prefetch() const noexcept {
   if (!position) return;
   auto const * arena = heap::current();
   assert(arena && local_offset() < arena->containing(position).used());
-  __builtin_prefetch(arena->containing(position).data() + local_offset(), 0, 3);
+  __builtin_prefetch(arena->decode(position), 0, 3);
 }
 }

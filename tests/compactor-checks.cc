@@ -114,6 +114,41 @@ extern "C" void check_compactors() noexcept {
         baseline.move(mixed.data(), expected.data() + 1, reference.data(), 0, blocks, reference_tables);
         variant.move(mixed.data(), actual.data() + 1, metadata.data(), 0, blocks, tables, flags);
         check(actual == expected);
+        // Weak edges use the same slot mask. Independently compute forwarding
+        // after some targets die, including cells still retained by dilation.
+        auto weak_old = metadata, weak_young = young;
+        for (unsigned block = 0; block != blocks; ++block) {
+          weak_old[block].live &= 0x55555555u;
+          weak_young[block].live &= 0xaaaaaaaau;
+        }
+        jam::detail::forwarding_tables weak_tables{minor ? nullptr : weak_old.data(), weak_young.data(),
+          minor ? nullptr : flags, young_flags};
+        auto weak_forward = [&](std::uint32_t value) noexcept {
+          if (!value || (minor && !(value >> 31))) return value;
+          auto const block = (value & 0x7fffffffu) >> 5;
+          auto const bit = 1u << (value & 31);
+          auto const & target = value >> 31 ? weak_young[block] : weak_old[block];
+          if (!(target.live & bit)) return std::uint32_t{0};
+          auto const k = !layout ? 0 : (block + layout - (value >> 31 ? 0 : 1)) % 4;
+          return target.destination + std::popcount(expand(target.live, k) & (bit - 1));
+        };
+        expected.fill(sentinel); actual.fill(sentinel);
+        for (unsigned block = 0; block != blocks; ++block) {
+          auto out = reference[block].destination + 1;
+          for (unsigned cell = 0; cell != 32; ++cell) {
+            if (!(reference[block].live & (1u << cell))) continue;
+            auto value = mixed[block * 32 + cell];
+            for (unsigned slot = 0; slot != 2; ++slot) {
+              if (!(metadata[block].pointers & (std::uint64_t{1} << (cell * 2 + slot)))) continue;
+              auto const shift = slot * 32;
+              auto const bits = weak_forward(static_cast<std::uint32_t>(value >> shift));
+              value = (value & ~(std::uint64_t{0xffffffffu} << shift)) | (std::uint64_t{bits} << shift);
+            }
+            expected[out++] = value;
+          }
+        }
+        variant.move(mixed.data(), actual.data() + 1, metadata.data(), 0, blocks, weak_tables, flags);
+        check(actual == expected);
       }
       // Loading several chunks ahead must still permit leftward in-place moves.
       auto overlapping = source;
@@ -172,6 +207,6 @@ extern "C" void check_compactors() noexcept {
     variant.move(masked_source.data(), masked_actual.data() + 1, masked_metadata.data(), 0, 1,
         {masked_metadata.data(), nullptr, masked_alignment.data(), nullptr}, masked_alignment.data());
     check(masked_actual == masked_expected);
-    std::printf("compactor %s: 1280 mask/alignment/forwarding/store checks passed\n", variant.name);
+    std::printf("compactor %s: 1280 mask/alignment/weak-forwarding/store checks passed\n", variant.name);
   }
 }

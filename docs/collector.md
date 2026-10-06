@@ -8,6 +8,11 @@ addresses, then moves the bytes and rewrites pointers. Objects carry no GC
 header. Type information arrives through roots and traced edges; pending jobs
 hold offsets and tracing callbacks, not references into a worker's stack.
 
+[Weak associations](finalizers.md) add an ordered scan after ordinary marking.
+The scan retains conditional values or queues finalizers, draining marking after
+each decision. Registry entries and pending/running callbacks are forwarded before
+metadata reuse. Callbacks run after the collector releases its mutation guard.
+
 ## Marks and forwarding
 
 Allocation and liveness use eight-byte cells. Each 256-byte rank block has
@@ -19,8 +24,10 @@ forwarding. The prefix pass writes each joined group's effective alignment into
 the existing alignment nibbles. Each consumer derives the dilated mask in
 registers; no second liveness bitmap is needed.
 
-Forwarding checks the target's exact claim, then combines its block's destination
-base with the count of earlier retained cells, including alignment padding.
+Forwarding checks the target's exact claim and clears unclaimed targets. For a
+survivor it combines the block's destination base with the count of earlier
+retained cells, including alignment padding. Strong and weak fields share the
+pointer mask: marking follows only strong edges, so forwarding needs no weak tag.
 The prefix pass respects alignment and records spanning blocks before
 workers forward arbitrary pointers. Pointer masks distinguish offsets from data,
 including the two possible 32-bit pointer fields in each cell. Cells retained
@@ -99,6 +106,8 @@ Trace hooks must tolerate concurrent invocation and must not wait for other hook
 
 The raw `clear_marks`, `claim`, `mark`, `pointer` and `compact` operations expose
 the same machinery for custom schedules. Join markers before compaction.
+Raw `heap::compact` requires no weak associations or pending/running finalizers;
+use typed collection to process those registrations.
 `collect(trace)`, `collect_major(trace)` and `collect_minor(trace, promote)`
 accept a `noexcept` callback for untyped roots and edges. The callback must claim
 complete records and enumerate their fields. Omitting the callback requires typed

@@ -34,6 +34,11 @@ Minor GC starts from young roots and remembered old source slots. It follows
 young targets and stops at old ones. Remembering the slot rather than its target
 means overwriting an edge does not keep all its previous targets alive.
 
+Old-to-young `weak_ptr<T>` slots are remembered for rewriting only. They do not
+seed marking. Minor GC clears them if their young target dies, forwards them if
+it survives, and drops cleared entries. Weak references to old targets wait for
+major GC to decide liveness.
+
 ## Writes into old
 
 Constructing a young `ptr<T>` in old storage registers that source slot with

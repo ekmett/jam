@@ -215,7 +215,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
   set(DOXYGEN_QUIET YES)
   doxygen_add_docs(jam-docs jam.ccm jam_unqualified.ccm heap.ccm units.ccm simd.ccm README.md LICENSE.md
-    docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md
+    docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md docs/finalizers.md
     docs/simd.md docs/collector.md docs/building.md
     COMMENT "Build jam API documentation")
   # Removed declarations must not leave stale pages in the generated reference.

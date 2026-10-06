@@ -129,7 +129,7 @@ constexpr bitmap forward(forwarding_tables tables, bitmap value) noexcept {
   auto const & item = metadata[index];
   auto const * alignment = value >> 31 ? tables.young_alignment : tables.old_alignment;
   auto const bit = bitmap{1} << (value & 31);
-  assert(item.live & bit);
+  if (!(item.live & bit)) return 0;
   return item.destination + std::popcount(retained(item, alignment, index) & (bit - 1));
 }
 
@@ -321,7 +321,9 @@ if constexpr ((ISA).has(native::x86_feature::avx512vpopcntdq) \
                 native::reinterpret_bits<std::int32_t>((v & V(0x7fffffffu)) >> native::imm<8>))), ...); \
         } \
       } \
-      ((assert(none(m & ((l & V::from_native(shift_left(V(1).to_native(), (v & V(31)).to_native()))) == V(0)))), static_cast<void>(m)), ...); \
+      ((ix = native::reinterpret_bits<std::int32_t>(l & V::from_native(shift_left(V(1).to_native(), (v & V(31)).to_native())))), ...); \
+      ((b = native::select(m & (ix == I(0)), V(0), b)), ...); \
+      ((m &= ix != I(0)), ...); \
       if (tables.old_alignment || tables.young_alignment) { \
         ((r = V::from_native(shift_right(r.to_native(), (((v >> native::imm<5>) & V(7)) << native::imm<2>).to_native())) & V(7)), ...); \
         ((l = native::select((r & V(1)) != V(0), l | ((l >> native::imm<1>) & V(0x55555555u)) | ((l & V(0x55555555u)) << native::imm<1>), l)), ...); \

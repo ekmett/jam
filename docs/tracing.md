@@ -54,6 +54,10 @@ A pointer visit declares its original slot and queues its nonnull target as `T`.
 Pass fields from the supplied object, not copies: the address tells us which bit
 to set. Tracing finishes before anything moves.
 
+A `weak_ptr<T>` visit only declares the slot. It neither queues the target nor
+continues the manifest's same-type walk. Include weak fields alongside strong
+ones; the forwarder clears unclaimed targets after marking has finished.
+
 For a type you cannot change, specialize `jam::tracer<T>`. Its ordinary hook is
 `trace(Visitor &, T const &)`. Hooks take precedence over manifests. A type with
 neither is treated as a leaf; Jam cannot discover unlisted pointers. Deriving a
@@ -113,7 +117,7 @@ is used for roots, queued edges and remembered old-to-young slots.
 The allocation hook takes precedence over cooperative `trace` and manifests.
 It is never called for embedded values: those share the outer allocation and
 need an ordinary value trace or manifest if they contain pointers. The hook
-may also be nonvirtual. The byte-relocation and no-finalizer contracts still
+may also be nonvirtual. The byte-relocation and no-destructor contracts still
 apply; a virtual destructor does not make Jam invoke it during collection.
 
 ## Cooperative walks

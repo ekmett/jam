@@ -45,7 +45,9 @@ Drop the root and the whole cycle becomes collectible.
 Manifests compose through embedded records and arrays. You can store SIMD
 pointer vectors too, or supply a trace hook when the layout depends on a tag.
 The [tracing guide](docs/tracing.md) and [pointer vector examples](docs/simd.md)
-pick up from there.
+pick up from there. A `weak_ptr<T>` follows movement without keeping its target
+alive. [Weak associations and finalizers](docs/finalizers.md) let a live key keep
+a value alive and schedule a managed cleanup action when the key dies.
 
 There are a few things you have to get right:
 
@@ -59,8 +61,9 @@ There are a few things you have to get right:
   mutating the heap before collecting.
 - Objects move as bytes. Jam does not call their move constructors or run their
   destructors when reclaiming them. Self-links through `ptr` work; raw
-  self-pointers and resources that need cleanup don't. See the
-  [storage contract](docs/lifetimes.md) before choosing what to put in the heap.
+  self-pointers don't. Cleanup needs an explicit finalizer action, not a C++
+  destructor. See the [storage contract](docs/lifetimes.md) before choosing
+  what to put in the heap.
 
 You choose when to call `collect()`. Most calls collect only young objects;
 periodically one collects both generations. Writes from old objects to young

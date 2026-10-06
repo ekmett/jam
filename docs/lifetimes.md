@@ -51,6 +51,39 @@ Null is zero; allocation reserves cell zero. Pointer equality and ordering compa
 offsets within one heap. Compaction preserves surviving order, including when
 young follows old into the old arena. Offset hashes are not stable across GC.
 
+## Weak fields
+
+Use `weak_ptr<T>` for an edge that should not keep its target alive. It takes
+the same four bytes as `ptr<T>` and belongs in the manifest too:
+
+```cpp
+struct node {
+  ptr<node> next;
+  weak_ptr<node> parent;
+  static constexpr auto manifest = make_manifest<node>(&node::next, &node::parent);
+};
+
+// Inside a heap scope, with answer a root<node>:
+if (auto parent = answer->parent.lock()) {
+  // parent is a strong root, valid across collection.
+}
+```
+
+Construct or assign a weak field from a pointer or root. Tracing declares its
+slot but does not follow it. Collection forwards the field if the target survives
+and clears it otherwise. `expired()` tests for null; it does not run GC. A minor
+collection cannot decide whether an old target is dead, so that waits for a major.
+
+There is no control block. An external weak copy is just an offset and expires
+at collection, exactly like an external `ptr`. Read the field again through its
+owner's root, or call `lock()` before collecting. `lock()` requires the owning
+heap current and returns an empty root for a null field. These operations do not
+synchronize with concurrent collection.
+
+Weak fields compose through manifests, arrays, tuples and variants. Copy, move,
+ADL `swap`, `unsafe_assign` and array `assign` maintain the same slot discipline
+as strong pointers; remembered weak slots never become marking roots.
+
 ## Byte relocation
 
 `mk<T>(args...)` constructs `T{args...}` before allocation can invalidate borrowed
@@ -68,8 +101,10 @@ the representation. [Polymorphic allocation hooks](tracing.md#polymorphic-alloca
 allow single, nonvirtual inheritance with a base at the allocation start.
 
 Self-links and cycles through `ptr<T>` work. Raw pointers into an object's own
-storage do not get repaired. Resources that require destruction are unsuitable;
-Jam has no finalizers. A manifest describes edges, not proof of relocatability.
+storage do not get repaired. Required C++ destruction is unsupported.
+[Managed finalizer actions](finalizers.md) can perform explicit cleanup after GC;
+they do not change the byte-relocation contract. A manifest describes edges,
+not proof of relocatability.
 
 Pointer copy/assignment barriers make `ptr<T>` nontrivial. Jam's storage contract
 therefore goes beyond ISO C++ trivial-copy guarantees on its supported compiler
