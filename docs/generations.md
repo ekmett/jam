@@ -36,14 +36,20 @@ means overwriting an edge does not keep all its previous targets alive.
 
 ## Writes into old
 
-Copying or assigning a young `ptr<T>` into old storage registers that source
-slot with its target tracer. Repeated writes deduplicate the slot; both virtual
-aliases name the same entry. Minor GC reads its current value. An unreachable
-old object can still retain young targets until the next full GC.
+Constructing a young `ptr<T>` in old storage registers that source slot with
+its target tracer. Assignment checks the XOR of the old and new generation bits:
+changing one young target to another needs no table update. Crossing into young
+registers the slot; crossing out removes it. Both virtual aliases name the same
+entry. Minor GC reads its current value. An unreachable old object can still
+retain young targets until the next full GC.
 
-Ending a pointer's lifetime removes its entry. A union alternative replaced by
-scalar data therefore cannot leave a stale typed root. Assigning null or an old
-target may leave a harmless entry until promotion or full collection.
+Moving a pointer nulls its source and updates the affected registrations. Member
+and ADL `swap` exchange targets directly; only different generation bits require
+barrier updates. Self-move and self-swap preserve the value.
+
+Ending a pointer's lifetime removes its entry, including stale entries left by
+unsafe writes. A union alternative replaced by scalar data therefore cannot
+leave a stale typed root.
 
 Arrays use the scalar barriers. Pointer SIMD assignments and stores register
 lanes in bulk; wide packs do so per register. `jam::assign` provides explicit

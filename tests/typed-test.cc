@@ -24,6 +24,18 @@ import native;
 
 auto const page_bytes = static_cast<std::uint64_t>(system_page_size());
 
+// Encoded pointers can be manipulated at compile time without a heap or TLS.
+static_assert([] consteval {
+  using pointer = jam::ptr<std::uint64_t>;
+  std::array<pointer, 2> source{pointer{0x80000001u}, pointer{2u}};
+  std::array<pointer, 2> target{};
+  jam::assign(target, source);
+  pointer moved{std::move(target[0])};
+  swap(moved, target[1]);
+  return !target[0] && moved.get() == 2u && target[1].get() == 0x80000001u
+      && source[0].get() == 0x80000001u && source[1].get() == 2u;
+}());
+
 struct payload {
   std::uint64_t bits;
   std::uint32_t small;
@@ -353,7 +365,7 @@ struct walking_node {
   unsigned value;
   inline static std::atomic<unsigned> calls{0};
   inline static std::uintptr_t heap_begin = 0, heap_end = 0;
-  static constexpr void trace(jam::visitor auto & visit, jam::ptr<walking_node> at) noexcept {
+  static constexpr void trace(jam::visitor auto & visit, jam::ptr<walking_node> const & at) noexcept {
     for (auto const * p = visit.claim_target(at); p; p = visit.claim(p->edges[0])) {
       auto const address = reinterpret_cast<std::uintptr_t>(p);
       check(address >= heap_begin && address + sizeof(*p) <= heap_end,

@@ -19,6 +19,22 @@ struct simd_node {
   std::uint64_t large;
   static constexpr auto manifest = jam::make_manifest<simd_node>(&simd_node::next);
 };
+struct gather_base {
+  std::uint32_t data;
+  explicit gather_base(std::uint32_t n) noexcept : data(n) {}
+  virtual void claim_and_trace(jam::heap::visitor &) const noexcept = 0;
+  virtual std::uint32_t read() const noexcept = 0;
+};
+struct gather_middle : gather_base {
+  explicit gather_middle(std::uint32_t n) noexcept : gather_base(n) {}
+};
+struct gather_child final : gather_middle {
+  explicit gather_child(std::uint32_t n) noexcept : gather_middle(n) {}
+  void claim_and_trace(jam::heap::visitor & visit) const noexcept override {
+    if (!visit.claim_target(this)) return;
+  }
+  std::uint32_t read() const noexcept override { return data; }
+};
 template<class P> struct simd_holder {
   P pointers;
   native::wide<P, 2> packs;
@@ -127,6 +143,37 @@ void check_simd() { \
     check(!(*direct)[0].is_young() && (*direct)[N - 1]->data == 81 \
           && (*packed).registers[1][0] == (*direct)[0] && outer->pointers[N - 1] == (*direct)[0], \
           "bulk stores and explicit registration survive promotion"); \
+    using C = native::simd<jam::ptr<gather_child>, N, A>; \
+    using B = native::simd<jam::ptr<gather_base>, N, A>; \
+    std::array<jam::ptr<gather_child>, N> children_array{}; \
+    std::array<jam::ptr<gather_base>, N> bases_array{}; \
+    for (std::size_t i = 0; i != N; ++i) if (i % 2 == 0) { \
+      children_array[i] = jam::mk<gather_child>(std::uint32_t(i + 101)); \
+      bases_array[i] = children_array[i]; \
+    } \
+    auto child_root = heap.root(heap.mk<C>(children_array)); \
+    auto base_root = heap.root(heap.mk<B>(bases_array)); \
+    for (unsigned round = 0; round != 3; ++round) { \
+      if (round == 1) heap.collect_minor(); \
+      if (round == 2) heap.collect_major(); \
+      auto const & c = *child_root; \
+      auto const & b = *base_root; \
+      auto inherited = gather(c, &gather_child::data); \
+      auto explicit_inherited = gather(c, &gather_base::data, c != nullptr); \
+      auto base_values = gather(b, &gather_base::data); \
+      native::wide<C, 2> wc{c}; \
+      auto wide_inherited = gather(wc, &gather_base::data); \
+      auto wide_explicit = gather(wc, &gather_base::data, native::wide<typename C::mask_type, 2>{c != nullptr}); \
+      std::array<std::uint32_t, N> x{}, y{}, z{}, wx{}, wy{}; \
+      inherited.store(x.data()); explicit_inherited.store(y.data()); base_values.store(z.data()); \
+      for (std::size_t k = 0; k != 2; ++k) { \
+        wide_inherited.registers[k].store(wx.data()); wide_explicit.registers[k].store(wy.data()); \
+        check(x == y && x == z && x == wx && x == wy, "inherited member gathers agree across SIMD and wide"); \
+      } \
+      for (std::size_t i = 0; i != N; ++i) \
+        check(x[i] == (i % 2 == 0 ? i + 101 : 0) && (!b[i] || b[i]->read() == x[i]), \
+              "polymorphic gathers retain null masks and moved targets"); \
+    } \
     heap.collect_major(); \
     check((*direct)[0]->data == 81 && outer->packs.registers[0][0]->data == 71, \
           "full collection retains both generations after vector writes"); \

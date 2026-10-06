@@ -78,7 +78,7 @@ namespace jam::detail {
 using word = std::uint64_t;
 using bitmap = std::uint32_t;
 
-inline word pointer_cells(bitmap live) noexcept {
+constexpr word pointer_cells(bitmap live) noexcept {
   word x = live;
   x = (x | (x << 16)) & 0x0000ffff0000ffffULL;
   x = (x | (x << 8)) & 0x00ff00ff00ff00ffULL;
@@ -88,7 +88,7 @@ inline word pointer_cells(bitmap live) noexcept {
   return x | (x << 1);
 }
 
-inline bitmap forward(forwarding_tables tables, bitmap value) noexcept {
+constexpr bitmap forward(forwarding_tables tables, bitmap value) noexcept {
   if (!value) return 0;
   auto const * metadata = value >> 31 ? tables.young : tables.old;
   if (!metadata) { assert(!(value >> 31)); return value; }
@@ -113,7 +113,7 @@ inline constexpr auto pack_table = [] consteval {
   return result;
 }();
 
-inline word portable_pack(heap_block const & item) noexcept {
+constexpr word portable_pack(heap_block const & item) noexcept {
   word result = 0;
   unsigned position = 0;
   for (unsigned i = 0; i != 8; ++i) {
@@ -145,9 +145,12 @@ void baseline_move(word const * source, word * target, heap_block const * metada
   }
 }
 
-// Merge packed pointer declarations into separate, initially zero destination metadata.
-// Promotion may append after existing old declarations; never clear that prefix.
+// Aliased output consumes each descriptor before clearing its destination slots;
+// leftward compaction ensures those slots never belong to an unread descriptor.
+// Separate output appends to existing masks (promotion may share a partial block).
 #define JAM_PACK_MASKS(EXTRACT) \
+  bool const in_place = metadata == output; \
+  std::size_t cleared = 0; \
   for (std::size_t i = 0; i != old_blocks; ++i) { \
     auto const item = metadata[i]; \
     if (!item.pointers) continue; \
@@ -160,14 +163,23 @@ void baseline_move(word const * source, word * target, heap_block const * metada
     auto const destination = std::size_t{item.destination & 0x7fffffffu} * 2; \
     auto const index = destination >> 6; \
     auto const shift = destination & 63; \
+    if (in_place) { \
+      assert(index <= i); \
+      while (cleared <= index) output[cleared++].pointers = 0; \
+    } \
     output[index].pointers |= packed << shift; \
     if (shift) { \
       auto const upper = packed >> (64 - shift); \
       if (upper) { \
+        if (in_place) { \
+          assert(index + 1 <= i); \
+          while (cleared <= index + 1) output[cleared++].pointers = 0; \
+        } \
         output[index + 1].pointers |= upper; \
       } \
     } \
-  }
+  } \
+  if (in_place) while (cleared < old_blocks) output[cleared++].pointers = 0;
 
 void baseline_pack(heap_block const * metadata, heap_block * output, std::size_t old_blocks) noexcept {
   JAM_PACK_MASKS(portable_pack(item))

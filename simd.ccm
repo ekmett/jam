@@ -36,8 +36,8 @@ struct alignas(Raw) ptr_storage {
 protected:
   std::array<value_type, lanes> values_{};
 public:
-  native_nodiscard native_inline constexpr value_type const & operator[](std::size_t i) const noexcept { return values_[i]; }
-  native_nodiscard native_inline constexpr value_type & operator[](std::size_t i) noexcept { return values_[i]; }
+  [[nodiscard]] native_inline constexpr value_type const & operator[](std::size_t i) const noexcept { return values_[i]; }
+  [[nodiscard]] native_inline constexpr value_type & operator[](std::size_t i) noexcept { return values_[i]; }
   /** \brief Initialize every lane to null. */
   constexpr ptr_storage() noexcept = default;
   native_inline constexpr ptr_storage(ptr_storage const & other) noexcept { assign(other); }
@@ -50,7 +50,7 @@ public:
   }
   native_inline constexpr void assign(ptr_storage const & other) noexcept { unsafe_assign(other); remember(); }
   /** \brief Broadcast one pointer, including nullptr. */
-  native_inline constexpr ptr_storage(value_type value) noexcept {
+  native_inline constexpr ptr_storage(value_type const & value) noexcept {
     for (auto & lane : values_) lane.unsafe_assign(value);
     remember();
   }
@@ -69,7 +69,7 @@ public:
   }
   /** \brief Load exactly lanes pointers; no physical padding is accessed. */
   template<std::size_t Alignment = 1>
-  native_nodiscard static native_inline constexpr Self load_memory(value_type const * p) noexcept {
+  [[nodiscard]] static native_inline constexpr Self load_memory(value_type const * p) noexcept {
     std::array<value_type, lanes> values;
     for (std::size_t i = 0; i != lanes; ++i) values[i].unsafe_assign(p[i]);
     return Self{values};
@@ -81,7 +81,7 @@ public:
     if !consteval { if (auto * h = heap::current()) h->remember(std::span<value_type>{p, lanes}); }
   }
   /** \brief Load exactly lanes pointers. */
-  native_nodiscard static native_inline constexpr Self load(value_type const * p) noexcept { return load_memory(p); }
+  [[nodiscard]] static native_inline constexpr Self load(value_type const * p) noexcept { return load_memory(p); }
   /** \brief Store exactly lanes pointers. */
   native_inline constexpr void store(value_type * p) const noexcept { store_memory(p); }
 };
@@ -110,13 +110,13 @@ private: \
   using base::values_; \
 public: \
   /** \brief Project the raw unsigned cell-offset register. */ \
-  native_nodiscard native_inline constexpr Raw to_native() const noexcept { \
+  [[nodiscard]] native_inline constexpr Raw to_native() const noexcept { \
     std::array<std::uint32_t, lanes> offsets; \
     for (std::size_t i = 0; i != lanes; ++i) offsets[i] = values_[i].get(); \
     return Raw::load(offsets.data()); \
   } \
   /** \brief Compare lanes within one heap, producing the architecture's mask. */ \
-  native_nodiscard friend native_inline constexpr mask_type operator==(Self const & a, Self const & b) noexcept { \
+  [[nodiscard]] friend native_inline constexpr mask_type operator==(Self const & a, Self const & b) noexcept { \
     if constexpr (requires(Raw x) { x == x; }) return a.to_native() == b.to_native(); \
     else { \
       std::uint64_t bits = 0; \
@@ -125,7 +125,7 @@ public: \
     } \
   } \
   /** \brief Compare lanes within one heap, producing the architecture's mask. */ \
-  native_nodiscard friend native_inline constexpr mask_type operator!=(Self const & a, Self const & b) noexcept { \
+  [[nodiscard]] friend native_inline constexpr mask_type operator!=(Self const & a, Self const & b) noexcept { \
     if constexpr (requires(Raw x) { x != x; }) return a.to_native() != b.to_native(); \
     else { \
       std::uint64_t bits = 0; \
@@ -134,7 +134,7 @@ public: \
     } \
   } \
   /** \brief Select the nonnull lanes without extracting a scalar bitmask. */ \
-  native_nodiscard friend native_inline constexpr mask_type operator!=(Self const & a, std::nullptr_t) noexcept { \
+  [[nodiscard]] friend native_inline constexpr mask_type operator!=(Self const & a, std::nullptr_t) noexcept { \
     if constexpr (requires(Raw x) { x != x; }) return a.to_native() != Raw{std::uint32_t{0}}; \
     else { \
       std::uint64_t bits = 0; \
@@ -143,7 +143,7 @@ public: \
     } \
   } \
   /** \brief Select the null lanes without extracting a scalar bitmask. */ \
-  native_nodiscard friend native_inline constexpr mask_type operator==(Self const & a, std::nullptr_t) noexcept { \
+  [[nodiscard]] friend native_inline constexpr mask_type operator==(Self const & a, std::nullptr_t) noexcept { \
     if constexpr (requires(Raw x) { x == x; }) return a.to_native() == Raw{std::uint32_t{0}}; \
     else { \
       std::uint64_t bits = 0; \
@@ -202,20 +202,19 @@ namespace jam::detail {
 template<class U>
 using gather_bits = std::conditional_t<sizeof(U) == 4, std::uint32_t, std::uint64_t>;
 template<class T, class U, std::size_t N, native::isa<> A>
-concept gather_shape = std::is_standard_layout_v<T> && !std::is_const_v<U> && !std::is_volatile_v<U> &&
+concept gather_shape = !std::is_const_v<U> && !std::is_volatile_v<U> &&
     (std::same_as<U, std::uint32_t> || std::same_as<U, std::int32_t> ||
      std::same_as<U, std::uint64_t> || std::same_as<U, std::int64_t> ||
      std::same_as<U, float> || std::same_as<U, double> || is_ptr<U>) &&
     requires { sizeof(native::simd<U, N, A>); sizeof(native::simd<gather_bits<U>, N, A>); };
 
-// Jam already requires Clang and standard-layout heap records. These ABIs encode
-// their data-member pointers as flat byte displacements. Decode that documented
+// For supported nonvirtual inheritance, these ABIs encode data-member pointers
+// as flat byte displacements. Decode that documented
 // ABI representation rather than applying a member pointer to a fabricated object
 // or extracting a vector mask just to find a sample object. Extended MS member
 // pointer representations are deliberately rejected instead of guessed.
 template<class T, class U>
 native_inline native_const std::ptrdiff_t member_displacement(U T::* member) noexcept {
-  static_assert(std::is_standard_layout_v<T>);
   assert(member != nullptr);
 #if defined(_WIN32)
   static_assert(sizeof(member) == sizeof(std::int32_t), "gather requires the flat MS data-member-pointer ABI");
@@ -266,14 +265,15 @@ native_inline native_const std::ptrdiff_t member_displacement(U T::* member) noe
 
 #define JAM_GATHERS(name, ISA, ...) \
 export namespace jam { \
-template<class T, class U, std::size_t N, native::isa<> A> \
-  requires detail::gather_shape<T, U, N, A> && \
+template<class T, class U, class Owner, std::size_t N, native::isa<> A> \
+  requires detail::gather_shape<T, U, N, A> && std::convertible_to<U Owner::*, U T::*> && \
     (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
 /** \brief Gather a member from selected nonnull pointers; inactive lanes are zero. */ \
 /** \pre Active pointers name live T records in the current heap. member is nonnull. */ \
 /** The result's native SIMD shape must exist. Stack pointer vectors expire at GC. */ \
-native_nodiscard native_inline auto gather(native::simd<ptr<T>, N, A> const & nodes, \
-    U T::* member, typename native::simd<ptr<T>, N, A>::mask_type active) noexcept { \
+[[nodiscard]] native_inline auto gather(native::simd<ptr<T>, N, A> const & nodes, \
+    U Owner::* selected, typename native::simd<ptr<T>, N, A>::mask_type active) noexcept { \
+  U T::* member = selected; \
   using B = detail::gather_bits<U>; \
   using R = native::simd<B, N, A>; \
   using Out = native::simd<U, N, A>; \
@@ -294,32 +294,32 @@ native_nodiscard native_inline auto gather(native::simd<ptr<T>, N, A> const & no
   else return __builtin_bit_cast(Out, result); \
 } \
  \
-template<class T, class U, std::size_t N, native::isa<> A> \
-  requires detail::gather_shape<T, U, N, A> && \
+template<class T, class U, class Owner, std::size_t N, native::isa<> A> \
+  requires detail::gather_shape<T, U, N, A> && std::convertible_to<U Owner::*, U T::*> && \
     (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
 /** \brief Gather a member from nonnull lanes, deriving the mask once. */ \
-native_nodiscard native_inline auto gather(native::simd<ptr<T>, N, A> const & nodes, \
-    U T::* member) noexcept { \
+[[nodiscard]] native_inline auto gather(native::simd<ptr<T>, N, A> const & nodes, \
+    U Owner::* member) noexcept { \
   return gather(nodes, member, nodes != nullptr); \
 } \
  \
-template<class T, class U, std::size_t N, native::isa<> A, std::size_t K> \
-  requires detail::gather_shape<T, U, N, A> && \
+template<class T, class U, class Owner, std::size_t N, native::isa<> A, std::size_t K> \
+  requires detail::gather_shape<T, U, N, A> && std::convertible_to<U Owner::*, U T::*> && \
     (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
 /** \brief Gather each register with a supplied mask pack, preserving register order. */ \
-native_nodiscard native_inline auto gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes, \
-    U T::* member, native::wide<typename native::simd<ptr<T>, N, A>::mask_type, K> const & active) noexcept { \
+[[nodiscard]] native_inline auto gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes, \
+    U Owner::* member, native::wide<typename native::simd<ptr<T>, N, A>::mask_type, K> const & active) noexcept { \
   auto const & [...p] = nodes.registers; \
   auto const & [...m] = active.registers; \
   return native::wide<native::simd<U, N, A>, K>{std::array<native::simd<U, N, A>, K>{gather(p, member, m)...}}; \
 } \
  \
-template<class T, class U, std::size_t N, native::isa<> A, std::size_t K> \
-  requires detail::gather_shape<T, U, N, A> && \
+template<class T, class U, class Owner, std::size_t N, native::isa<> A, std::size_t K> \
+  requires detail::gather_shape<T, U, N, A> && std::convertible_to<U Owner::*, U T::*> && \
     (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
 /** \brief Compute all nonnull register masks, then gather the requested member. */ \
-native_nodiscard native_inline auto gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes, \
-    U T::* member) noexcept { \
+[[nodiscard]] native_inline auto gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes, \
+    U Owner::* member) noexcept { \
   using M = typename native::simd<ptr<T>, N, A>::mask_type; \
   auto const & [...p] = nodes.registers; \
   native::wide<M, K> active{std::array<M, K>{(p != nullptr)...}}; \
@@ -331,28 +331,28 @@ native_nodiscard native_inline auto gather(native::wide<native::simd<ptr<T>, N, 
 export namespace jam {
 /// \brief Gather a member from selected lanes; inactive lanes return zero or null.
 /// \pre The current heap is bound. Active pointers name live T records in it.
-/// \pre member is nonnull; T has standard layout and native supports the result shape.
+/// \pre member is nonnull; inheritance is nonvirtual and native supports the result shape.
 /// \details On x86, Clang's flat data-member-pointer ABI supplies the displacement:
 /// ptrdiff_t on Unix, int32_t on Windows. Extended MS representations are rejected.
 /// The offset is folded into the gather base; no sample object or mask extraction
 /// is needed to recover it. Pointer results outside the heap expire at collection.
-template<class T, class U, std::size_t N, native::isa<> A>
+template<class T, class U, class Owner, std::size_t N, native::isa<> A>
 native::simd<U, N, A> gather(native::simd<ptr<T>, N, A> const & nodes,
-    U T::* member, typename native::simd<ptr<T>, N, A>::mask_type active) noexcept;
+    U Owner::* member, typename native::simd<ptr<T>, N, A>::mask_type active) noexcept;
 /// \brief Gather with the mask nodes != nullptr; inactive lanes return zero or null.
 /// \details Shares the explicit-mask overload's heap, member and result-shape requirements.
-template<class T, class U, std::size_t N, native::isa<> A>
-native::simd<U, N, A> gather(native::simd<ptr<T>, N, A> const & nodes, U T::* member) noexcept;
+template<class T, class U, class Owner, std::size_t N, native::isa<> A>
+native::simd<U, N, A> gather(native::simd<ptr<T>, N, A> const & nodes, U Owner::* member) noexcept;
 /// \brief Gather each register using the supplied masks, preserving lane and register order.
 /// \details Each register obeys the SIMD gather's requirements.
-template<class T, class U, std::size_t N, native::isa<> A, std::size_t K>
+template<class T, class U, class Owner, std::size_t N, native::isa<> A, std::size_t K>
 native::wide<native::simd<U, N, A>, K> gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes,
-    U T::* member, native::wide<typename native::simd<ptr<T>, N, A>::mask_type, K> const & active) noexcept;
+    U Owner::* member, native::wide<typename native::simd<ptr<T>, N, A>::mask_type, K> const & active) noexcept;
 /// \brief Compute all nonnull register masks, then gather the requested member.
 /// \details Each register obeys the SIMD gather's requirements.
-template<class T, class U, std::size_t N, native::isa<> A, std::size_t K>
+template<class T, class U, class Owner, std::size_t N, native::isa<> A, std::size_t K>
 native::wide<native::simd<U, N, A>, K> gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes,
-    U T::* member) noexcept;
+    U Owner::* member) noexcept;
 }
 #else
 NATIVE_TARGET_VARIANTS(pointer_gather, JAM_GATHERS, JAM_PTR_TARGETS)

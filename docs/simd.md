@@ -43,6 +43,12 @@ The wide overload forms all register masks before gathering. An explicit
 `native::wide<mask_type, K>` can be supplied as the third argument. Lane and
 register order are preserved.
 
+Single, nonvirtual inheritance is supported, including classes with virtual
+functions. For lanes of `ptr<Derived>`, an inherited `&Base::field` is converted
+to the corresponding `Derived` member pointer before its displacement is used.
+This is a fixed offset, not a virtual call or a per-lane layout lookup. SIMD and
+wide overloads accept the same inherited member syntax.
+
 Fields can be 32/64-bit integers, `float`, `double` or `ptr<U>`, provided native
 supports the result shape. Wider fields may require fewer lanes; `wide` lets you
 retain a larger batch. The ISA tag selects the implementation at compile time.

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <memory>
 #include <variant>
+#include <utility>
 import jam;
 using namespace jam;
 void check(bool ok, char const * message) {
@@ -47,6 +48,75 @@ struct alignas(64) aligned_node {
   std::uint64_t data;
   static constexpr auto manifest = make_manifest<aligned_node>(&aligned_node::next);
 };
+// Allocation tracing must dispatch before claiming a base-sized prefix.
+struct polymorphic_base {
+  ptr<polymorphic_base> next;
+  explicit polymorphic_base(ptr<polymorphic_base> p) noexcept : next(p) {}
+  virtual void claim_and_trace(heap::visitor &) const noexcept = 0;
+  virtual std::uint64_t value() const noexcept = 0;
+};
+struct alignas(32) small_polymorphic final : polymorphic_base {
+  std::uint64_t data;
+  small_polymorphic(ptr<polymorphic_base> p, std::uint64_t n) noexcept : polymorphic_base(p), data(n) {}
+  void claim_and_trace(heap::visitor & visit) const noexcept override {
+    if (visit.claim_target(this)) visit(next);
+  }
+  std::uint64_t value() const noexcept override { return data; }
+};
+struct alignas(64) large_polymorphic final : polymorphic_base {
+  std::array<std::uint64_t, 33> data{};
+  ptr<polymorphic_base> other;
+  large_polymorphic(ptr<polymorphic_base> p, std::uint64_t n) noexcept : polymorphic_base(p), other(p) { data.back() = n; }
+  void claim_and_trace(heap::visitor & visit) const noexcept override {
+    if (visit.claim_target(this)) visit(next, other);
+  }
+  std::uint64_t value() const noexcept override { return data.back(); }
+};
+struct throwing_allocation_hook {
+  void claim_and_trace(heap::visitor &) const;
+};
+struct wrong_allocation_hook {
+  int claim_and_trace(heap::visitor &) const noexcept;
+  static constexpr auto manifest = make_manifest<wrong_allocation_hook>();
+};
+struct virtual_polymorphic : virtual polymorphic_base {};
+static_assert(!traceable<throwing_allocation_hook> && !traceable<wrong_allocation_hook>);
+static_assert(!std::convertible_to<ptr<virtual_polymorphic>, ptr<polymorphic_base>>);
+static_assert(traceable<polymorphic_base> && traceable<large_polymorphic>);
+static_assert(sizeof(large_polymorphic) > heap::block_words * sizeof(heap::word));
+void polymorphic_records(unsigned workers) {
+  heap h{{.workers = workers}};
+  heap_scope scope{h};
+  static_cast<void>(mk<node>(nullptr, 99u));
+  root<polymorphic_base> first = mk<small_polymorphic>(nullptr, 11u);
+  root<polymorphic_base> second = mk<large_polymorphic>(first.get(), 22u);
+  first->next = second.get();
+  auto verify = [&] {
+    check(first->value() == 11 && second->value() == 22, "virtual dispatch preserves derived payloads");
+    check(first->next == second.get() && second->next == first.get(), "polymorphic cycle survives forwarding");
+    auto const * large = static_cast<large_polymorphic const *>(second.operator->());
+    check(large->other == first.get(), "derived pointer beyond the base extent is tagged and forwarded");
+    check(reinterpret_cast<std::uintptr_t>(large) % 64 == 0, "dynamic claim preserves derived alignment");
+  };
+  h.collect_minor(); verify();
+  h.collect_minor(true); verify();
+  h.collect_major(); verify();
+  // Only the old field retains this young allocation; its remembered callback
+  // is keyed by the abstract base and must still dispatch to the derived hook.
+  first->next = mk<large_polymorphic>(first.get(), 33u);
+  check(h.remembered_size() == 1, "base pointer assignment registers the young target");
+  for (unsigned round = 0; round != 4; ++round) {
+    if (round == 0) h.collect_minor();
+    else if (round == 1) h.collect_minor(true);
+    else h.collect_major();
+    check(first->next->value() == 33 && first->next->next == first.get(),
+          "remembered polymorphic edge survives minor, promotion and major collection");
+    auto const * large = static_cast<large_polymorphic const *>(first->next.operator->());
+    check(large->other == first.get() && reinterpret_cast<std::uintptr_t>(large) % 64 == 0,
+          "polymorphic dynamic extent and alignment survive repeated movement");
+  }
+}
+
 void growth(unsigned workers) {
   heap h{{.old = {.capacity = units::pages{4}, .reserve = units::pages{1}, .maximum = 4_MiB},
           .young = {.capacity = units::pages{4}, .reserve = units::pages{1}, .maximum = 4_MiB}, .workers = workers}};
@@ -86,6 +156,110 @@ void growth(unsigned workers) {
   }
   h.collect_major();
   check(chain->data == 3 * count - 1, "full collection survives repeated growth and promotion");
+}
+void pointer_moves() {
+  heap h;
+  heap_scope scope{h};
+  root source = mk<node>(nullptr, 1u);
+  root target = mk<node>(nullptr, 2u);
+  h.collect_major();
+  source->next = mk<node>(nullptr, 11u);
+  ptr<node> local = std::move(source->next);
+  check(!source->next && local->data == 11 && h.remembered_size() == 0,
+        "move construction clears and forgets an old source slot");
+  target->next = std::move(local);
+  check(!local && h.remembered_size() == 1, "move assignment remembers its old destination");
+  source->next = std::move(target->next);
+  check(!target->next && h.remembered_size() == 1, "old-to-old move transfers the remembered slot");
+  auto & same = source->next;
+  same = std::move(source->next);
+  check(same && h.remembered_size() == 1, "self move preserves the pointer and barrier");
+  h.collect_minor();
+  check(source->next->data == 11 && !target->next, "moved edge survives minor collection");
+  ptr<node> old = target.get();
+  source->next = std::move(old);
+  check(!old && h.remembered_size() == 0, "moving an old target replaces a remembered young edge");
+  h.collect_minor();
+  check(h.young().used() == 1 && source->next == target.get(), "replaced young target is reclaimed");
+  ptr<node> empty;
+  source->next = std::move(empty);
+  check(!empty && !source->next, "moving null clears the destination");
+  h.collect_major();
+  check(!source->next && source->data == 1 && target->data == 2, "move bookkeeping survives major collection");
+
+  using std::swap;
+  source->next = mk<node>(nullptr, 701u);
+  target->next = mk<node>(nullptr, 702u);
+  swap(source->next, target->next);
+  check(source->next->data == 702 && target->next->data == 701 && h.remembered_size() == 2,
+        "ADL swap exchanges young targets without changing their remembered slots");
+  target->next = source.get();
+  swap(source->next, target->next);
+  swap(source->next, source->next);
+  check(source->next == source.get() && target->next->data == 702 && h.remembered_size() == 1,
+        "mixed-generation swap transfers registration; self swap preserves it");
+  h.collect_minor();
+  check(source->next == source.get() && target->next->data == 702, "swapped edges survive collection");
+  swap(target->next, empty);
+  check(!target->next && empty->data == 702 && h.remembered_size() == 0,
+        "heap-to-stack swap with null removes the remembered source slot");
+  root kept = empty;
+  h.collect_major();
+  check(kept->data == 702 && source->next == source.get(), "rooted swapped target and self edge survive major collection");
+}
+void pointer_swap_locations() {
+  // Location: stack, old, young. Target: null, old, young.
+  for (unsigned left_location = 0; left_location != 3; ++left_location)
+    for (unsigned right_location = 0; right_location != 3; ++right_location)
+      for (unsigned left_kind = 0; left_kind != 3; ++left_kind)
+        for (unsigned right_kind = 0; right_kind != 3; ++right_kind) {
+          heap h;
+          heap_scope scope{h};
+          root old_fields = mk<array_node>();
+          std::array<root<node>, 2> old_targets{mk<node>(nullptr, 101u), mk<node>(nullptr, 102u)};
+          h.collect_major();
+          root young_fields = mk<array_node>();
+          static_cast<void>(mk<node>(nullptr, 999u)); // Force young targets to move.
+          std::array<root<node>, 2> young_targets{mk<node>(nullptr, 201u), mk<node>(nullptr, 202u)};
+          std::array<ptr<node>, 2> stack;
+          auto slot = [&](unsigned location, unsigned index) -> ptr<node> & {
+            if (location == 0) return stack[index];
+            if (location == 1) return old_fields->edges[index];
+            return young_fields->edges[index];
+          };
+          auto target = [&](unsigned kind, unsigned index) -> ptr<node> {
+            if (kind == 1) return old_targets[index].get();
+            if (kind == 2) return young_targets[index].get();
+            return nullptr;
+          };
+          slot(left_location, 0) = target(left_kind, 0);
+          slot(right_location, 1) = target(right_kind, 1);
+          auto const remembered = [](unsigned location, unsigned kind) { return location == 1 && kind == 2; };
+          using std::swap;
+          swap(slot(left_location, 0), slot(left_location, 0));
+          check(h.remembered_size() == remembered(left_location, left_kind) + remembered(right_location, right_kind),
+                "self swap preserves remembered slots in every storage location");
+          swap(slot(left_location, 0), slot(right_location, 1));
+          check(slot(left_location, 0) == target(right_kind, 1) && slot(right_location, 1) == target(left_kind, 0),
+                "swap exchanges null/old/young targets across every storage pair");
+          check(h.remembered_size() == remembered(left_location, right_kind) + remembered(right_location, left_kind),
+                "only old slots now holding young targets are remembered");
+          root<node> left_stack_root, right_stack_root;
+          if (left_location == 0) left_stack_root = stack[0];
+          if (right_location == 0) right_stack_root = stack[1];
+          old_targets = {}; young_targets = {};
+          auto verify = [&] {
+            auto const left = left_location == 0 ? left_stack_root.get() : slot(left_location, 0);
+            auto const right = right_location == 0 ? right_stack_root.get() : slot(right_location, 1);
+            check(right_kind ? left && left->data == right_kind * 100 + 2 : !left,
+                  "swapped left target survives through its slot or external root");
+            check(left_kind ? right && right->data == left_kind * 100 + 1 : !right,
+                  "swapped right target survives through its slot or external root");
+          };
+          h.collect_minor(); verify();
+          h.collect_major(); verify();
+          check(h.remembered_size() == 0, "major collection clears swap registrations");
+        }
 }
 void collection_schedule() {
   heap h{{.minor_collections = 2}};
@@ -131,6 +305,10 @@ void collection_schedule() {
   }
 }
 int main() {
+  polymorphic_records(1);
+  polymorphic_records(4);
+  pointer_moves();
+  pointer_swap_locations();
   collection_schedule();
   for (unsigned workers : {1u, 4u}) {
     growth(workers);

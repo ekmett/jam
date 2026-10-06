@@ -25,6 +25,12 @@ Typed collection rebuilds pointer declarations each time it traces an allocation
 so dynamic layouts can change which fields are pointers. Minor collection leaves
 old allocations untraced and uses the remembered source slots instead.
 
+Forwarding finishes for both generations and all roots before metadata is reused.
+Pointer masks then pack in place, consuming each source descriptor before clearing
+or writing its destination. Young masks append to old during promotion or major
+collection, preserving any shared boundary block. Reclaimed metadata is cleared;
+collection needs no fresh destination table unless the arena itself grows.
+
 Each heap selects a compactor from CPU and OS capabilities: BMI2+AVX512 (with a
 VPOPCNTDQ variant), BMI2+AVX2, NEON, or baseline. Workers forward pointer fields and
 pack live cells using that implementation. Stores write only the live prefix,

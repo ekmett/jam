@@ -194,7 +194,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_EXPAND_ONLY_PREDEF YES)
   set(DOXYGEN_PREDEFINED
     "JAM_DOXYGEN=1" "native_const="
-    "native_nodiscard=" "native_pure=" "native_inline=inline" "native_cold=" "native_noreturn="
+    "native_pure=" "native_inline=inline" "native_cold=" "native_noreturn="
     "native_lifetimebound=" "native_diagnose_if(condition,message)=")
   set(DOXYGEN_EXCLUDE_SYMBOLS "jam::detail" "jam::detail::*")
   set(DOXYGEN_MARKDOWN_ID_STYLE GITHUB)

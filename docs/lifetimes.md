@@ -5,6 +5,8 @@
 
 A `ptr<T>` is an offset, not ownership. A `root<T>` is an external handle that
 collection updates. Keep pointers in managed objects and roots outside them.
+Moving a pointer leaves the source null. Member and ADL `swap` exchange targets;
+both operations maintain the write barriers for heap-resident slots.
 
 ## Roots and scopes
 
@@ -56,12 +58,14 @@ arguments, then transports the bytes into young. Aggregate field arguments work,
 and braced initialization rejects narrowing. `heap.load(ptr)` copies a snapshot;
 `heap.store(ptr, value)` assigns without changing the allocation's type or extent.
 
-Managed records must be unqualified, standard-layout and byte-relocatable, with
+Managed records must be unqualified and byte-relocatable, with
 alignment no greater than 64 bytes. Construction must be `noexcept`. Byte
 relocation means copying the representation, forwarding managed pointers and
 discarding the old storage preserves the object's meaning. Compaction knows
 cells and masks, not C++ types. It invokes no move constructors or destructors
-and needs no per-object dispatch pointer.
+and adds no per-object dispatch pointer. Existing vptrs travel unchanged with
+the representation. [Polymorphic allocation hooks](tracing.md#polymorphic-allocations)
+allow single, nonvirtual inheritance with a base at the allocation start.
 
 Self-links and cycles through `ptr<T>` work. Raw pointers into an object's own
 storage do not get repaired. Resources that require destruction are unsuitable;

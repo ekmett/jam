@@ -100,17 +100,17 @@ public:
   constexpr space(space<R, P> other) noexcept
     : value(detail::convert<Rep, R, std::ratio_divide<P, ratio>>(other.count())) {}
   /// \brief Retrieve the count in this unit explicitly.
-  constexpr rep count() const noexcept { return value; }
+  [[nodiscard]] constexpr rep count() const noexcept { return value; }
   /// \brief Zero units.
-  static constexpr space zero() noexcept { return space{rep{0}}; }
+  [[nodiscard]] static constexpr space zero() noexcept { return space{rep{0}}; }
   /// \brief Least representable count.
-  static constexpr space min() noexcept { return space{std::numeric_limits<rep>::lowest()}; }
+  [[nodiscard]] static constexpr space min() noexcept { return space{std::numeric_limits<rep>::lowest()}; }
   /// \brief Greatest representable count.
-  static constexpr space max() noexcept { return space{std::numeric_limits<rep>::max()}; }
+  [[nodiscard]] static constexpr space max() noexcept { return space{std::numeric_limits<rep>::max()}; }
   /// \brief Preserve the count.
-  constexpr space operator+() const noexcept { return *this; }
+  [[nodiscard]] constexpr space operator+() const noexcept { return *this; }
   /// \brief Negate the count; unrepresentable negation terminates.
-  constexpr space operator-() const noexcept { return space{detail::arithmetic<'-'>(rep{0}, value)}; }
+  [[nodiscard]] constexpr space operator-() const noexcept { return space{detail::arithmetic<'-'>(rep{0}, value)}; }
   /// \brief Add one unit.
   constexpr space & operator++() noexcept { return *this += space{1}; }
   /// \brief Add one unit, returning the previous count.
@@ -146,12 +146,12 @@ struct common_type<jam::units::space<R1, P1>, jam::units::space<R2, P2>> {
 export namespace jam::units {
 /// \brief Explicit conversion; fractional integral ticks truncate toward zero.
 template<class To, class R, class P>
-constexpr To space_cast(space<R, P> value) noexcept {
+[[nodiscard]] constexpr To space_cast(space<R, P> value) noexcept {
   return To{detail::convert<typename To::rep, R, std::ratio_divide<P, typename To::ratio>>(value.count())};
 }
 /// \brief Compare amounts without overflowing an integral common-unit conversion.
 template<class R1, class P1, class R2, class P2>
-constexpr auto operator<=>(space<R1, P1> a, space<R2, P2> b) noexcept {
+[[nodiscard]] constexpr auto operator<=>(space<R1, P1> a, space<R2, P2> b) noexcept {
   if constexpr (std::integral<R1> && std::integral<R2>) {
     using Scale = std::ratio_divide<P1, P2>;
     return (static_cast<__int128>(a.count()) * Scale::num)
@@ -163,64 +163,64 @@ constexpr auto operator<=>(space<R1, P1> a, space<R2, P2> b) noexcept {
 }
 /// \brief Equal amounts may have different units or representations.
 template<class R1, class P1, class R2, class P2>
-constexpr bool operator==(space<R1, P1> a, space<R2, P2> b) noexcept { return (a <=> b) == 0; }
+[[nodiscard]] constexpr bool operator==(space<R1, P1> a, space<R2, P2> b) noexcept { return (a <=> b) == 0; }
 /// \brief Add amounts in their common unit.
 template<class R1, class P1, class R2, class P2>
-constexpr auto operator+(space<R1, P1> a, space<R2, P2> b) noexcept {
+[[nodiscard]] constexpr auto operator+(space<R1, P1> a, space<R2, P2> b) noexcept {
   using C = std::common_type_t<decltype(a), decltype(b)>;
   return C{a} += C{b};
 }
 /// \brief Subtract amounts in their common unit.
 template<class R1, class P1, class R2, class P2>
-constexpr auto operator-(space<R1, P1> a, space<R2, P2> b) noexcept {
+[[nodiscard]] constexpr auto operator-(space<R1, P1> a, space<R2, P2> b) noexcept {
   using C = std::common_type_t<decltype(a), decltype(b)>;
   return C{a} -= C{b};
 }
 /// \brief Multiply an amount by a scalar, preserving its unit.
 template<class R, class P, class S> requires std::is_arithmetic_v<S>
-constexpr auto operator*(space<R, P> a, S b) noexcept {
+[[nodiscard]] constexpr auto operator*(space<R, P> a, S b) noexcept {
   return space<std::common_type_t<R, S>, P>{a} *= b;
 }
 /// \brief Multiply a scalar by an amount.
 template<class R, class P, class S> requires std::is_arithmetic_v<S>
-constexpr auto operator*(S a, space<R, P> b) noexcept { return b * a; }
+[[nodiscard]] constexpr auto operator*(S a, space<R, P> b) noexcept { return b * a; }
 /// \brief Divide an amount by a scalar, preserving its unit.
 template<class R, class P, class S> requires std::is_arithmetic_v<S>
-constexpr auto operator/(space<R, P> a, S b) noexcept {
+[[nodiscard]] constexpr auto operator/(space<R, P> a, S b) noexcept {
   return space<std::common_type_t<R, S>, P>{a} /= b;
 }
 /// \brief Divide two amounts, producing a dimensionless count.
 template<class R1, class P1, class R2, class P2>
-constexpr auto operator/(space<R1, P1> a, space<R2, P2> b) noexcept {
+[[nodiscard]] constexpr auto operator/(space<R1, P1> a, space<R2, P2> b) noexcept {
   using C = std::common_type_t<decltype(a), decltype(b)>;
   return detail::arithmetic<'/'>(C{a}.count(), C{b}.count());
 }
 /// \brief Integral remainder in the original unit.
 template<std::integral R, class P, std::integral S>
-constexpr auto operator%(space<R, P> a, S b) noexcept { return space<std::common_type_t<R, S>, P>{a} %= b; }
+[[nodiscard]] constexpr auto operator%(space<R, P> a, S b) noexcept { return space<std::common_type_t<R, S>, P>{a} %= b; }
 /// \brief Integral remainder in the common unit.
 template<std::integral R1, class P1, std::integral R2, class P2>
-constexpr auto operator%(space<R1, P1> a, space<R2, P2> b) noexcept {
+[[nodiscard]] constexpr auto operator%(space<R1, P1> a, space<R2, P2> b) noexcept {
   using C = std::common_type_t<decltype(a), decltype(b)>;
   return C{a} %= C{b};
 }
 /// \brief Greatest whole destination count not exceeding the source.
 template<class To, class R, class P>
-constexpr To floor(space<R, P> value) noexcept {
+[[nodiscard]] constexpr To floor(space<R, P> value) noexcept {
   auto result = space_cast<To>(value);
   if (result > value) --result;
   return result;
 }
 /// \brief Least whole destination count not less than the source.
 template<class To, class R, class P>
-constexpr To ceil(space<R, P> value) noexcept {
+[[nodiscard]] constexpr To ceil(space<R, P> value) noexcept {
   auto result = space_cast<To>(value);
   if (result < value) ++result;
   return result;
 }
 /// \brief Nearest integral destination count; ties round to even.
 template<class To, class R, class P> requires std::integral<typename To::rep>
-constexpr To round(space<R, P> value) noexcept {
+[[nodiscard]] constexpr To round(space<R, P> value) noexcept {
   auto const lo = floor<To>(value);
   if (lo == value) return lo;
   auto hi = lo; ++hi;
@@ -229,7 +229,7 @@ constexpr To round(space<R, P> value) noexcept {
 }
 /// \brief Absolute value of a signed amount.
 template<class R, class P> requires std::is_signed_v<R>
-constexpr auto abs(space<R, P> value) noexcept { return value < value.zero() ? -value : value; }
+[[nodiscard]] constexpr auto abs(space<R, P> value) noexcept { return value < value.zero() ? -value : value; }
 
 using kibi = std::ratio<1024>; ///< Binary kilo: 1024.
 using mebi = std::ratio<1048576>; ///< Binary mega: 1024 squared.
@@ -248,32 +248,32 @@ export namespace jam {
 /// \brief Decimal and binary byte literals; counts retain their units.
 inline namespace literals {
 /// \brief Bytes.
-consteval units::bytes operator""_B(unsigned long long n) noexcept { return units::bytes{n}; }
+[[nodiscard]] consteval units::bytes operator""_B(unsigned long long n) noexcept { return units::bytes{n}; }
 /// \brief Fractional B count.
-consteval units::space<long double, std::ratio<1>> operator""_B(long double n) noexcept { return units::space<long double, std::ratio<1>>{n}; }
+[[nodiscard]] consteval units::space<long double, std::ratio<1>> operator""_B(long double n) noexcept { return units::space<long double, std::ratio<1>>{n}; }
 /// \brief Kilobytes.
-consteval units::kilobytes operator""_kB(unsigned long long n) noexcept { return units::kilobytes{n}; }
+[[nodiscard]] consteval units::kilobytes operator""_kB(unsigned long long n) noexcept { return units::kilobytes{n}; }
 /// \brief Fractional kB count.
-consteval units::space<long double, std::kilo> operator""_kB(long double n) noexcept { return units::space<long double, std::kilo>{n}; }
+[[nodiscard]] consteval units::space<long double, std::kilo> operator""_kB(long double n) noexcept { return units::space<long double, std::kilo>{n}; }
 /// \brief Megabytes.
-consteval units::megabytes operator""_MB(unsigned long long n) noexcept { return units::megabytes{n}; }
+[[nodiscard]] consteval units::megabytes operator""_MB(unsigned long long n) noexcept { return units::megabytes{n}; }
 /// \brief Fractional MB count.
-consteval units::space<long double, std::mega> operator""_MB(long double n) noexcept { return units::space<long double, std::mega>{n}; }
+[[nodiscard]] consteval units::space<long double, std::mega> operator""_MB(long double n) noexcept { return units::space<long double, std::mega>{n}; }
 /// \brief Gigabytes.
-consteval units::gigabytes operator""_GB(unsigned long long n) noexcept { return units::gigabytes{n}; }
+[[nodiscard]] consteval units::gigabytes operator""_GB(unsigned long long n) noexcept { return units::gigabytes{n}; }
 /// \brief Fractional GB count.
-consteval units::space<long double, std::giga> operator""_GB(long double n) noexcept { return units::space<long double, std::giga>{n}; }
+[[nodiscard]] consteval units::space<long double, std::giga> operator""_GB(long double n) noexcept { return units::space<long double, std::giga>{n}; }
 /// \brief Kibibytes.
-consteval units::kibibytes operator""_KiB(unsigned long long n) noexcept { return units::kibibytes{n}; }
+[[nodiscard]] consteval units::kibibytes operator""_KiB(unsigned long long n) noexcept { return units::kibibytes{n}; }
 /// \brief Fractional KiB count.
-consteval units::space<long double, units::kibi> operator""_KiB(long double n) noexcept { return units::space<long double, units::kibi>{n}; }
+[[nodiscard]] consteval units::space<long double, units::kibi> operator""_KiB(long double n) noexcept { return units::space<long double, units::kibi>{n}; }
 /// \brief Mebibytes.
-consteval units::mebibytes operator""_MiB(unsigned long long n) noexcept { return units::mebibytes{n}; }
+[[nodiscard]] consteval units::mebibytes operator""_MiB(unsigned long long n) noexcept { return units::mebibytes{n}; }
 /// \brief Fractional MiB count.
-consteval units::space<long double, units::mebi> operator""_MiB(long double n) noexcept { return units::space<long double, units::mebi>{n}; }
+[[nodiscard]] consteval units::space<long double, units::mebi> operator""_MiB(long double n) noexcept { return units::space<long double, units::mebi>{n}; }
 /// \brief Gibibytes.
-consteval units::gibibytes operator""_GiB(unsigned long long n) noexcept { return units::gibibytes{n}; }
+[[nodiscard]] consteval units::gibibytes operator""_GiB(unsigned long long n) noexcept { return units::gibibytes{n}; }
 /// \brief Fractional GiB count.
-consteval units::space<long double, units::gibi> operator""_GiB(long double n) noexcept { return units::space<long double, units::gibi>{n}; }
+[[nodiscard]] consteval units::space<long double, units::gibi> operator""_GiB(long double n) noexcept { return units::space<long double, units::gibi>{n}; }
 }
 }

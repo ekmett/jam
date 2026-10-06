@@ -95,6 +95,13 @@ extern "C" void check_compactors() noexcept {
         check(packed_actual[i].live == metadata[i].live);
         check(packed_actual[i].destination == metadata[i].destination);
       }
+      auto packed_in_place = metadata;
+      variant.pack(packed_in_place.data(), packed_in_place.data(), blocks);
+      for (std::size_t i = 0; i != blocks; ++i) {
+        check(packed_in_place[i].pointers == packed_expected[i].pointers);
+        check(packed_in_place[i].live == metadata[i].live);
+        check(packed_in_place[i].destination == metadata[i].destination);
+      }
       // The pointer-free path must pack every mask without interpreting data.
       auto pointer_free = metadata;
       for (auto & item : pointer_free) item.pointers = 0;
