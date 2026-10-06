@@ -74,10 +74,9 @@ Native Image remain work to do.
 ## Source and license
 
 The [source manifest](config/source-pins.json) pins jam, native, OpenJDK and the
-reference implementations. The [jam patch](patches/jam-hosted-heap.patch) adds
-hosted collection phases; the [HotSpot patch](patches/hotspot-jam.patch) adds
-the registered collector. Java objects live in jam's heap, using its original
-SIMD compactor and work scheduler.
+reference implementations. Jam is used directly through its hosted collection
+API. The [HotSpot patch](patches/hotspot-jam.patch) adds the registered collector.
+Java objects live in jam's heap, using its SIMD compactor and work scheduler.
 
 Original code is **BSD-2-Clause OR Apache-2.0**. Imported code and patches
 retain their own terms. See [LICENSE.md](LICENSE.md) and [NOTICE.md](NOTICE.md).

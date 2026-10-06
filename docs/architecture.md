@@ -163,10 +163,11 @@ promote them all into old.
 | Relocation | Rank forwarding, SIMD movement and mask packing | Root repair, wide fields and code relocations |
 | Scheduling | Copy waves and bounded reserve | Safepoints, minor/major selection and promotion attempts |
 
-The hosted extension is a patch to jam's heap phases. `compact.ccm`, `work.ccm`
-and `simd.ccm` remain byte-for-byte upstream. VM scanning currently runs on the
-registered VM thread; native copy work uses jam's worker pool. Parallel VM
-scanning needs a proper HotSpot worker-registration contract first.
+The adapter borrows a `jam::heap::host` to control the collection phases.
+Jam's heap, compactor and worker pool are used without a local patch. VM
+scanning currently runs on the registered VM thread; native copy work uses
+jam's worker pool. Parallel VM scanning needs a proper HotSpot
+worker-registration contract first.
 
 The current encoding requires fixed capacities, ordinary object headers,
 eight-byte alignment, normal pages and nonzero-base shift-three compressed
@@ -177,7 +178,7 @@ and the [next stages](status.md#next-steps) for Graal and Native Image.
 ## Source
 
 The implementation builds on jam's pinned
-[heap](https://github.com/ekmett/jam/blob/10e6921077aca16433af07b48dbf07703797ea39/heap.ccm),
-[compactor](https://github.com/ekmett/jam/blob/10e6921077aca16433af07b48dbf07703797ea39/compact.ccm)
-and [work scheduler](https://github.com/ekmett/jam/blob/10e6921077aca16433af07b48dbf07703797ea39/work.ccm).
+[heap](https://github.com/ekmett/jam/blob/2e65a1bfc68cce66dc4a31befba95f8bf361a241/heap.ccm),
+[compactor](https://github.com/ekmett/jam/blob/2e65a1bfc68cce66dc4a31befba95f8bf361a241/compact.ccm)
+and [work scheduler](https://github.com/ekmett/jam/blob/2e65a1bfc68cce66dc4a31befba95f8bf361a241/work.ccm).
 The [source manifest](../config/source-pins.json) records the exact inputs.

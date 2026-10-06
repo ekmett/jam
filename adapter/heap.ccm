@@ -50,7 +50,9 @@ export namespace thc {
 /// \pre Mutators are stopped or the host allocation lock is held. Canonical PROT_NONE
 /// reservation spans both generations through base+16GiB+prefix+young_bytes.
 class hosted_heap {
+  using generation = jam::heap::host::generation;
   jam::heap storage;
+  jam::heap::host host;
   weak_registry registry;
   std::byte * const base;
   std::size_t const prefix_words;
@@ -59,8 +61,9 @@ class hosted_heap {
   bool promoted = false;
   void publish(bool old_moved = true) noexcept {
     for (unsigned young = old_moved ? 0 : 1; young != 2; ++young)
-      storage.external_publish(young, base + (young ? young_displacement : 0) + prefix_words * 8,
-                               prefix_words, words[young]);
+      host.publish(young ? generation::young : generation::old,
+                   base + (young ? young_displacement : 0) + prefix_words * 8,
+                   prefix_words, words[young]);
   }
 public:
   static constexpr std::uint32_t young_bit = 0x80000000u;
@@ -69,23 +72,26 @@ public:
   hosted_heap(void * address, std::size_t prefix, std::size_t old_bytes,
               std::size_t young_bytes, std::size_t reserve, std::size_t workers) noexcept
       : storage(detail::options(prefix, old_bytes, young_bytes, reserve, workers)),
+        host(storage, prefix / 8),
         base(static_cast<std::byte *>(address)), prefix_words(prefix / 8),
         words{old_bytes / 8, young_bytes / 8} {
     if (!base || reinterpret_cast<std::uintptr_t>(base) % JAM_PAGE_BYTES)
       detail::invalid("compressed base must be page aligned and nonzero");
-    if (prefix_words > 1) for (bool young : {false, true})
-      static_cast<void>(storage.external_allocate(young, prefix_words - 1));
     publish();
   }
   /// \brief Allocate raw words, returning null on capacity exhaustion.
   [[nodiscard]] std::uint32_t allocate(std::size_t count, bool young) noexcept {
-    if (!count || count > prefix_words + words[young] - storage.external_used(young)) return 0;
-    return storage.external_allocate(young, count);
+    if (!count || count > prefix_words + words[young] - used(young)) return 0;
+    return host.allocate(young ? generation::young : generation::old, count);
   }
   /// \brief Allocated cells including the selected generation's guard.
-  [[nodiscard]] std::size_t used(bool young) const noexcept { return storage.external_used(young); }
+  [[nodiscard]] std::size_t used(bool young) const noexcept {
+    return (young ? storage.young() : storage.old()).used();
+  }
   /// \brief Private ring origin in cells, for diagnostics.
-  [[nodiscard]] std::size_t origin(bool young) const noexcept { return storage.external_origin(young); }
+  [[nodiscard]] std::size_t origin(bool young) const noexcept {
+    return (young ? storage.young() : storage.old()).start();
+  }
   /// \brief Name of jam's admitted scalar or SIMD compaction kernel.
   [[nodiscard]] char const * compactor() const noexcept { return storage.compactor_name(); }
   /// \brief Borrow the serialized generalized weak registry.
@@ -93,7 +99,7 @@ public:
   /// \brief Begin major or minor marking, retaining ordinary old liveness in a minor.
   void begin(bool minor_epoch) noexcept {
     minor = minor_epoch;
-    storage.external_begin(minor);
+    host.begin(minor);
     registry.begin();
   }
   /// \brief Scanner capability; batched fields are absolute four-byte slot indices.
@@ -132,23 +138,23 @@ public:
   void trace(std::span<std::uint32_t const> roots, Scan && scan,
              std::size_t workers = 1, bool old_owners = false) noexcept {
     if (old_owners && (!minor || workers != 1)) detail::invalid("invalid old-owner scan");
-    storage.external_trace(roots, [&](jam::heap::visitor & underlying, std::uint32_t at) noexcept {
+    host.trace(roots, [&](jam::heap::visitor & underlying, std::uint32_t at) noexcept {
       visitor visit{*this, underlying, old_owners};
       scan(visit, at);
     }, workers, old_owners);
   }
   /// \brief Query epoch liveness after all tracing workers have drained.
-  [[nodiscard]] bool marked(std::uint32_t at) const noexcept { return storage.external_marked(at); }
+  [[nodiscard]] bool marked(std::uint32_t at) const noexcept { return host.marked(at); }
   /// \brief Freeze destinations and repair the registry; failed promotion changes no handles.
   [[nodiscard]] bool prepare(bool promote) noexcept {
-    if (!storage.external_prepare(promote, prefix_words)) return false;
+    if (!host.prepare(promote)) return false;
     promoted = minor && promote;
-    registry.forward([&](std::uint32_t at) noexcept { return storage.external_forward(at); });
+    registry.forward([&](std::uint32_t at) noexcept { return host.forward(at); });
     return true;
   }
   /// \brief Resolve an offset using frozen tables; null and dead targets resolve to null.
-  [[nodiscard]] std::uint32_t forward(std::uint32_t at) const noexcept { return storage.external_forward(at); }
+  [[nodiscard]] std::uint32_t forward(std::uint32_t at) const noexcept { return host.forward(at); }
   /// \brief Move, then publish both rings before the host resumes mutators.
-  void finish() noexcept { storage.external_finish(); publish(!minor || promoted); }
+  void finish() noexcept { host.finish(); publish(!minor || promoted); }
 };
 }

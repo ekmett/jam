@@ -23,9 +23,8 @@ On macOS that includes Xcode and its SDK. The tested versions are:
 | Boot JDK | JDK 24 or 25; the recorded build uses GraalVM Community 25.3.4.1 |
 | HotSpot compiler | Apple Clang 21, compiling as C++14 |
 
-The Darwin build deliberately pairs LLVM 23's compiler with libc++ 22's
-headers and runtime. The downloaded LLVM 23 Darwin runtime failed during
-the initial build. Keep the selected headers and runtime together.
+The Darwin build pairs LLVM 23's compiler with libc++ 22's headers and runtime.
+Keep the selected headers and runtime together.
 
 The scripts default to tools under `.toolchains/`; they do not install those
 tools. Override their locations for your installation:
@@ -50,18 +49,16 @@ test runner expects `ctest` next to the selected `cmake` binary.
 git clone https://github.com/ekmett/jam-vm.git
 cd jam-vm
 python3 tools/fetch_sources.py --full
-python3 tools/prepare_jam.py
 python3 tools/prepare_jdk.py
 ```
 
 The [manifest](../config/source-pins.json) records the source revisions and
 archive hashes. `upstream/jam` and `upstream/native` remain clean pinned
-checkouts. Preparation copies jam to `upstream/jam-adapted` and applies the
-[hosted-heap patch](../patches/jam-hosted-heap.patch). It extracts OpenJDK into
+checkouts. Jam needs no local patch. Preparation extracts OpenJDK into
 `upstream/jdk25` and applies the [HotSpot patch](../patches/hotspot-jam.patch).
 
-The preparation scripts refuse to replace existing adapted source directories.
-Run them once in a fresh checkout. Repeated builds use the prepared sources.
+The preparation script refuses to replace an existing JDK source directory.
+Run it once in a fresh checkout. Repeated builds use the prepared sources.
 
 ## Build the backend and JVM
 
@@ -112,8 +109,8 @@ python3 tools/check_patches.py
 overrides that choice. Without overrides it uses the exploded macOS arm64
 fastdebug build. These checks exercise the public API, Java reference behavior,
 barriers and generation transitions. Generated logs stay local and are ignored
-by Git. `check_patches.py` verifies that the patches reconstruct the adapted
-sources without changing jam's compactor or work scheduler.
+by Git. `check_patches.py` checks the unmodified Jam pin and reconstructs the
+HotSpot sources from the patch.
 
 ## Packaging
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-"""Export adaptations against the exact pinned source inputs (no generated code)."""
+"""Export the HotSpot adaptation against the pinned source archive."""
 import difflib
 from pathlib import Path
 import tarfile
@@ -9,11 +9,6 @@ root = Path(__file__).resolve().parents[1]
 def difference(before, after, name):
     return ''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
                                        fromfile='a/' + name, tofile='b/' + name))
-original = root / 'upstream/jam'
-adapted = root / 'upstream/jam-adapted'
-patch = ''.join(difference(p.read_text(), (adapted / p.name).read_text(), p.name)
-                for p in sorted(original.glob('*.ccm')))
-(root / 'patches/jam-hosted-heap.patch').write_text(patch)
 # Only tracked source edits, against files read straight from the pinned archive.
 with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
     members = {m.name.split('/', 1)[1]: m for m in archive.getmembers() if '/' in m.name and m.isfile()}
@@ -56,4 +51,4 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
         before = archive.extractfile(members[name]).read().decode() if name in members else ''
         patch += difference(before, p.read_text(), name)
 (root / 'patches/hotspot-jam.patch').write_text(patch)
-print('Exported jam and HotSpot source patches.')
+print('Exported the HotSpot source patch.')

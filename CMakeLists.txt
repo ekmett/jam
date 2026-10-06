@@ -11,7 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(JAM_BUILD_TESTS ON CACHE BOOL "Run upstream jam checks")
 set(JAM_BUILD_BENCHMARKS ON CACHE BOOL "Build upstream jam benchmark")
 enable_testing()
-add_subdirectory(upstream/jam-adapted jam)
+add_subdirectory(upstream/jam jam)
 add_library(jam_vm SHARED adapter/jam_vm.cc)
 target_sources(jam_vm PRIVATE FILE_SET CXX_MODULES FILES
   adapter/jam.ccm adapter/heap.ccm adapter/weak.ccm)
