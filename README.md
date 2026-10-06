@@ -74,4 +74,10 @@ puts the names in scope as above; use `import jam;` for qualified names.
 The [topic guides](docs/README.md) go deeper; the
 [API reference](https://ekmett.github.io/jam/) documents the individual operations.
 
-Dual [BSD-2-Clause / Apache-2.0](LICENSE.md).
+## License and contact
+
+See [LICENSE.md](LICENSE.md) for the dual BSD-2-Clause/Apache-2.0 license and
+individual source notices for retained upstream terms.
+
+Contributions and bug reports are welcome through [GitHub](https://github.com/ekmett/jam).
+Edward Kmett can also be reached as `ekmett` on Libera Chat and `@kmett` on Twitter/X.
