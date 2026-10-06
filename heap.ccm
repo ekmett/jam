@@ -321,6 +321,29 @@ public:
     return static_cast<std::size_t>(::getpagesize());
 #endif
   }
+  /// \brief Publish a logical arc into a caller-owned, page-aligned reservation.
+  /// \pre Mutators are stopped. Target does not overlap either private ring view.
+  /// The caller releases the target reservation; no access after this mapping dies.
+  void publish(std::size_t start, std::byte * target, std::size_t count) const noexcept {
+#if defined(_WIN32)
+    static_cast<void>(start); static_cast<void>(target); static_cast<void>(count);
+    heap_failure("host publication is not supported on Windows");
+#else
+    if (start >= capacity || start % page_size() || count % page_size() ||
+        count > capacity || reinterpret_cast<std::uintptr_t>(target) % page_size())
+      heap_failure("invalid published heap arc");
+    while (count) {
+      auto const where = std::lower_bound(spans.begin(), spans.end(), start,
+        [](span const & s, std::size_t value) noexcept { return s.end <= value; });
+      assert(where != spans.end() && where->begin <= start);
+      auto const part = std::min(count, where->end - start);
+      alias(address + start, target, part);
+      start = (start + part) % capacity;
+      target += part;
+      count -= part;
+    }
+#endif
+  }
   /// \brief Exchange mappings without moving payload bytes.
   void swap(heap_mapping & other) noexcept {
     std::swap(address, other.address);
@@ -1131,13 +1154,18 @@ public:
     }
     /// \brief Declare a managed field and enqueue its nonnull target for tracing.
     /// \return The stored offset, usable until compaction starts.
-    /// \pre The field belongs to the complete record just successfully claimed.
+    /// \pre The field belongs to a claimed record, or an explicitly scanned
+    /// dirty old owner in a hosted minor collection.
     native_inline offset field(offset cell, unsigned slot = 0) noexcept {
       arena.pointer(cell, slot);
       auto const target = arena.field(cell, slot);
       if (target != null && (!arena.minor_collection || (target & young_bit)))
         pending.push(worker, {target, nullptr});
       return target;
+    }
+    /// \brief Enqueue an external/wide target without declaring a narrow source slot.
+    native_inline void target(offset at) noexcept {
+      if (at && (!arena.minor_collection || (at & young_bit))) pending.push(worker, {at, nullptr});
     }
     /// \brief Walk an embedded value without claiming cells again.
     /// Parts share the current allocation's pointer mask. Tuple views may name
@@ -1802,6 +1830,167 @@ private:
   }
 
 public:
+  /// \brief Borrow a heap whose roots, barriers and reference policy belong to a host runtime.
+  /// \details See [hosting a runtime](docs/hosting.md). One capability per heap;
+  /// it must not outlive the heap. Ordinary Jam roots and collection are excluded.
+  class host {
+    heap & owner;
+    std::size_t const prefix;
+    enum class phase { idle, marking, retry, prepared };
+    phase state = phase::idle;
+    std::size_t old_words = 0, young_words = 0;
+    bool promoting = false;
+  public:
+    /// \brief Select the arena for raw allocation or publication.
+    enum class generation { old, young };
+    /// \brief Reserve an identical guard in both fresh, fixed-size generations.
+    /// \param storage Fresh heap borrowed for the capability lifetime.
+    /// \param prefix Guard size in eight-byte cells, a positive native-page multiple.
+    /// \pre Sole host capability; no ordinary Jam allocations, roots or collection.
+    explicit host(heap & storage, std::size_t prefix) noexcept : owner(storage), prefix(prefix) {
+      owner.require_mutator();
+      for (auto * g : {&owner.arena, &owner.nursery}) {
+        if (g->used() != 1 || g->policy.capacity != g->policy.maximum || g->policy.shrink_shift ||
+            !prefix || prefix % g->page_words() || prefix >= g->capacity() - g->reserved())
+          detail::heap_failure("host requires fresh fixed generations and a whole-page guard");
+      }
+      static_cast<void>(owner.arena.allocate(prefix - 1));
+      static_cast<void>(owner.nursery.allocate(prefix - 1));
+    }
+    host(host const &) = delete;
+    host & operator=(host const &) = delete;
+    /// \brief Release the capability after finishing its last collection.
+    ~host() noexcept {
+      if (state != phase::idle) detail::heap_failure("unfinished host collection");
+    }
+    /// \brief Publish one generation at a stable VM-owned address.
+    /// \pre Fixed capacity, no shrink, stopped mutators; skip/count are page multiples.
+    /// target corresponds to cell skip, not cell zero. The host owns the reservation.
+    void publish(generation which, void * target, std::size_t skip, std::size_t count) const noexcept {
+      if (state != phase::idle) detail::heap_failure("publish during host collection");
+      auto const & g = which == generation::young ? owner.nursery : owner.arena;
+      auto const & config = which == generation::young ? owner.policy.young : owner.policy.old;
+      if (config.capacity != config.maximum || config.shrink_shift ||
+          skip > g.capacity() || count > g.capacity() - skip)
+        detail::heap_failure("published heap requires a fixed generation");
+      g.storage.publish(((g.origin + skip) % g.capacity()) * 8,
+        static_cast<std::byte *>(target), count * 8);
+    }
+    /// \brief Allocate raw cells in either generation, preserving the tag bit.
+    /// A host may subdivide the extent; scanner claims determine record boundaries.
+    /// \pre Positive extent fits the selected generation; no active collection.
+    [[nodiscard]] offset allocate(generation which, std::size_t words) noexcept {
+      owner.require_mutator();
+      return (which == generation::young ? owner.nursery.allocate(words) : owner.arena.allocate(words)) | (which == generation::young ? young_bit : 0);
+    }
+    /// \brief Start a VM-owned marking epoch; the VM supplies barriers and weak policy.
+    /// \pre No jam roots, weak registrations, remembered slots or active collection.
+    void begin(bool minor) noexcept {
+      owner.require_mutator();
+      if (state != phase::idle) detail::heap_failure("host begin outside idle phase");
+      if (owner.roots_head || !owner.weak_entries.empty() || !owner.pending_finalizers.empty() ||
+          owner.running_finalizer || !owner.remembered.empty())
+        detail::heap_failure("host collection requires exclusively VM-owned roots");
+      std::atomic_signal_fence(std::memory_order_seq_cst);
+      owner.collecting = true;
+      owner.minor_collection = minor;
+      state = phase::marking;
+      owner.nursery.clear_marks();
+      for (auto & item : owner.nursery.metadata) item.pointers = 0;
+      if (!minor) {
+        owner.arena.clear_marks();
+        for (auto & item : owner.arena.metadata) item.pointers = 0;
+      }
+    }
+    /// \brief Drain roots using jam's ordinary frontier and persistent worker pool.
+    /// \pre Marking phase; callbacks claim full objects before enumerating fields.
+    /// marker_limit=1 keeps callbacks on the caller (e.g. a registered VM thread).
+    /// old_owners admits dirty old source jobs in a minor; their targets remain young-only.
+    template<class Trace>
+    void trace(std::span<offset const> roots, Trace && trace,
+               std::size_t marker_limit = 1, bool old_owners = false) noexcept
+        requires std::is_nothrow_invocable_v<Trace &, visitor &, offset> {
+      if (state != phase::marking || !marker_limit ||
+          (old_owners && (!owner.minor_collection || marker_limit != 1)))
+        detail::heap_failure("host trace outside marking phase");
+      std::vector<trace_job> initial;
+      initial.reserve(roots.size());
+      for (auto at : roots)
+        if (at && (!owner.minor_collection || old_owners || (at & young_bit))) initial.push_back({at, nullptr});
+      owner.drain_jobs(trace, initial, marker_limit);
+    }
+    /// \brief Exact collected-generation liveness; old objects are live during minors.
+    [[nodiscard]] bool marked(offset at) const noexcept {
+      if (state != phase::marking && state != phase::retry)
+        detail::heap_failure("host liveness outside marking phase");
+      return owner.marked(at);
+    }
+    /// \brief Freeze both forwarding tables after resolving all reference policies.
+    /// \return False if whole-nursery promotion does not fit. No forwarding is then visible;
+    /// Retry without promotion in the same epoch; no further tracing is allowed.
+    /// Majors retain both generations separately.
+    [[nodiscard]] bool prepare(bool promote = false) noexcept {
+      if (state != phase::marking && state != phase::retry)
+        detail::heap_failure("host prepare outside marking phase");
+      promoting = owner.minor_collection && promote;
+      if (!owner.minor_collection) {
+        if (prefix > 1) owner.arena.mark(1, prefix - 1);
+        old_words = owner.arena.prepare(0, true);
+      } else old_words = owner.arena.cursor;
+      if (promoting) {
+        old_words = owner.nursery.prepare(owner.arena.cursor, false);
+        if (old_words > owner.arena.capacity() - owner.arena.reserved()) {
+          state = phase::retry;
+          return false;
+        }
+        young_words = prefix;
+      } else {
+        if (prefix > 1) owner.nursery.mark(1, prefix - 1);
+        young_words = owner.nursery.prepare(young_bit, true) - young_bit;
+      }
+      state = phase::prepared;
+      return true;
+    }
+    /// \brief Repair a root while original objects and both forwarding tables remain intact.
+    [[nodiscard]] offset forward(offset at) const noexcept {
+      if (state != phase::prepared)
+        detail::heap_failure("host forward outside prepared phase");
+      return owner.forward(at, owner.minor_collection);
+    }
+    /// \brief Move with the original SIMD kernel and pack only after both moves finish.
+    /// \pre VM roots and old remembered fields have been repaired. Republish both aliases
+    /// before resuming mutators. Majors need no combined-live-size fit in either generation.
+    void finish() noexcept {
+      if (state != phase::prepared)
+        detail::heap_failure("host finish outside prepared phase");
+      detail::forwarding_tables tables{owner.minor_collection ? nullptr : owner.arena.metadata.data(), owner.nursery.metadata.data(),
+        owner.minor_collection ? nullptr : owner.arena.alignment_table(), owner.nursery.alignment_table()};
+      auto const old_origin = owner.minor_collection ? owner.arena.origin : owner.arena.rotated_origin();
+      auto const young_origin = owner.nursery.rotated_origin();
+      if (!owner.minor_collection) {
+        auto * target = owner.arena.at_origin(old_origin);
+        owner.arena.move_to(target, tables);
+        owner.arena.zero_gaps(target, 0);
+      }
+      auto * target = promoting ? owner.arena.data() : owner.nursery.at_origin(young_origin);
+      owner.nursery.move_to(target, tables);
+      owner.nursery.zero_gaps(target, promoting ? owner.arena.cursor : 0);
+      // Both moves consumed the original tables. Packing may overwrite them now.
+      if (!owner.minor_collection) owner.arena.pack_into(owner.arena.metadata);
+      owner.nursery.pack_into(promoting ? owner.arena.metadata : owner.nursery.metadata);
+      if (!owner.minor_collection || promoting) owner.arena.adopt(old_origin, old_words);
+      if (promoting) owner.nursery.reset();
+      else owner.nursery.adopt(young_origin, young_words);
+      owner.collecting = false;
+      owner.minor_collection = false;
+      state = phase::idle;
+      if (promoting && young_words > 1)
+        static_cast<void>(owner.nursery.allocate(young_words - 1));
+      std::atomic_signal_fence(std::memory_order_seq_cst);
+    }
+  };
+  /// \brief Runtime-selected compaction implementation, including SIMD ISA admission.
+  [[nodiscard]] char const * compactor_name() const noexcept { return compactor.name; }
   /// \brief Number of distinct old source slots retained in the current GC epoch.
   [[nodiscard]] std::size_t remembered_size() const noexcept { return remembered.size(); }
   /// \brief Explicitly register a pointer after a caller-managed unsafe write.
@@ -1941,6 +2130,28 @@ public:
   }
 private:
   template<class Trace>
+  void drain_jobs(Trace & trace, std::vector<trace_job> & initial, std::size_t marker_limit) noexcept {
+    if (initial.empty()) return;
+    auto const marker_count = std::min(marker_limit, workers.available_workers());
+    detail::frontier<trace_job> pending{marker_count, initial};
+    struct context {
+      heap * arena;
+      std::remove_reference_t<Trace> * trace;
+      detail::frontier<trace_job> * pending;
+    } state{this, std::addressof(trace), &pending};
+    workers.run(marker_count, [](void * raw, std::size_t worker) noexcept {
+      auto & state = *static_cast<context *>(raw);
+      heap_scope binding{*state.arena};
+      visitor visit{*state.arena, *state.pending, worker};
+      trace_job job;
+      while (state.pending->pop(worker, job)) {
+        if (job.trace) job.trace(visit, job.at);
+        else std::invoke(*state.trace, visit, job.at);
+      }
+    }, &state);
+    initial.clear();
+  }
+  template<class Trace>
   void run_collection(Trace && trace, bool minor, bool promote) noexcept {
     require_mutator();
     // Compiler-only safepoint: publish mutator stores before tracing. Worker
@@ -1970,25 +2181,7 @@ private:
     for (auto const & entry : pending_finalizers) seed_finalizer(*entry);
     for (auto * entry = running_finalizer; entry; entry = entry->previous_running) seed_finalizer(*entry);
     auto drain = [&]() noexcept {
-      if (initial.empty()) return;
-      auto const marker_count = workers.available_workers();
-      detail::frontier<trace_job> pending{marker_count, initial};
-      struct context {
-        heap * arena;
-        std::remove_reference_t<Trace> * trace;
-        detail::frontier<trace_job> * pending;
-      } state{this, std::addressof(trace), &pending};
-      workers.run(marker_count, [](void * raw, std::size_t worker) noexcept {
-        auto & state = *static_cast<context *>(raw);
-        heap_scope binding{*state.arena};
-        visitor visit{*state.arena, *state.pending, worker};
-        trace_job job;
-        while (state.pending->pop(worker, job)) {
-          if (job.trace) job.trace(visit, job.at);
-          else std::invoke(*state.trace, visit, job.at);
-        }
-      }, &state);
-      initial.clear();
+      drain_jobs(trace, initial, workers.available_workers());
     };
     drain();
     std::stable_sort(weak_entries.begin(), weak_entries.end(), [](auto const & a, auto const & b) noexcept {
