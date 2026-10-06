@@ -342,8 +342,20 @@ struct invalid_manifest {};
 
 /// \brief Describe the pointer-bearing members of T, including embedded values.
 /// \ingroup jam_heap
-/// T may still be incomplete. Unlisted fields are data. Hooks take precedence;
-/// otherwise allocation tracing generates a cooperative walk from this descriptor.
+/// T may still be incomplete. List pointers and embedded values that contain
+/// pointers; unlisted fields are data. Hooks take precedence over the manifest.
+/// \code
+/// struct node {
+///   ptr<node> left, right;
+///   std::uint64_t data;
+///   static constexpr auto manifest = make_manifest<node>(&node::left, &node::right);
+/// };
+/// \endcode
+/// Allocation tracing claims sizeof(T) with alignof(T), declares the listed
+/// pointer slots, and queues their targets. The last nonnull same-type child
+/// found by structural enumeration continues in a loop; earlier children are
+/// queued. Embedded values share the enclosing allocation's claim and mask.
+/// Each successful claim polls the scheduler. Graph depth does not grow the stack.
 export template<class T, class... Members> requires (std::is_object_v<Members> && ...)
 consteval auto make_manifest(Members T::*... members) {
   if (((members == nullptr) || ...)) throw "manifest members must not be null";

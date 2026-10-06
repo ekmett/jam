@@ -62,10 +62,10 @@ class. Explicit tracing hooks and `tracer<T>` specializations take precedence.
 
 Jam generates the allocation walk. It claims the complete `sizeof(T)` extent
 with `alignof(T)`, batches pointer declarations into mask windows, and queues
-outgoing targets. One nonnull same-type child from structural enumeration is kept
-for the next loop iteration;
-the other children are queued. A list therefore walks directly, and a binary
-tree normally walks its right spine while donating the left branches. Cycles and
+outgoing targets. The last nonnull same-type child in structural enumeration
+order is kept for the next loop iteration; earlier children are queued. A list
+therefore walks directly. A tree listing `left` before `right` walks its right
+spine while donating left branches, or continues left when right is null. Cycles and
 sharing stop at an earlier claim. The walk polls the existing stochastic
 scheduler between records and does not grow the machine stack with graph depth.
 Embedded objects share the enclosing allocation's claim and pointer mask.
@@ -219,91 +219,41 @@ offset for those targets. That callback must claim each record and enumerate its
 fields and remain `noexcept`. Both forms redeclare pointer fields each collection, so a conditional
 tracer can stop treating a field as a managed edge.
 
-Ordinary `visit(...)` calls enqueue edges without following them recursively.
-Cooperative hooks can walk a spine and enqueue other branches. For a binary tree:
+For a binary tree, list both pointer fields in the manifest:
 
 ```cpp
 struct tree {
   ptr<tree> left, right;
   std::uint64_t data;
 
-  static constexpr void trace(visitor auto & visit, ptr<tree> at) noexcept {
-    for (auto const * p = visit.claim_target(at); p; p = visit.claim(p->right)) {
-      visit(p->left); // Declare and enqueue the left subtree.
-      visit.poll();  // Offer queued branches to idle workers when due.
-    }
-  }
+  static constexpr auto manifest = make_manifest<tree>(&tree::left, &tree::right);
 };
 ```
 
-A tracer can instead keep a typed FIFO in front of its local walk. Here a
-32-entry buffer prefetches object data on entry. `pushpop` only removes an entry when
-full; otherwise it appends and returns null. The walker tries left first, then
-right if nothing was displaced. Once left displaces work, right goes to the
-worker queue. When neither displaces a node, the explicit drain handles the
-partially filled buffer and the final tail. Early drains discover more children
-and fill the buffer; later children refill any slots emptied by leaves or lost
-claims. Draining is not a separate mode.
+The generated walker claims the whole record, declares both pointer slots even
+when null, and leaves `data` untouched. It queues the left child and continues
+locally with the right child when both are nonnull. If only one child is nonnull,
+it continues with that child. Every successful claim polls the scheduler, so
+queued branches can be donated without a user-written `trace` hook. Cycles and
+shared children stop at an earlier claim.
 
-```cpp
-#include <array>
-#include <utility>
+Manifests also compose through embedded manifests, arrays, tuples, variants and
+pointer SIMD vectors. Embedded values contribute to the enclosing allocation's
+pointer mask; they are not claimed as separate allocations. Structural traversal
+can find same-type children inside those values. Custom hooks retain their own
+visitor behavior and take precedence over a manifest.
 
-struct buffered_tree {
-  ptr<buffered_tree> left, right;
-  std::uint64_t data;
-
-  static constexpr void trace(visitor auto & visit, ptr<buffered_tree> at) noexcept {
-    std::array<ptr<buffered_tree>, 32> queue{};
-    unsigned head = 0, size = 0;
-    auto pushpop = [&](ptr<buffered_tree> value) noexcept -> ptr<buffered_tree> {
-      if (!value) return {};
-      value.prefetch();
-      if (size < queue.size()) {
-        queue[(head + size++) % queue.size()] = value;
-        return {};
-      }
-      auto const result = std::exchange(queue[head], value);
-      head = (head + 1) % queue.size();
-      return result;
-    };
-    at.prefetch();
-    for (;;) {
-      if (!at) {
-        if (!size) break;
-        at = queue[head];
-        head = (head + 1) % queue.size();
-        --size;
-      }
-      auto const * p = visit.claim_target(std::exchange(at, {}));
-      if (!p) continue;
-      visit.pointer(p->left);
-      at = pushpop(p->left);
-      if (at) visit(p->right);
-      else {
-        visit.pointer(p->right);
-        at = pushpop(p->right);
-      }
-      visit.poll();
-    }
-  }
-};
-```
-
-`ptr<T>::prefetch()` is always inlined and hints the cache line containing the
-object's first byte in the current heap. `prefetch_marks()` instead hints its
-mark metadata. Both treat null as a no-op, even without a heap scope, and use
-the pure current-heap accessor so the compiler can share its TLS lookup.
-Prefetching neither claims
-the target nor declares a pointer slot; it provides no synchronization. The
-buffer remains local and typed, so only branches sent to `visit(...)` incur
-queued callback dispatch. Buffer size is a tracer choice, not a heap setting.
-
-There is no recursive call or queue entry for each right-spine link. `claim`
-declares that link before attempting the next target, including links whose
-target was already claimed. Stack use is independent of graph depth. Ordinary
-embedded tuple, array and variant traversal still follows the nesting of values.
+The default walk uses no FIFO and does not recurse along graph edges. Ordinary
+embedded traversal still follows the nesting of values. For custom traversal,
+the hooks shown above remain available: `visit(...)` queues edges, while
+`claim_target`, `pointer` and `claim` allow a cooperative local walk. Such hooks
+must declare every outgoing pointer slot and trace every target they claim.
 Tracing must not throw; an escaping user exception terminates collection.
+
+`ptr<T>::prefetch()` hints the object's first cache line; `prefetch_marks()` hints
+its mark metadata. Both are always inlined, use the pure current-heap accessor,
+and treat null as a no-op even without a heap scope. These optional hints neither
+claim targets nor declare pointer slots and provide no synchronization.
 
 Pending jobs own offsets and type-specific callbacks, not stack references.
 Between queued jobs and at `visit.poll()`, the worker processes overdue donation
