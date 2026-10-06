@@ -33,8 +33,8 @@ static_assert(std::is_convertible_v<jam::ptr<node>, jam::root<node>>);
 static_assert(std::is_nothrow_convertible_v<jam::root<node> const &, jam::ptr<node>>);
 
 void nested_scopes() {
-  jam::heap first{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
-  jam::heap second{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
+  jam::heap first{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}}};
+  jam::heap second{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}}};
   jam::root<node> a, b;
   auto const previous = jam::heap::current();
   {
@@ -78,7 +78,7 @@ void nested_scopes() {
 }
 
 void const_root() {
-  heap heap{{.capacity = 8_MiB, .reserve = 1_MiB}};
+  heap heap{{.old = {.capacity = 8_MiB, .reserve = 1_MiB}, .young = {.capacity = 8_MiB, .reserve = 1_MiB}}};
   heap_scope scope{heap};
   static_cast<void>(mk<node>());
   root<node> const root = mk<node>(nullptr, std::uint64_t{23});
@@ -100,8 +100,7 @@ struct alignas(Alignment) ordered_node {
 template<std::size_t Alignment>
 void collection_boundary(std::size_t workers) {
   using node_t = ordered_node<Alignment>;
-  jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
-                             .workers = workers}};
+  jam::heap heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = workers}};
   jam::heap_scope scope{heap};
   static_cast<void>(heap.allocate(heap.page_words()));
   jam::root const first = jam::mk<node_t>(nullptr, std::uint64_t{11});
@@ -135,7 +134,7 @@ void collection_boundary(std::size_t workers) {
 void thread_scopes() {
   std::barrier gate{2};
   auto work = [&](std::uint64_t value) {
-    jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
+    jam::heap heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}}};
     jam::heap_scope scope{heap};
     jam::root<node> root = jam::mk<node>(nullptr, value);
     gate.arrive_and_wait();

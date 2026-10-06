@@ -13,6 +13,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <span>
 #include <type_traits>
 #include <utility>
 
@@ -39,28 +40,45 @@ public:
   native_nodiscard native_inline constexpr value_type & operator[](std::size_t i) noexcept { return values_[i]; }
   /** \brief Initialize every lane to null. */
   constexpr ptr_storage() noexcept = default;
+  native_inline constexpr ptr_storage(ptr_storage const & other) noexcept { assign(other); }
+  native_inline constexpr ptr_storage & operator=(ptr_storage const & other) noexcept { assign(other); return *this; }
+  native_inline constexpr void unsafe_assign(ptr_storage const & other) noexcept {
+    for (std::size_t i = 0; i != lanes; ++i) values_[i].unsafe_assign(other.values_[i]);
+  }
+  native_inline constexpr void remember() noexcept {
+    if !consteval { if (auto * h = heap::current()) h->remember(std::span<value_type>{values_}); }
+  }
+  native_inline constexpr void assign(ptr_storage const & other) noexcept { unsafe_assign(other); remember(); }
   /** \brief Broadcast one pointer, including nullptr. */
-  native_inline constexpr ptr_storage(value_type value) noexcept { values_.fill(value); }
+  native_inline constexpr ptr_storage(value_type value) noexcept {
+    for (auto & lane : values_) lane.unsafe_assign(value);
+    remember();
+  }
   /** \brief Copy pointer lanes in array order. */
   native_inline constexpr explicit ptr_storage(std::array<value_type, lanes> const & values) noexcept
-      : values_(values) {}
+  {
+    for (std::size_t i = 0; i != lanes; ++i) values_[i].unsafe_assign(values[i]);
+    remember();
+  }
   /** \brief Adopt the raw compressed offsets without changing their bits. */
   native_inline constexpr explicit ptr_storage(Raw const & raw) noexcept {
     std::array<std::uint32_t, lanes> offsets;
     std::memcpy(offsets.data(), &raw, sizeof(offsets));
-    for (std::size_t i = 0; i != lanes; ++i) values_[i] = value_type{offsets[i]};
+    for (std::size_t i = 0; i != lanes; ++i) values_[i].unsafe_assign(offsets[i]);
+    remember();
   }
   /** \brief Load exactly lanes pointers; no physical padding is accessed. */
   template<std::size_t Alignment = 1>
   native_nodiscard static native_inline constexpr Self load_memory(value_type const * p) noexcept {
     std::array<value_type, lanes> values;
-    for (std::size_t i = 0; i != lanes; ++i) values[i] = p[i];
+    for (std::size_t i = 0; i != lanes; ++i) values[i].unsafe_assign(p[i]);
     return Self{values};
   }
   /** \brief Store exactly lanes pointers; no physical padding is accessed. */
   template<std::size_t Alignment = 1>
   native_inline constexpr void store_memory(value_type * p) const noexcept {
-    for (std::size_t i = 0; i != lanes; ++i) p[i] = values_[i];
+    for (std::size_t i = 0; i != lanes; ++i) p[i].unsafe_assign(values_[i]);
+    if !consteval { if (auto * h = heap::current()) h->remember(std::span<value_type>{p, lanes}); }
   }
   /** \brief Load exactly lanes pointers. */
   native_nodiscard static native_inline constexpr Self load(value_type const * p) noexcept { return load_memory(p); }
@@ -139,6 +157,27 @@ NATIVE_TARGET_VARIANTS(pointer, JAM_PTR_SIMD, JAM_PTR_TARGETS)
 #undef JAM_PTR_SIMD
 
 export namespace jam {
+/// \brief Copy SIMD pointer bits without registering old-to-young slots.
+template<class T, std::size_t N, native::isa<> A>
+native_inline void unsafe_assign(native::simd<ptr<T>, N, A> & target,
+                                native::simd<ptr<T>, N, A> const & source) noexcept { target.unsafe_assign(source); }
+/// \brief Bulk-copy a register and register its old-to-young slots.
+template<class T, std::size_t N, native::isa<> A>
+native_inline void assign(native::simd<ptr<T>, N, A> & target,
+                         native::simd<ptr<T>, N, A> const & source) noexcept { target.assign(source); }
+/// \brief Copy a pointer register pack without registration; caller owns its barriers.
+template<class T, std::size_t N, native::isa<> A, std::size_t K>
+native_inline void unsafe_assign(native::wide<native::simd<ptr<T>, N, A>, K> & target,
+                                native::wide<native::simd<ptr<T>, N, A>, K> const & source) noexcept {
+  for (std::size_t i = 0; i != K; ++i) target.registers[i].unsafe_assign(source.registers[i]);
+}
+/// \brief Copy a pointer register pack with one bulk barrier per register.
+template<class T, std::size_t N, native::isa<> A, std::size_t K>
+native_inline void assign(native::wide<native::simd<ptr<T>, N, A>, K> & target,
+                         native::wide<native::simd<ptr<T>, N, A>, K> const & source) noexcept {
+  for (std::size_t i = 0; i != K; ++i) target.registers[i].assign(source.registers[i]);
+}
+
 /// \brief Trace actual pointer lanes, including null fields, in register order.
 template<class T, std::size_t N, native::isa<> A>
 struct tracer<native::simd<ptr<T>, N, A>> : detail::structural_tracer {
@@ -189,31 +228,35 @@ native_inline native_const std::ptrdiff_t member_displacement(U T::* member) noe
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
-// Bias unsigned cell offsets about 16 GiB so signed dword indices, scaled by
-// eight, address the complete 32 GiB heap. Fold the member displacement into the
-// scalar base. Form that base through integer arithmetic: it may be unmapped.
+// Each generation has 31-bit nonnegative cell indices. Gather from its own
+// base under a disjoint mask, preserving the other generation's result lanes.
 #define JAM_GATHER_X86 \
   if constexpr (A.has(native::x86_feature::avx2) && (N == 4 || N == 8 || N == 16)) { \
     using V = native::simd<std::uint32_t, N, A>; \
     using I = native::simd<std::int32_t, N, A>; \
     auto const displacement = detail::member_displacement(member); \
-    auto const indices = __builtin_bit_cast(I, nodes.to_native() ^ V{std::uint32_t{0x80000000u}}); \
-    auto const address = reinterpret_cast<std::uintptr_t>(arena->data()) + (std::uint64_t{1} << 34) + displacement; \
-    auto const * base = reinterpret_cast<B const *>(address); \
-    if constexpr (sizeof(B) == 4) { \
-      if constexpr (A.has(native::x86_feature::avx512f)) \
-        result = native::mask_vpgatherdd<8>(result, active, base, indices); \
-      else result = native::mask_vpgatherdd<8>(result, \
-          I::from_native(active.to_native()), base, indices); \
-    } else { \
-      if constexpr (A.has(native::x86_feature::avx512f)) \
-        result = native::mask_vpgatherdq<8>(result, active, base, indices); \
-      else { \
-        using M64 = native::simd<std::int64_t, N, A>; \
-        using D = std::int32_t __attribute__((ext_vector_type(N))); \
-        using Q = std::int64_t __attribute__((ext_vector_type(N))); \
-        auto const mask = __builtin_bit_cast(M64, __builtin_convertvector(__builtin_bit_cast(D, active), Q)); \
-        result = native::mask_vpgatherdq<8>(result, mask, base, indices); \
+    auto const encoded = nodes.to_native(); \
+    auto const indices = __builtin_bit_cast(I, encoded & V{std::uint32_t{0x7fffffffu}}); \
+    for (unsigned generation = 0; generation != 2; ++generation) { \
+      auto const selected = active & ((encoded >> native::imm<31>) == V{generation}); \
+      auto const & g = generation ? arena->young() : arena->old(); \
+      auto const address = reinterpret_cast<std::uintptr_t>(g.data()) + displacement; \
+      auto const * base = reinterpret_cast<B const *>(address); \
+      if constexpr (sizeof(B) == 4) { \
+        if constexpr (A.has(native::x86_feature::avx512f)) \
+          result = native::mask_vpgatherdd<8>(result, selected, base, indices); \
+        else result = native::mask_vpgatherdd<8>(result, \
+            I::from_native(selected.to_native()), base, indices); \
+      } else { \
+        if constexpr (A.has(native::x86_feature::avx512f)) \
+          result = native::mask_vpgatherdq<8>(result, selected, base, indices); \
+        else { \
+          using M64 = native::simd<std::int64_t, N, A>; \
+          using D = std::int32_t __attribute__((ext_vector_type(N))); \
+          using Q = std::int64_t __attribute__((ext_vector_type(N))); \
+          auto const mask = __builtin_bit_cast(M64, __builtin_convertvector(__builtin_bit_cast(D, selected), Q)); \
+          result = native::mask_vpgatherdq<8>(result, mask, base, indices); \
+        } \
       } \
     } \
   } else

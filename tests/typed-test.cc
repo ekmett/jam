@@ -10,6 +10,7 @@
 #include <concepts>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <tuple>
 #include <type_traits>
 #include <variant>
@@ -152,12 +153,28 @@ struct tagged {
   constexpr tagged(std::uint32_t value) noexcept : scalar(value), kind(0) {}
   constexpr tagged(edge value) noexcept : pointer(value), kind(1) {}
   constexpr tagged(embedded value) noexcept : nested(value), kind(2) {}
+  constexpr tagged(tagged const & other) noexcept : kind(other.kind) {
+    if (kind == 0) std::construct_at(&scalar, other.scalar);
+    else if (kind == 1) std::construct_at(&pointer, other.pointer);
+    else std::construct_at(&nested, other.nested);
+  }
+  constexpr ~tagged() noexcept {
+    if (kind == 1) std::destroy_at(&pointer);
+    else if (kind == 2) std::destroy_at(&nested);
+  }
+  constexpr tagged & operator=(tagged const & other) noexcept {
+    if (this != &other) {
+      std::destroy_at(this);
+      std::construct_at(this, other);
+    }
+    return *this;
+  }
   constexpr auto trace(jam::visitor auto & visit) const noexcept {
     if (kind == 1) visit(pointer);
     else if (kind == 2) visit(nested);
   }
 };
-static_assert(std::is_standard_layout_v<tagged> && std::is_trivially_copyable_v<tagged>);
+static_assert(std::is_standard_layout_v<tagged> && std::is_nothrow_copy_constructible_v<tagged>);
 
 struct composite {
   using edge = jam::ptr<payload>;
@@ -184,9 +201,8 @@ void mixed_graph() noexcept {
   using R = typename H::template ptr<N>;
   static_assert(std::is_same_v<R, jam::ptr<N>>);
   static_assert(sizeof(R) == sizeof(std::uint32_t));
-  static_assert(std::is_standard_layout_v<R> && std::is_trivially_copyable_v<R>);
-  H heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
-                     .workers = 4}};
+  static_assert(std::is_standard_layout_v<R> && !std::is_trivially_copyable_v<R>);
+  H heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
   static_cast<void>(heap.allocate(23));
   auto const data = heap.template mk<payload>(payload{1, 7});
   auto const a = heap.template mk<N>(N{{}, data, 101});
@@ -229,8 +245,7 @@ void mixed_graph() noexcept {
 }
 
 void parallel_typed_discovery() noexcept {
-  jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
-                                       .workers = 4}};
+  jam::heap heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
   aligned_branch::expected_heap = &heap;
   static_cast<void>(heap.allocate(31));
   auto const data = heap.mk<std::uint32_t>(77u);
@@ -255,8 +270,7 @@ void composite_graph() noexcept {
   using E = typename C::edge;
   using A = std::array<E, 2>;
   using V = tagged;
-  jam::heap heap{jam::heap_options{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
-                                .workers = 3}};
+  jam::heap heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 3}};
   static_cast<void>(heap.allocate(17));
   auto const first = heap.template mk<payload>(payload{71, 11});
   auto const second = heap.template mk<payload>(payload{83, 13});
@@ -355,8 +369,7 @@ static_assert(jam::traceable<walking_node>);
 void deep_cooperative_graph() noexcept {
   constexpr unsigned count = 2048;
   for (auto workers : {1u, 4u}) {
-    jam::heap heap{{.capacity = jam::units::pages{32},
-                   .reserve = jam::units::pages{2}, .workers = workers}};
+    jam::heap heap{{.old = {.capacity = jam::units::pages{32}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{32}, .reserve = jam::units::pages{2}}, .workers = workers}};
     std::vector<jam::ptr<walking_node>> nodes;
     for (unsigned i = 0; i != count * 3; ++i) {
       static_cast<void>(heap.allocate(1)); // Every pointer must change on compaction.
@@ -367,8 +380,9 @@ void deep_cooperative_graph() noexcept {
           nodes[count + i], nodes[2 * count + i]}, i});
     auto root = heap.root(nodes[0]);
     for (unsigned round = 0; round != 5; ++round) {
-      walking_node::heap_begin = reinterpret_cast<std::uintptr_t>(heap.data());
-      walking_node::heap_end = walking_node::heap_begin + heap.used() * 8;
+      auto const & generation = root.get().is_young() ? heap.young() : heap.old();
+      walking_node::heap_begin = reinterpret_cast<std::uintptr_t>(generation.data());
+      walking_node::heap_end = walking_node::heap_begin + generation.used() * 8;
       walking_node::calls.store(0);
       heap.collect();
       check(walking_node::calls.load() == count * 3, "cooperative traversal visits each record once");
@@ -440,8 +454,7 @@ void cooperative_tree() noexcept {
   using tree_node = ::tree_node<Depth, Prefetch>;
   constexpr unsigned count = 8191;
   for (auto workers : {1u, 4u}) {
-    jam::heap heap{{.capacity = jam::units::pages{16},
-                   .reserve = jam::units::pages{2}, .workers = workers}};
+    jam::heap heap{{.old = {.capacity = jam::units::pages{16}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{16}, .reserve = jam::units::pages{2}}, .workers = workers}};
     std::vector<jam::ptr<tree_node>> nodes(count + 1);
     for (unsigned i = 1; i <= count; ++i) {
       static_cast<void>(heap.allocate(1));
@@ -486,8 +499,7 @@ static_assert(sizeof(patterned_node) == 24);
 
 void cooperative_claims() noexcept {
   for (bool pattern : {false, true}) {
-    jam::heap heap{{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2},
-                   .workers = 4}};
+    jam::heap heap{{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
     static_cast<void>(heap.allocate(30));
     // The six-slot pattern straddles a metadata word on the first collection.
     auto const a = heap.mk<patterned_node>();
@@ -536,7 +548,7 @@ void cooperative_claims() noexcept {
     }
   }
 
-  jam::heap heap{{.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}};
+  jam::heap heap{{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}}};
   static_cast<void>(heap.allocate(11));
   auto const tail = heap.mk<self_link>();
   auto root = heap.root(heap.mk<self_link>(tail).get());
@@ -558,8 +570,7 @@ void cooperative_claims() noexcept {
 
 void manifest_graph() noexcept {
   for (auto workers : {1u, 4u}) {
-    jam::heap heap{{.capacity = jam::units::pages{1024},
-                   .reserve = jam::units::pages{2}, .workers = workers}};
+    jam::heap heap{{.old = {.capacity = jam::units::pages{1024}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{1024}, .reserve = jam::units::pages{2}}, .workers = workers}};
     constexpr unsigned length = 100000;
     jam::ptr<manifest_node> at;
     for (unsigned i = 0; i != length; ++i) {
@@ -634,8 +645,7 @@ struct alignas(64) manifest_record {
 
 void nested_manifest_graph() noexcept {
   for (auto workers : {1u, 4u}) {
-    jam::heap heap{{.capacity = jam::units::pages{32},
-                   .reserve = jam::units::pages{2}, .workers = workers}};
+    jam::heap heap{{.old = {.capacity = jam::units::pages{32}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{32}, .reserve = jam::units::pages{2}}, .workers = workers}};
     static_cast<void>(heap.allocate(13));
     auto const a = heap.mk<payload>(71u, 83u);
     auto const b = heap.mk<payload>(97u, 101u);
@@ -687,8 +697,7 @@ void native_storage() {
   for (unsigned i = 0; i != lanes.size(); ++i) lanes[i] = 0x3f800000u + i * 17;
   T const expected = std::bit_cast<T>(lanes);
   for (unsigned workers : {1u, 4u}) {
-    jam::heap heap{{.capacity = jam::units::pages{128},
-                   .reserve = jam::units::pages{2}, .workers = workers}};
+    jam::heap heap{{.old = {.capacity = jam::units::pages{128}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{128}, .reserve = jam::units::pages{2}}, .workers = workers}};
     for (unsigned i = 0; i != 97; ++i) static_cast<void>(heap.mk<std::uint64_t>(i));
     auto direct = heap.root(heap.mk<T>(expected));
     auto outer = heap.root(heap.mk<native_record<T>>(direct.get(), expected));

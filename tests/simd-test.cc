@@ -40,9 +40,9 @@ void check_simd() { \
   using M = typename P::mask_type; \
   static_assert(sizeof(P) == sizeof(native::simd<std::uint32_t, N, A>)); \
   static_assert(alignof(P) == alignof(native::simd<std::uint32_t, N, A>)); \
-  static_assert(std::is_trivially_copyable_v<P> && std::is_standard_layout_v<P>); \
+  static_assert(!std::is_trivially_copyable_v<P> && std::is_standard_layout_v<P>); \
   for (unsigned workers : {1u, 4u}) { \
-    jam::heap heap{{.capacity=jam::units::pages{128}, .reserve=jam::units::pages{2}, .workers=workers}}; \
+    jam::heap heap{{.old = {.capacity=jam::units::pages{128}, .reserve=jam::units::pages{2}}, .young = {.capacity=jam::units::pages{128}, .reserve=jam::units::pages{2}}, .workers=workers}}; \
     jam::heap_scope scope{heap}; \
     for (unsigned i = 0; i != 17; ++i) static_cast<void>(jam::mk<std::uint64_t>(i)); \
     std::array<jam::ptr<simd_node>, N> targets{}; \
@@ -101,6 +101,35 @@ void check_simd() { \
           check(output[i] == (i % 2 == 0 ? std::uint64_t{1} << (i + 32) : 0), "64-bit member gather preserves lanes"); \
       } \
     } \
+    auto const old_target = (*direct)[0]; \
+    auto young_target = jam::mk<simd_node>(nullptr, 71u, 7.5f, std::uint64_t{91}); \
+    P mixed{old_target}; \
+    mixed[0] = young_target; \
+    *direct = mixed; \
+    *packed = W{mixed}; \
+    outer->pointers = mixed; \
+    outer->packs = W{mixed}; \
+    check(heap.remembered_size() == 6, "SIMD and wide assignment register exactly the young source lanes"); \
+    auto const gathered = gather(mixed, &simd_node::data); \
+    std::array<std::uint32_t, N> mixed_data{}; \
+    gathered.store(mixed_data.data()); \
+    check(mixed_data[0] == 71 && mixed_data[1] == 11, "gather combines old and young bases"); \
+    heap.collect_young(); \
+    check((*direct)[0]->data == 71 && (*packed).registers[1][0] == (*direct)[0] \
+          && outer->pointers[0] == (*direct)[0] && outer->packs.registers[0][0] == (*direct)[0], \
+          "minor collection forwards every heap-resident vector lane"); \
+    P replacement{jam::mk<simd_node>(nullptr, 81u, 8.5f, std::uint64_t{101})}; \
+    jam::unsafe_assign(*direct, replacement); \
+    direct->remember(); \
+    jam::assign(*packed, W{replacement}); \
+    replacement.store(&outer->pointers[0]); \
+    heap.collect_young(true); \
+    check(!(*direct)[0].is_young() && (*direct)[N - 1]->data == 81 \
+          && (*packed).registers[1][0] == (*direct)[0] && outer->pointers[N - 1] == (*direct)[0], \
+          "bulk stores and explicit registration survive promotion"); \
+    heap.collect(); \
+    check((*direct)[0]->data == 81 && outer->packs.registers[0][0]->data == 71, \
+          "full collection retains both generations after vector writes"); \
   } \
 }
 NATIVE_TARGET_VARIANTS(check, JAM_SIMD_CHECKS, JAM_TEST_TARGETS)

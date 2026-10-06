@@ -27,7 +27,7 @@ struct node {
 };
 
 int main() {
-  heap heap{{.capacity = 8_MiB, .reserve = 1_MiB, .workers = 4}};
+  heap heap{{.old = {.capacity = 8_MiB, .reserve = 1_MiB}, .young = {.capacity = 8_MiB, .reserve = 1_MiB}, .workers = 4}};
   heap_scope scope{heap};
 
   static_cast<void>(mk<node>());        // Unreachable.
@@ -138,22 +138,33 @@ slot for a chunk of up to 64 bits. Zero bits leave existing declarations alone.
 These operations belong to the visitor, not to `ptr`.
 
 `jam::mk<T>(args...)` forwards constructor arguments or aggregate fields into
-`T{args...}`, then copies the value into the heap and returns an unrooted
+`T{args...}`, then transports its bytes into the young generation and returns an unrooted
 `ptr<T>`. No preconstructed `T` is needed. Braced initialization rejects narrowing
 conversions; use `42u` for the node's unsigned data field. `nullptr` implicitly
-constructs a null ptr. `heap.load(ptr)` returns a value snapshot;
+constructs a null ptr. Construction happens before allocation can remap borrowed
+arguments, so `mk<node>(*existing)` also works across growth. `heap.load(ptr)`
+returns a value snapshot;
 `heap.store(ptr, value)` replaces
-the record without changing its type or extent. Types must be unqualified,
-trivially copyable, trivially copy constructible and standard-layout, with
-supported alignment. Construction
-must be `noexcept`; jam does not run payload destructors. Tracing support does
-not relax these storage requirements. In particular, standard-library tuples
-need not be trivially copyable or standard-layout. `std::tie` provides a tuple
+the record by assignment without changing its type or extent. Types must be
+unqualified and standard-layout, with supported alignment. Managed records must
+permit byte relocation: copying their representation to a new address and
+discarding the old storage must preserve their meaning, after managed pointers
+are forwarded. Compaction knows cells and masks, not object types; it stores no
+per-object move callback and invokes no constructors or destructors. No custom
+move operation is required. Self-references and cycles through `ptr<T>` work:
+their offsets are forwarded with the other edges. Raw pointers that depend on a
+record's physical address, and resources that require destruction, are unsuitable.
+Construction must be `noexcept`.
+
+Pointer copy and assignment barriers do not run during compaction. The collector
+maintains the remembered set itself. These nontrivial records rely on Jam's
+platform-specific byte-relocation contract, not ISO C++ trivial-copy guarantees;
+a manifest describes edges and does not prove relocatability. Standard-library
+tuples need not be standard-layout. `std::tie` provides a tuple
 view of existing fields without storing a tuple in the heap when a tuple view
 is useful; ordinary hooks can pass their fields directly to `visit`.
 
-Tracing reads each successfully claimed record in place. The claimant restores
-its typed C++ lifetime after earlier VM remapping or cell-wise relocation;
+Tracing reads each successfully claimed record in place;
 marking finishes before any further relocation. Visit ptr members **by reference
 from that supplied object**, including nested subobjects. A copied ptr no longer
 identifies the field's location. Borrowed record addresses and the visitor must
@@ -195,6 +206,29 @@ Allocation preserves offsets, but native `T*` and `T&` borrows obtained through
 requires exclusive access to the record and cannot overlap collection. Borrow
 again through a current pointer after movement. `data()` pointers and cell
 references have the same mapping lifetime.
+
+`collect_young()` collects only young objects. It starts from young roots and
+remembered old source slots, follows young edges, and leaves old objects unmoved
+and untraced. `collect_young(true)` appends the surviving young objects to old
+instead. `collect()` traces both generations and compacts all survivors into old.
+Both promotion and full collection empty young and clear the remembered set.
+Collection remains explicit; allocation does not trigger it automatically.
+
+Copying or assigning a young `ptr<T>` into old storage registers the source slot
+and its target tracer. Repeated writes deduplicate that slot; minor GC reads its
+current value. Both virtual aliases identify the same slot. Ending a pointer's
+lifetime removes its entry, so replacing a union alternative with scalar data
+cannot leave a stale typed root. Replacing the value with null or an old target
+may leave a harmless entry until promotion or full collection. Old objects that
+become unreachable are reclaimed by full collection, not by minor collection.
+
+Scalar, array, SIMD and wide pointer assignments obey this rule. SIMD stores
+register their destination lanes in bulk. `jam::assign` supplies bulk assignment
+for arrays and vector packs. `ptr::unsafe_assign` and the corresponding
+`jam::unsafe_assign` overloads copy encoded offsets without registering edges.
+The caller must then register every old-to-young destination before collection:
+use `heap.remember(slot)`, `heap.remember(span_of_slots)`, or a pointer vector's
+`.remember()`. Collector forwarding uses this unchecked path internally.
 
 `ptr<T>` provides equality and three-way comparison by offset within one heap.
 Compaction preserves the relative order of surviving objects, including alignment
@@ -273,22 +307,27 @@ This follows the sender-initiated algorithm in
 [Acar, Charguéraud and Rainey (2013)](https://www.chargueraud.org/research/2013/ppopp/full.pdf)
 and [PASL](https://github.com/deepsea-inria/pasl).
 
-The heap uses 32-bit offsets scaled by eight, permitting a 32 GiB heap and two
-managed fields in one cell. Each 256-byte rank block has 16 bytes of metadata;
+The high bit of each 32-bit pointer selects the generation: zero is old, one
+is young. The other 31 bits count eight-byte cells, allowing 16 GiB per generation
+and two managed fields in one cell. Old occupies the lower virtual address range. Each 256-byte rank block has 16 bytes of metadata;
 alignment adds one byte per 512 bytes. Records may have 8-, 16-, 32- or 64-byte
 alignment. Marking and compaction retain alignment groups as needed, and retained
 neighboring cells count toward the used size.
 
-Constructor options set initial capacity, reserve `N`, and one `workers` limit
-shared by marking and compaction. Capacity and reserve are `jam::units::pages`.
+`heap_options.old` and `.young` each specify initial `capacity`, compaction
+`reserve`, and `maximum`. All three use `jam::units::pages`. Maximum reserves a
+fixed virtual address range; backing grows as needed. One `workers` limit is
+shared by both generations, marking and compaction.
 The literals in `jam::literals` retain their units: `_B`, `_kB`, `_MB`, `_GB`,
 `_KiB`, `_MiB` and `_GiB`. Defaults are 1 MiB capacity
-and 256 KiB reserve. MiB units convert implicitly to pages; KiB units use
+and 256 KiB reserve per generation, with a 16 GiB maximum. MiB units convert implicitly to pages; KiB units use
 an explicit ceiling because a KiB is smaller than a page. Use
 `units::ceil<units::pages>(size)` for arbitrary byte counts. The capacity must
 hold at least twice the reserve.
 Any whole-page capacity is supported. `configuration()` reports the initial
-typed page counts; the low-level `capacity()` and `reserved()` accessors use cells.
+typed page counts. `old()` and `young()` expose each arena; their `capacity()`,
+`reserved()` and `used()` accessors use cells. The legacy raw allocation and
+arena accessors on `heap` refer to old; `mk<T>` always allocates in young.
 `workers` must be positive and includes the calling thread. One persistent
 pool serves both collection phases.
 
@@ -316,7 +355,7 @@ auto fractional = space<double, mebi>{size};  // 1.5 MiB.
 Compaction advances at most the reserved number of source pages past its earliest
 unfinished page.
 Ordinary collections step backward into the reserve through coherent virtual
-aliases. Allocation doubles the backing when needed, capped at 32 GiB; sparse
+aliases. Allocation doubles each generation’s backing up to its `maximum`; sparse
 collections can shrink it. `shrink_shift` selects the occupancy threshold:
 the default `2` shrinks below 1/4 full, `3` below 1/8, and `0` disables automatic
 shrinking. One collection can shrink once toward half capacity, rounded down to whole pages
@@ -374,9 +413,10 @@ the implementation, not runtime dispatch: call from a kernel compiled for that
 ISA and admitted on the current CPU. AVX2/AVX-512 use masked gathers for supported
 shapes; baseline and NEON read active lanes individually.
 
-On x86, member displacement is folded into the scalar base and unsigned cell
-offsets are rebased about 16 GiB, preserving the heap's full 32-GiB address range
-with signed gather indices scaled by eight. The member displacement uses Clang's
+On x86, member displacement is folded into each generation’s scalar base.
+The generation bit partitions the active mask between two masked gathers.
+The remaining 31-bit cell offset is a nonnegative signed index scaled by eight,
+covering the full 16 GiB range of each generation. The member displacement uses Clang's
 flat data-member-pointer ABI for standard-layout records (Itanium on Unix and the
 flat MS representation on Windows); extended MS member-pointer representations
 are rejected. No member pointer is applied to a fabricated object, and finding
@@ -392,7 +432,7 @@ Jam requires macOS, Linux or Windows 10 version 1803+, CMake 4.4+, Ninja
 and Clang 23+ with C++26 modules.
 Configuration probes the language features used by the implementation.
 Exceptions are enabled. Heap construction throws `std::length_error` above
-32 GiB; resource failures and failures during collection still terminate. Jam links
+16 GiB for either generation; resource failures and failures during collection still terminate. Jam links
 [native](https://github.com/ekmett/native), pinned at
 `4f5f6533417b2951b063581a3252c63de0024102`, for CPU/OS capability detection,
 source-targeted SIMD and attributes.

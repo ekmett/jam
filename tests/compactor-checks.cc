@@ -60,14 +60,36 @@ extern "C" void check_compactors() noexcept {
       check(actual == expected);
       check(actual[0] == sentinel);
       for (auto i = destination + 1; i != actual.size(); ++i) check(actual[i] == sentinel);
+      // Both tables contribute to full forwarding; minor forwarding must leave
+      // old offsets unchanged while retaining young's generation bit.
+      auto mixed = source;
+      for (unsigned cell = 0; cell != cells; ++cell)
+        for (unsigned slot = 0; slot != 2; ++slot) {
+          auto const shift = slot * 32;
+          auto const value = static_cast<std::uint32_t>(mixed[cell] >> shift);
+          if (value && ((cell + slot) & 1)
+              && (metadata[cell / 32].pointers & (std::uint64_t{1} << ((cell % 32) * 2 + slot))))
+            mixed[cell] |= std::uint64_t{0x80000000u} << shift;
+        }
+      for (bool minor : {false, true}) {
+        auto young = metadata;
+        for (auto & item : young) item.destination += minor ? 0x80000000u : 17u;
+        jam::detail::forwarding_tables tables{minor ? nullptr : metadata.data(), young.data()};
+        expected.fill(sentinel); actual.fill(sentinel);
+        baseline.move(mixed.data(), expected.data() + 1, metadata.data(), 0, blocks, tables);
+        variant.move(mixed.data(), actual.data() + 1, metadata.data(), 0, blocks, tables);
+        check(actual == expected);
+      }
+      baseline.move(source.data(), expected.data() + 1, metadata.data(), 0, blocks);
       // Loading several chunks ahead must still permit leftward in-place moves.
       auto overlapping = source;
       variant.move(overlapping.data(), overlapping.data(), metadata.data(), 0, blocks);
       for (unsigned i = 0; i != destination; ++i) check(overlapping[i] == expected[i + 1]);
       auto packed_expected = metadata, packed_actual = metadata;
-      auto const new_blocks = (destination + 31) / 32;
-      baseline.pack(packed_expected.data(), blocks, new_blocks);
-      variant.pack(packed_actual.data(), blocks, new_blocks);
+      for (auto & item : packed_expected) item.pointers = 0;
+      for (auto & item : packed_actual) item.pointers = 0;
+      baseline.pack(metadata.data(), packed_expected.data(), blocks);
+      variant.pack(metadata.data(), packed_actual.data(), blocks);
       for (std::size_t i = 0; i != blocks; ++i) {
         check(packed_actual[i].pointers == packed_expected[i].pointers);
         check(packed_actual[i].live == metadata[i].live);
