@@ -843,11 +843,11 @@ struct tracer<T> : detail::structural_tracer {
 /// \ingroup jam_heap
 export struct generation_options {
   /// \brief Initial ring capacity, including the compaction reserve.
-  units::pages capacity = 1_MiB;
+  units::pages capacity = units::mebibytes{1};
   /// \brief Gap reserved for bounded parallel compaction.
-  units::pages reserve = units::ceil<units::pages>(256_KiB);
+  units::pages reserve = units::ceil<units::pages>(units::kibibytes{256});
   /// \brief Maximum ring size; reserves virtual addresses without committing backing.
-  units::pages maximum = 16_GiB;
+  units::pages maximum = units::gibibytes{16};
   /// \brief Shrink below 1/2^shift occupancy; zero disables shrinking.
   unsigned shrink_shift = 2;
 };

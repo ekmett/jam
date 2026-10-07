@@ -69,6 +69,8 @@ operation alone is not enough. `remembered_size()` reports the retained slots.
 ## Options
 
 ```cpp
+import jam.unqualified;
+
 heap h{{.old = {.capacity = 8_MiB, .reserve = 1_MiB, .maximum = 1_GiB},
         .young = {.capacity = 8_MiB, .reserve = 1_MiB, .maximum = 64_MiB},
         .workers = 4}};
@@ -100,7 +102,6 @@ units may need `ceil<pages>`. The literals retain their units, rather than quiet
 turning a byte count into a `size_t`.
 
 ```cpp
-using namespace jam;
 using namespace jam::units;
 
 bytes size = 1536_KiB;
@@ -119,7 +120,8 @@ there is no implicit conversion to an integer. Integer overflow is checked.
 other choices, with ties to even for `round`.
 
 Literals are `_B`, `_kB`, `_MB`, `_GB`, `_KiB`, `_MiB` and `_GiB`, available through
-`jam` or `jam::literals`. `jam.unqualified` also exposes the unit types. Page size
+`jam::units`, alongside the unit types and conversions. `jam.unqualified` exposes
+both the types and literals without qualification. Page size
 is a build invariant; cross builds supply `JAM_PAGE_BYTES`.
 
 [Mapping and compaction](collector.md) · [Topic guides](README.md)

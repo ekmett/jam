@@ -114,6 +114,7 @@ void compact(heap_type & heap, std::vector<unsigned char> const & live,
 
 void byte_literals() noexcept {
   using namespace jam;
+  using namespace jam::units;
   static_assert(0_KiB == 0_B && 1_KiB == 1024_B);
   static_assert(1_MiB == 1048576_B && 1_GiB == 1073741824_B);
   heap_type heap{jam::heap_options{.old = {.capacity = 3_MiB, .reserve = units::ceil<units::pages>(256_KiB)}, .young = {.capacity = 3_MiB, .reserve = units::ceil<units::pages>(256_KiB)}}};
@@ -357,6 +358,7 @@ void mapping_resources_are_released() noexcept {
 }
 void excessive_capacity_throws_before_mapping() noexcept {
   using namespace jam;
+  using namespace jam::units;
   for (bool young : {false, true}) {
     heap_options options;
     (young ? options.young : options.old).maximum = 17_GiB;

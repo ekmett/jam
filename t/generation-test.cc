@@ -10,6 +10,7 @@
 #include <utility>
 import jam;
 using namespace jam;
+using namespace jam::units;
 void check(bool ok, char const * message) {
   if (!ok) { std::fprintf(stderr, "%s\n", message); std::abort(); }
 }

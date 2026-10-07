@@ -10,11 +10,10 @@
 import jam;
 
 namespace adl_check {
-using jam::operator""_KiB;
+using jam::units::operator""_KiB;
 static_assert(ceil<jam::units::pages>(1_KiB).count() == 1);
 }
 
-using namespace jam;
 using namespace jam::units;
 
 static_assert(std::same_as<decltype(1_KiB), kibibytes>);

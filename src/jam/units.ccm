@@ -72,6 +72,7 @@ constexpr R arithmetic(R a, R b) noexcept {
 }
 }
 
+/// \brief Typed storage sizes, conversions and byte literals.
 export namespace jam::units {
 /// \brief A count of storage units; Ratio measures one unit in bytes.
 /// Integer arithmetic and conversions terminate on overflow. Floating arithmetic
@@ -242,38 +243,33 @@ using kibibytes = space<std::size_t, kibi>; ///< Groups of 1024 bytes.
 using mebibytes = space<std::size_t, mebi>; ///< Groups of 1048576 bytes.
 using gibibytes = space<std::size_t, gibi>; ///< Groups of 1073741824 bytes.
 using pages = space<std::size_t, std::ratio<JAM_PAGE_BYTES>>; ///< Platform pages, fixed at build time.
-}
 
-export namespace jam {
-/// \brief Decimal and binary byte literals; counts retain their units.
-inline namespace literals {
 /// \brief Bytes.
-[[nodiscard]] consteval units::bytes operator""_B(unsigned long long n) noexcept { return units::bytes{n}; }
+[[nodiscard]] consteval bytes operator""_B(unsigned long long n) noexcept { return bytes{n}; }
 /// \brief Fractional B count.
-[[nodiscard]] consteval units::space<long double, std::ratio<1>> operator""_B(long double n) noexcept { return units::space<long double, std::ratio<1>>{n}; }
+[[nodiscard]] consteval space<long double, std::ratio<1>> operator""_B(long double n) noexcept { return space<long double, std::ratio<1>>{n}; }
 /// \brief Kilobytes.
-[[nodiscard]] consteval units::kilobytes operator""_kB(unsigned long long n) noexcept { return units::kilobytes{n}; }
+[[nodiscard]] consteval kilobytes operator""_kB(unsigned long long n) noexcept { return kilobytes{n}; }
 /// \brief Fractional kB count.
-[[nodiscard]] consteval units::space<long double, std::kilo> operator""_kB(long double n) noexcept { return units::space<long double, std::kilo>{n}; }
+[[nodiscard]] consteval space<long double, std::kilo> operator""_kB(long double n) noexcept { return space<long double, std::kilo>{n}; }
 /// \brief Megabytes.
-[[nodiscard]] consteval units::megabytes operator""_MB(unsigned long long n) noexcept { return units::megabytes{n}; }
+[[nodiscard]] consteval megabytes operator""_MB(unsigned long long n) noexcept { return megabytes{n}; }
 /// \brief Fractional MB count.
-[[nodiscard]] consteval units::space<long double, std::mega> operator""_MB(long double n) noexcept { return units::space<long double, std::mega>{n}; }
+[[nodiscard]] consteval space<long double, std::mega> operator""_MB(long double n) noexcept { return space<long double, std::mega>{n}; }
 /// \brief Gigabytes.
-[[nodiscard]] consteval units::gigabytes operator""_GB(unsigned long long n) noexcept { return units::gigabytes{n}; }
+[[nodiscard]] consteval gigabytes operator""_GB(unsigned long long n) noexcept { return gigabytes{n}; }
 /// \brief Fractional GB count.
-[[nodiscard]] consteval units::space<long double, std::giga> operator""_GB(long double n) noexcept { return units::space<long double, std::giga>{n}; }
+[[nodiscard]] consteval space<long double, std::giga> operator""_GB(long double n) noexcept { return space<long double, std::giga>{n}; }
 /// \brief Kibibytes.
-[[nodiscard]] consteval units::kibibytes operator""_KiB(unsigned long long n) noexcept { return units::kibibytes{n}; }
+[[nodiscard]] consteval kibibytes operator""_KiB(unsigned long long n) noexcept { return kibibytes{n}; }
 /// \brief Fractional KiB count.
-[[nodiscard]] consteval units::space<long double, units::kibi> operator""_KiB(long double n) noexcept { return units::space<long double, units::kibi>{n}; }
+[[nodiscard]] consteval space<long double, kibi> operator""_KiB(long double n) noexcept { return space<long double, kibi>{n}; }
 /// \brief Mebibytes.
-[[nodiscard]] consteval units::mebibytes operator""_MiB(unsigned long long n) noexcept { return units::mebibytes{n}; }
+[[nodiscard]] consteval mebibytes operator""_MiB(unsigned long long n) noexcept { return mebibytes{n}; }
 /// \brief Fractional MiB count.
-[[nodiscard]] consteval units::space<long double, units::mebi> operator""_MiB(long double n) noexcept { return units::space<long double, units::mebi>{n}; }
+[[nodiscard]] consteval space<long double, mebi> operator""_MiB(long double n) noexcept { return space<long double, mebi>{n}; }
 /// \brief Gibibytes.
-[[nodiscard]] consteval units::gibibytes operator""_GiB(unsigned long long n) noexcept { return units::gibibytes{n}; }
+[[nodiscard]] consteval gibibytes operator""_GiB(unsigned long long n) noexcept { return gibibytes{n}; }
 /// \brief Fractional GiB count.
-[[nodiscard]] consteval units::space<long double, units::gibi> operator""_GiB(long double n) noexcept { return units::space<long double, units::gibi>{n}; }
-}
+[[nodiscard]] consteval space<long double, gibi> operator""_GiB(long double n) noexcept { return space<long double, gibi>{n}; }
 }
