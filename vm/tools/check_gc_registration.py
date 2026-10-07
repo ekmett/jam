@@ -6,14 +6,26 @@ import os
 from pathlib import Path
 from platform_paths import NATIVE_BUILD
 import subprocess
-from platform_paths import jdk_home
+from platform_paths import jdk_home, java_tool
+from build_bridge import build as build_bridge
+from build_jni_test import build as build_jni_test
 
 root = Path(__file__).resolve().parents[1]
 vm = Path(os.environ.get('JAM_JAVA', jdk_home() / 'bin/java'))
+home = vm.parent.parent
+classes = root / 'build-registration-tests'
+native = classes / 'native'
+jar = root / 'build/bridge/jam-vm.jar'
+(root / 'evidence').mkdir(exist_ok=True)
+build_bridge(home)
+build_jni_test(home, native, collector=True)
+subprocess.run([str(java_tool(home, 'javac')), '-cp', str(jar), '-d', str(classes),
+                *map(str, (root / 'tests/java' / name for name in
+                           ('CollectorIdentitySmoke.java', 'HeapSmoke.java', 'JamWeak.java')))], check=True)
 common = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-Xlog:gc',
           '--enable-native-access=ALL-UNNAMED',
-          '-Djava.library.path=' + os.pathsep.join(map(str, (root / 'build/bridge/lib', NATIVE_BUILD))),
-          '-cp', os.pathsep.join(str(root / p) for p in ('build-java-tests', 'build/bridge/jam-vm.jar'))]
+          '-Djava.library.path=' + os.pathsep.join(map(str, (root / 'build/bridge/lib', NATIVE_BUILD, native))),
+          '-cp', os.pathsep.join(map(str, (classes, jar)))]
 
 def check(name, flags, args, expected, success=True, absent=()):
     result = subprocess.run([str(vm), *common, *flags, *args], cwd=root,
