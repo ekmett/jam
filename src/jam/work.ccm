@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
+/// \file
+/// \brief Shared workers and stochastic marking frontiers.
+
 module;
 
 #include <native/attributes.h>
@@ -27,9 +30,9 @@ module;
 extern "C" long __builtin_expect(long, long) noexcept;
 #endif
 
-export module jam:work;
+export module jam.work;
 
-namespace jam::detail {
+export namespace jam::detail {
 
 // A phase supplies a bounded number of long-lived callbacks. The caller is
 // one worker; callbacks and their context remain borrowed until run returns.
@@ -69,87 +72,25 @@ private:
     return activation::current != nullptr;
   }
 
-  static void execute(range work, callback fn, void * state) noexcept {
-    activation scope;
-    for (auto index = work.begin; index < work.end; ++index) fn(state, index);
-  }
+  static void execute(range work, callback fn, void * state) noexcept;
 
   // scheduler_mutex is held and pending_count > 0. Transfers preserve the
   // remaining count, which includes queued, claimed and executing indices.
   [[nodiscard]]
-  range take(std::size_t worker) noexcept {
-    if (!mailboxes[worker]) {
-      for (std::size_t distance = 1; distance < worker_count; ++distance) {
-        auto const victim = (worker + distance) % worker_count;
-        auto & source = mailboxes[victim];
-        if (!source) continue;
-        auto & pending = *source;
-        auto const size = pending.end - pending.begin;
-        auto const split = size > chunk_grain ? pending.begin + size / 2
-                                             : pending.begin;
-        mailboxes[worker] = range{split, pending.end};
-        if (split == pending.begin) source.reset();
-        else pending.end = split;
-        break;
-      }
-    }
-    auto & pending = *mailboxes[worker];
-    range const work{pending.begin,
-                    pending.begin + std::min(chunk_grain, pending.end - pending.begin)};
-    pending.begin = work.end;
-    if (pending.begin == pending.end) mailboxes[worker].reset();
-    pending_count -= work.end - work.begin;
-    return work;
-  }
+  range take(std::size_t worker) noexcept;
 
-  void complete(range work) noexcept {
-    bool finished;
-    {
-      std::lock_guard lock(scheduler_mutex);
-      remaining_count -= work.end - work.begin;
-      finished = remaining_count == 0;
-    }
-    if (finished) ready.notify_all();
-  }
+  void complete(range work) noexcept;
 
-  void worker_loop(std::stop_token stop, std::size_t worker) noexcept {
-    for (;;) {
-      std::unique_lock lock(scheduler_mutex);
-      ready.wait(lock, [&] noexcept {
-        return stop.stop_requested() || pending_count != 0;
-      });
-      if (stop.stop_requested()) return;
-      auto const work = take(worker);
-      auto const fn = function;
-      auto * const state = context;
-      lock.unlock();
-      execute(work, fn, state);
-      complete(work);
-    }
-  }
+  void worker_loop(std::stop_token stop, std::size_t worker) noexcept;
 
-  void stop_threads() noexcept {
-    {
-      std::lock_guard lock(scheduler_mutex);
-      for (auto & thread : threads) thread.request_stop();
-    }
-    ready.notify_all();
-    threads.clear();
-  }
+  void stop_threads() noexcept;
 
 public:
-  explicit work_pool(std::size_t workers = 1) noexcept
-      : worker_count(std::max(workers, std::size_t{1})), mailboxes(worker_count) {
-    threads.reserve(worker_count - 1);
-    for (std::size_t worker = 1; worker < worker_count; ++worker)
-      threads.emplace_back([this, worker](std::stop_token stop) noexcept {
-        worker_loop(stop, worker);
-      });
-  }
+  explicit work_pool(std::size_t workers = 1) noexcept;
 
   work_pool(work_pool const &) = delete;
   work_pool & operator=(work_pool const &) = delete;
-  ~work_pool() noexcept { stop_threads(); }
+  ~work_pool() noexcept;
 
   [[nodiscard]]
   std::size_t workers() const noexcept { return worker_count; }
@@ -162,45 +103,7 @@ public:
   // External calls serialize. A nested call from any pool callback runs
   // inline, avoiding both same-pool and A -> B -> A waiting cycles.
   void run(std::size_t count, callback fn, void * state,
-           std::size_t grain = 1) noexcept {
-    if (!count) return;
-    assert(fn != nullptr);
-    grain = std::max(grain, std::size_t{1});
-    if (executing_here()) {
-      execute({0, count}, fn, state);
-      return;
-    }
-    std::lock_guard bulk_lock(bulk_mutex);
-    if (worker_count == 1 || count <= grain) {
-      execute({0, count}, fn, state);
-      return;
-    }
-    {
-      std::lock_guard lock(scheduler_mutex);
-      mailboxes[0] = range{0, count};
-      function = fn;
-      context = state;
-      chunk_grain = grain;
-      pending_count = count;
-      remaining_count = count;
-    }
-    ready.notify_all();
-    for (;;) {
-      std::unique_lock lock(scheduler_mutex);
-      ready.wait(lock, [&] noexcept {
-        return remaining_count == 0 || pending_count != 0;
-      });
-      if (remaining_count == 0) {
-        function = nullptr;
-        context = nullptr;
-        return;
-      }
-      auto const work = take(0);
-      lock.unlock();
-      execute(work, fn, state);
-      complete(work);
-    }
-  }
+           std::size_t grain = 1) noexcept;
 };
 
 // Sender-initiated private queues: Acar/Chargueraud/Rainey, PPoPP 2013,
@@ -339,4 +242,123 @@ public:
   }
 };
 
+}
+
+namespace jam::detail {
+void work_pool::execute(range work, callback fn, void * state) noexcept {
+  activation scope;
+  for (auto index = work.begin; index < work.end; ++index) fn(state, index);
+}
+
+work_pool::range work_pool::take(std::size_t worker) noexcept {
+  if (!mailboxes[worker]) {
+    for (std::size_t distance = 1; distance < worker_count; ++distance) {
+      auto const victim = (worker + distance) % worker_count;
+      auto & source = mailboxes[victim];
+      if (!source) continue;
+      auto & pending = *source;
+      auto const size = pending.end - pending.begin;
+      auto const split = size > chunk_grain ? pending.begin + size / 2
+                                           : pending.begin;
+      mailboxes[worker] = range{split, pending.end};
+      if (split == pending.begin) source.reset();
+      else pending.end = split;
+      break;
+    }
+  }
+  auto & pending = *mailboxes[worker];
+  range const work{pending.begin,
+                  pending.begin + std::min(chunk_grain, pending.end - pending.begin)};
+  pending.begin = work.end;
+  if (pending.begin == pending.end) mailboxes[worker].reset();
+  pending_count -= work.end - work.begin;
+  return work;
+}
+
+void work_pool::complete(range work) noexcept {
+  bool finished;
+  {
+    std::lock_guard lock(scheduler_mutex);
+    remaining_count -= work.end - work.begin;
+    finished = remaining_count == 0;
+  }
+  if (finished) ready.notify_all();
+}
+
+void work_pool::worker_loop(std::stop_token stop, std::size_t worker) noexcept {
+  for (;;) {
+    std::unique_lock lock(scheduler_mutex);
+    ready.wait(lock, [&] noexcept {
+      return stop.stop_requested() || pending_count != 0;
+    });
+    if (stop.stop_requested()) return;
+    auto const work = take(worker);
+    auto const fn = function;
+    auto * const state = context;
+    lock.unlock();
+    execute(work, fn, state);
+    complete(work);
+  }
+}
+
+void work_pool::stop_threads() noexcept {
+  {
+    std::lock_guard lock(scheduler_mutex);
+    for (auto & thread : threads) thread.request_stop();
+  }
+  ready.notify_all();
+  threads.clear();
+}
+
+work_pool::work_pool(std::size_t workers) noexcept
+    : worker_count(std::max(workers, std::size_t{1})), mailboxes(worker_count) {
+  threads.reserve(worker_count - 1);
+  for (std::size_t worker = 1; worker < worker_count; ++worker)
+    threads.emplace_back([this, worker](std::stop_token stop) noexcept {
+      worker_loop(stop, worker);
+    });
+}
+
+work_pool::~work_pool() noexcept { stop_threads(); }
+
+void work_pool::run(std::size_t count, callback fn, void * state,
+         std::size_t grain) noexcept {
+  if (!count) return;
+  assert(fn != nullptr);
+  grain = std::max(grain, std::size_t{1});
+  if (executing_here()) {
+    execute({0, count}, fn, state);
+    return;
+  }
+  std::lock_guard bulk_lock(bulk_mutex);
+  if (worker_count == 1 || count <= grain) {
+    execute({0, count}, fn, state);
+    return;
+  }
+  {
+    std::lock_guard lock(scheduler_mutex);
+    mailboxes[0] = range{0, count};
+    function = fn;
+    context = state;
+    chunk_grain = grain;
+    pending_count = count;
+    remaining_count = count;
+  }
+  ready.notify_all();
+  for (;;) {
+    std::unique_lock lock(scheduler_mutex);
+    ready.wait(lock, [&] noexcept {
+      return remaining_count == 0 || pending_count != 0;
+    });
+    if (remaining_count == 0) {
+      function = nullptr;
+      context = nullptr;
+      return;
+    }
+    auto const work = take(0);
+    lock.unlock();
+    execute(work, fn, state);
+    complete(work);
+  }
+}
 }

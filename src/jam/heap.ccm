@@ -6,9 +6,6 @@
  * \defgroup jam_heap Word heap
  */
 module;
-#if defined(__linux__) && !defined(_GNU_SOURCE)
-#define _GNU_SOURCE
-#endif
 #include <native/attributes.h>
 #include <cstdio>
 #include <cstdlib>
@@ -16,7 +13,6 @@ module;
 #include <array>
 #include <atomic>
 #include <cassert>
-#include <cerrno>
 #include <cstddef>
 #include <concepts>
 #include <compare>
@@ -29,20 +25,6 @@ module;
 #include <vector>
 #include <deque>
 #include <unordered_map>
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
-#if defined(__APPLE__)
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
-#elif !defined(__linux__) && !defined(_WIN32)
-#error "jam requires macOS, Linux or Windows virtual-memory aliases"
-#endif
 
 #include <bit>
 #include <cstdint>
@@ -51,388 +33,17 @@ module;
 #include <span>
 #include <stdexcept>
 
-
-export module jam:heap;
-import :work;
-import :packed;
-export import :units;
-
-namespace jam::detail {
-
-native_cold native_noreturn
-inline void heap_failure(char const * operation, int code = 0) noexcept {
-  std::fprintf(stderr, "jam: %s (%d)\n", operation, code);
-  std::abort();
-}
-
-// One reservation gives both generations stable, ordered address ranges. Only
-// the active ring views acquire backing; maximum capacities reserve address space.
-class generation_reservation {
-  std::byte * base_;
-  std::size_t bytes_;
-public:
-  generation_reservation(std::size_t old_maximum, std::size_t young_maximum) noexcept
-      : bytes_(2 * (old_maximum + young_maximum)) {
-#if defined(_WIN32)
-    base_ = static_cast<std::byte *>(::VirtualAlloc2(nullptr, nullptr, bytes_,
-      MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0));
-    if (!base_) heap_failure("reserve generation address space", ::GetLastError());
-#else
-    auto * p = ::mmap(nullptr, bytes_, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) heap_failure("reserve generation address space", errno);
-    base_ = static_cast<std::byte *>(p);
-#endif
-  }
-  generation_reservation(generation_reservation const &) = delete;
-  ~generation_reservation() noexcept {
-#if defined(_WIN32)
-    MEMORY_BASIC_INFORMATION region{};
-    if (!::VirtualQuery(base_, &region, sizeof(region))) heap_failure("query generation reservation", ::GetLastError());
-    if (region.RegionSize != bytes_ &&
-        !::VirtualFree(base_, bytes_, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
-      heap_failure("coalesce generation reservation", ::GetLastError());
-    if (!::VirtualFree(base_, 0, MEM_RELEASE)) heap_failure("release generation reservation", ::GetLastError());
-#else
-    if (::munmap(base_, bytes_)) heap_failure("release generation reservation", errno);
-#endif
-  }
-  std::byte * data() const noexcept { return base_; }
-};
-
-/// \brief Two adjacent coherent views of one circular heap's backing pages.
-/// \details Resizing aliases surviving pages rather than copying their contents.
-class heap_mapping {
-#if defined(_WIN32)
-  struct backing {
-    HANDLE handle;
-    explicit backing(std::size_t bytes) noexcept
-      : handle(::CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-          static_cast<DWORD>(bytes >> 32), static_cast<DWORD>(bytes), nullptr)) {
-      if (!handle) system_failure("create heap backing");
-    }
-    ~backing() noexcept { ::CloseHandle(handle); }
-  };
-#endif
-  struct span {
-    std::size_t begin, end;
-#if defined(_WIN32)
-    std::shared_ptr<backing> section;
-    std::size_t offset;
-#endif
-  };
-  struct reservation {};
-  std::byte * address = nullptr;
-  std::size_t capacity = 0;
-  std::size_t fixed_extent = 0;
-  // Linux's zero-old-size mremap must remain within one original VMA/object.
-  std::vector<span> spans;
-
-  [[noreturn]] static void system_failure(char const * operation) noexcept {
-#if defined(_WIN32)
-    heap_failure(operation, static_cast<int>(::GetLastError()));
-#else
-    heap_failure(operation, errno);
-#endif
-  }
-  static void validate_size(std::size_t bytes) noexcept {
-    if (!bytes || bytes % page_size() || bytes > std::numeric_limits<std::size_t>::max() / 2)
-      heap_failure("capacity must be a nonzero whole-page size");
-  }
-  explicit heap_mapping(reservation, std::size_t bytes) noexcept {
-    validate_size(bytes);
-#if defined(_WIN32)
-    auto const result = ::VirtualAlloc2(nullptr, nullptr, bytes * 2,
-      MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
-    if (!result) system_failure("reserve heap placeholders");
-#else
-    auto const result = ::mmap(nullptr, bytes * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (result == MAP_FAILED) system_failure("jam: reserve virtual memory");
-#endif
-    address = static_cast<std::byte *>(result);
-    capacity = bytes;
-  }
-#if defined(_WIN32)
-  static void alias(span const & source, std::byte * target, std::size_t count,
-                    std::size_t offset = 0) noexcept {
-    MEMORY_BASIC_INFORMATION region{};
-    if (!::VirtualQuery(target, &region, sizeof(region))) system_failure("query heap placeholder");
-    // VirtualQuery starts at the queried page, which can be inside a placeholder.
-    // Query its allocation base before deciding whether either end needs splitting.
-    if (region.State == MEM_RESERVE && region.BaseAddress != region.AllocationBase &&
-        !::VirtualQuery(region.AllocationBase, &region, sizeof(region)))
-      system_failure("query whole heap placeholder");
-    auto const begin = static_cast<std::byte *>(region.BaseAddress);
-    auto const prefix = static_cast<std::size_t>(target - begin);
-    if (region.State != MEM_RESERVE || prefix > region.RegionSize || count > region.RegionSize - prefix)
-      heap_failure("heap alias requires a containing placeholder");
-    if (prefix && !::VirtualFree(begin, prefix, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
-      system_failure("split heap placeholder prefix");
-    if (count < region.RegionSize - prefix &&
-        !::VirtualFree(target, count, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
-      system_failure("split heap placeholder suffix");
-    if (!::MapViewOfFile3(source.section->handle, ::GetCurrentProcess(), target,
-          source.offset + offset, count, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0))
-      system_failure("alias heap backing");
-  }
-#else
-  static void alias(std::byte * source, std::byte * target, std::size_t count) noexcept {
 #if defined(__APPLE__)
-    auto destination = reinterpret_cast<mach_vm_address_t>(target);
-    vm_prot_t current = 0, maximum = 0;
-    auto const result = ::mach_vm_remap(::mach_task_self(), &destination, count, 0,
-      VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, ::mach_task_self(),
-      reinterpret_cast<mach_vm_address_t>(source), false, &current, &maximum, VM_INHERIT_SHARE);
-    if (result != KERN_SUCCESS)
-      heap_failure("alias virtual memory", result);
-    assert(destination == reinterpret_cast<mach_vm_address_t>(target));
-#else
-    auto const result = ::mremap(source, 0, count, MREMAP_MAYMOVE | MREMAP_FIXED, target);
-    if (result == MAP_FAILED) system_failure("jam: alias virtual memory");
-    assert(result == target);
+// Keep the SDK assert builtin in the global module across module boundaries.
+extern "C" long __builtin_expect(long, long) noexcept;
 #endif
-  }
-#endif
-  void fresh(std::size_t begin, std::size_t count) noexcept {
-    if (!count) return;
-#if defined(_WIN32)
-    spans.push_back({begin, begin + count, std::make_shared<backing>(count), 0});
-    alias(spans.back(), address + begin, count);
-#else
-    auto const result = ::mmap(address + begin, count, PROT_READ | PROT_WRITE,
-      MAP_FIXED | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (result == MAP_FAILED) system_failure("jam: map fresh backing");
-    spans.push_back({begin, begin + count});
-#endif
-  }
-  void finish_aliases() noexcept {
-    std::sort(spans.begin(), spans.end(), [](auto const & a, auto const & b) noexcept { return a.begin < b.begin; });
-    for (auto const & s : spans)
-#if defined(_WIN32)
-      alias(s, address + capacity + s.begin, s.end - s.begin);
-#else
-      alias(address + s.begin, address + capacity + s.begin, s.end - s.begin);
-#endif
-  }
-  void discard_gap(std::size_t start, std::size_t live) const noexcept {
-#if defined(_WIN32)
-    // Advisory discard releases dead physical pages; a partially retained section
-    // keeps its commit charge until the last surviving view/handle is released.
-    for (auto const & s : spans) {
-      auto const discard = [&](std::size_t begin, std::size_t end) noexcept {
-        begin = std::max(begin, s.begin);
-        end = std::min(end, s.end);
-        if (begin < end) static_cast<void>(::VirtualAlloc(address + begin, end - begin, MEM_RESET, PAGE_READWRITE));
-      };
-      if (start + live <= capacity) {
-        discard(0, start);
-        discard(start + live, capacity);
-      } else discard(start + live - capacity, start);
-    }
-#else
-    auto const begin = (start + live) % capacity;
-    auto const count = capacity - live;
-    auto const first = std::min(count, capacity - begin);
-#if defined(__APPLE__)
-    constexpr auto advice = MADV_FREE_REUSABLE;
-#else
-    constexpr auto advice = MADV_REMOVE;
-#endif
-    // dev: advisory release; kernels may retain dead pages until memory pressure.
-    if (first) static_cast<void>(::madvise(address + begin, first, advice));
-    if (count > first) static_cast<void>(::madvise(address, count - first, advice));
-#endif
-  }
 
-  void reset_fixed() noexcept {
-    assert(fixed_extent);
-#if defined(_WIN32)
-    for (auto const & s : spans) {
-      if (!::UnmapViewOfFile2(::GetCurrentProcess(), address + s.begin, MEM_PRESERVE_PLACEHOLDER) ||
-          !::UnmapViewOfFile2(::GetCurrentProcess(), address + capacity + s.begin, MEM_PRESERVE_PLACEHOLDER))
-        system_failure("restore generation placeholders");
-    }
-    MEMORY_BASIC_INFORMATION region{};
-    if (!::VirtualQuery(address, &region, sizeof(region))) system_failure("query generation placeholder");
-    if (region.RegionSize < fixed_extent &&
-        !::VirtualFree(address, fixed_extent, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
-      system_failure("coalesce generation placeholders");
-#else
-    if (::mmap(address, fixed_extent, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED)
-      system_failure("restore generation reservation");
-#endif
-    spans.clear();
-  }
-
-public:
-  /// \brief Reserve \p bytes of backing and twice that amount of virtual space.
-  explicit heap_mapping(std::size_t bytes) noexcept : heap_mapping(reservation{}, bytes) {
-    spans.reserve(1);
-    fresh(0, bytes);
-    finish_aliases();
-  }
-  heap_mapping(std::size_t bytes, std::byte * base, std::size_t maximum) noexcept
-      : address(base), capacity(bytes), fixed_extent(2 * maximum) {
-    validate_size(bytes);
-    if (bytes > maximum) heap_failure("generation exceeds reserved address range");
-    spans.reserve(1);
-    fresh(0, bytes);
-    finish_aliases();
-  }
-  // Stage surviving aliases before touching the fixed range: source and target
-  // rings may overlap during growth, shrinking or view rotation.
-  void replace(heap_mapping & staged) noexcept {
-    if (!fixed_extent) { swap(staged); return; }
-    if (staged.capacity * 2 > fixed_extent) heap_failure("generation growth exceeds maximum");
-    reset_fixed();
-    capacity = staged.capacity;
-    for (auto const & s : staged.spans) {
-#if defined(_WIN32)
-      alias(s, address + s.begin, s.end - s.begin);
-#else
-      alias(staged.address + s.begin, address + s.begin, s.end - s.begin);
-#endif
-    }
-    spans = staged.spans;
-    finish_aliases();
-  }
-  heap_mapping(heap_mapping const &) = delete;
-  heap_mapping & operator=(heap_mapping const &) = delete;
-  heap_mapping(heap_mapping && other) noexcept
-    : address(std::exchange(other.address, nullptr)), capacity(std::exchange(other.capacity, 0)),
-      fixed_extent(std::exchange(other.fixed_extent, 0)), spans(std::move(other.spans)) {}
-  heap_mapping & operator=(heap_mapping && other) noexcept { swap(other); return *this; }
-  /// \brief Release both virtual views.
-  ~heap_mapping() noexcept {
-    if (!address) return;
-    if (fixed_extent) { reset_fixed(); return; }
-#if defined(_WIN32)
-    for (auto const & s : spans) {
-      ::UnmapViewOfFile(address + s.begin);
-      ::UnmapViewOfFile(address + capacity + s.begin);
-    }
-#else
-    static_cast<void>(::munmap(address, capacity * 2));
-#endif
-  }
-  /// \brief The first of the two adjacent views.
-  native_inline native_pure std::byte * data() const noexcept { return address; }
-  /// \brief Capacity of one view, in bytes.
-  native_inline native_pure std::size_t bytes() const noexcept { return capacity; }
-  /// \brief Native OS page size, also the mapping granularity.
-  static std::size_t page_size() noexcept {
-#if defined(_WIN32)
-    SYSTEM_INFO info{};
-    ::GetSystemInfo(&info);
-    return info.dwPageSize;
-#else
-    return static_cast<std::size_t>(::getpagesize());
-#endif
-  }
-  /// \brief Publish a logical arc into a caller-owned, page-aligned reservation.
-  /// \pre Mutators are stopped. Target does not overlap either private ring view.
-  /// On Windows, target is an unmapped placeholder containing the whole arc.
-  void publish(std::size_t start, std::byte * target, std::size_t count) const noexcept {
-    if (start >= capacity || start % page_size() || count % page_size() ||
-        count > capacity || reinterpret_cast<std::uintptr_t>(target) % page_size())
-      heap_failure("invalid published heap arc");
-    while (count) {
-      auto const where = std::lower_bound(spans.begin(), spans.end(), start,
-        [](span const & s, std::size_t value) noexcept { return s.end <= value; });
-      assert(where != spans.end() && where->begin <= start);
-      auto const part = std::min(count, where->end - start);
-#if defined(_WIN32)
-      alias(*where, target, part, start - where->begin);
-#else
-      alias(address + start, target, part);
-#endif
-      start = (start + part) % capacity;
-      target += part;
-      count -= part;
-    }
-  }
-  /// \brief Restore an exact published window to inaccessible reserved memory.
-  /// \pre The window consists entirely of unmodified views published by this API.
-  static void unpublish(std::byte * target, std::size_t count) noexcept {
-    if (!count || count % page_size() || reinterpret_cast<std::uintptr_t>(target) % page_size())
-      heap_failure("invalid unpublished heap window");
-#if defined(_WIN32)
-    auto * cursor = target;
-    auto remaining = count;
-    std::size_t views = 0;
-    while (remaining) {
-      MEMORY_BASIC_INFORMATION region{};
-      if (!::VirtualQuery(cursor, &region, sizeof(region))) system_failure("query published heap view");
-      if (region.AllocationBase != cursor || region.BaseAddress != cursor || region.Type != MEM_MAPPED ||
-          region.State != MEM_COMMIT || !region.RegionSize || region.RegionSize > remaining)
-        heap_failure("published heap window was modified by its host");
-      if (!::UnmapViewOfFile2(::GetCurrentProcess(), cursor, MEM_PRESERVE_PLACEHOLDER))
-        system_failure("restore published heap placeholder");
-      cursor += region.RegionSize;
-      remaining -= region.RegionSize;
-      ++views;
-    }
-    if (views > 1 && !::VirtualFree(target, count, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
-      system_failure("coalesce published heap placeholders");
-#else
-    if (::mmap(target, count, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED)
-      system_failure("restore published heap reservation");
-#endif
-  }
-  /// \brief Exchange mappings without moving payload bytes.
-  void swap(heap_mapping & other) noexcept {
-    std::swap(address, other.address);
-    std::swap(capacity, other.capacity);
-    std::swap(fixed_extent, other.fixed_extent);
-    spans.swap(other.spans);
-  }
-  /// \brief Resize by remapping the live circular arc to a new logical start.
-  /// \details Starts must be page aligned. The final partial live page survives;
-  /// the remaining gap gets fresh backing. Both old views remain usable until
-  /// this object is destroyed; resizing may discard contents of its dead gap.
-  heap_mapping resized(std::size_t old_start_bytes, std::size_t live_bytes,
-                       std::size_t new_bytes, std::size_t new_start_bytes) const noexcept {
-    validate_size(new_bytes);
-    auto const page = page_size();
-    if (!address || old_start_bytes >= capacity || new_start_bytes >= new_bytes ||
-        old_start_bytes % page || new_start_bytes % page ||
-        live_bytes > capacity || live_bytes > new_bytes)
-      heap_failure("invalid circular remap range");
-    auto const live = ((live_bytes + page - 1) / page) * page;
-    heap_mapping result(reservation{}, new_bytes);
-    result.spans.reserve(spans.size() + 4);
-    auto source = old_start_bytes;
-    auto target = new_start_bytes;
-    auto remaining = live;
-    while (remaining) {
-      auto const where = std::lower_bound(spans.begin(), spans.end(), source,
-        [](span const & s, std::size_t value) noexcept { return s.end <= value; });
-      assert(where != spans.end() && where->begin <= source);
-      auto const count = std::min({remaining, where->end - source, new_bytes - target});
-#if defined(_WIN32)
-      alias(*where, result.address + target, count, source - where->begin);
-      result.spans.push_back({target, target + count, where->section, where->offset + source - where->begin});
-#else
-      alias(address + source, result.address + target, count);
-      result.spans.push_back({target, target + count});
-#endif
-      source = (source + count) % capacity;
-      target = (target + count) % new_bytes;
-      remaining -= count;
-    }
-    if (!live) result.fresh(0, new_bytes);
-    else if (new_start_bytes + live <= new_bytes) {
-      result.fresh(0, new_start_bytes);
-      result.fresh(new_start_bytes + live, new_bytes - new_start_bytes - live);
-    } else result.fresh(new_start_bytes + live - new_bytes, new_bytes - live);
-    result.finish_aliases();
-    discard_gap(old_start_bytes, live);
-    return result;
-  }
-};
-}
-
+export module jam.heap;
+import jam.mapping;
+import jam.work;
+import jam.packed;
+export import jam.units;
 namespace jam {
-
 export class heap;
 export template<class T> class root;
 export template<class T> class ptr;
@@ -446,14 +57,6 @@ export template<class V>
 concept visitor = std::same_as<typename V::heap_type, heap>;
 
 namespace detail {
-#if defined(JAM_CONTEXT_X28)
-#if !defined(__aarch64__)
-#error "JAM_CONTEXT_X28 requires AArch64 and -ffixed-x28"
-#endif
-register heap * active_heap asm("x28");
-#else
-inline thread_local heap * active_heap = nullptr;
-#endif
 template<class T, class H = heap>
 concept member_trace = requires(T & value, typename H::visitor & visit) {
   value.trace(visit);
@@ -471,7 +74,7 @@ concept has_allocation_trace = requires { &T::claim_and_trace; } || allocation_t
 template<class T>
 concept has_trace = requires { &T::trace; } || member_trace<T> || cooperative_trace<T>;
 
-struct structural_tracer {};
+export struct structural_tracer {};
 template<class T, class... Members>
 struct member_manifest {
   std::tuple<Members T::*...> members;
@@ -512,24 +115,11 @@ export template<class T, class... Members> requires (std::is_object_v<Members> &
   return detail::member_manifest<T, Members...>{{members...}};
 }
 
-/// \brief Bind an existing heap, restoring the previous binding on scope exit.
+/// \brief Opt out of value traversal when specializing tracer<T>.
 /// \ingroup jam_heap
-/// The heap must outlive the scope. Scopes nest on one thread and may re-enter
-/// a heap. They neither own the heap nor synchronize access to it.
-export class heap_scope {
-  heap * previous;
-public:
-  /// \brief Use the supplied heap for implicit operations on this thread.
-  [[nodiscard]] native_inline explicit heap_scope(heap & arena) noexcept;
-  /// \brief Restore the binding saved at construction.
-  native_inline ~heap_scope() noexcept { detail::active_heap = previous; }
-  heap_scope(heap_scope const &) = delete;
-  heap_scope & operator=(heap_scope const &) = delete;
-};
-
-/// \brief A value with no outgoing managed references.
-/// \ingroup jam_heap
-/// Specializing tracer<T> by deriving from leaf<T> explicitly suppresses traversal.
+/// Derive tracer<T>, not the heap object, from leaf<T> to suppress value traversal.
+/// Ordinary types without hooks or manifests already use this behavior.
+/// An allocation-level claim_and_trace hook still takes precedence.
 /// Heap storage requirements are separate from this reference-free promise.
 export template<class T>
 struct leaf {
@@ -589,6 +179,140 @@ concept traceable_in = (!has_allocation_trace<T> || allocation_trace<T, H>)
 /// complete object before declaring fields or following targets.
 export template<class T>
 concept traceable = detail::traceable_in<T, heap>;
+
+export namespace detail {
+template<class T> inline constexpr bool is_ptr = false;
+template<class T> inline constexpr bool is_ptr<ptr<T>> = true;
+template<class T> inline constexpr bool is_weak_ptr = false;
+template<class T> inline constexpr bool is_weak_ptr<weak_ptr<T>> = true;
+template<class T, class Visitor>
+concept visits = requires(Visitor & visit, std::remove_reference_t<T> const & value) {
+  tracer<std::remove_cvref_t<T>>::trace(visit, value);
+};
+}
+
+/// \brief Tag a reference slot and enqueue its target.
+/// \ingroup jam_heap
+export template<class T>
+struct tracer<ptr<T>> {
+  /// \brief Preserve the field address and dispatch to the matching heap visitor.
+  template<visitor Visitor>
+  static constexpr void trace(Visitor & visit, ptr<T> const & value)
+      noexcept(noexcept(visit(value))) {
+    visit(value);
+  }
+};
+
+/// \brief Declare a weak field for forwarding without following its target.
+/// \ingroup jam_heap
+export template<class T>
+struct tracer<weak_ptr<T>> {
+  /// \brief Preserve the original field address for pointer-mask declaration.
+  template<visitor Visitor>
+  static constexpr void trace(Visitor & visit, weak_ptr<T> const & value)
+      noexcept(noexcept(visit(value))) { visit(value); }
+};
+
+export namespace detail {
+template<class Visitor, class... Ts>
+constexpr void trace_parts(Visitor & visit, Ts const &... values) noexcept {
+  auto part = [&](auto const & value) constexpr noexcept {
+    if constexpr (requires { visit(value); }) visit(value);
+    else tracer<std::remove_cvref_t<decltype(value)>>::trace(visit, value);
+  };
+  (part(values), ...);
+}
+}
+
+/// \brief Visit each tuple element in the enclosing allocation.
+/// \ingroup jam_heap
+export template<class... Ts>
+struct tracer<std::tuple<Ts...>> : detail::structural_tracer {
+  /// \brief Tuple views retain their elements' original addresses.
+  template<class Visitor>
+  static constexpr void trace(Visitor & visit, std::tuple<Ts...> const & value)
+      requires (detail::visits<Ts, Visitor> && ...) {
+    std::apply([&](auto const &... part) constexpr {
+      detail::trace_parts(visit, part...);
+    }, value);
+  }
+};
+
+/// \brief Visit each array element in the enclosing allocation.
+/// \ingroup jam_heap
+export template<class T, std::size_t N>
+struct tracer<std::array<T, N>> : detail::structural_tracer {
+  /// \brief Visit elements in order, preserving their original addresses.
+  template<class Visitor>
+  static constexpr void trace(Visitor & visit, std::array<T, N> const & value)
+      requires detail::visits<T, Visitor> {
+    for (auto const & part : value) detail::trace_parts(visit, part);
+  }
+};
+
+/// \brief Visit only the active variant alternative in the enclosing allocation.
+/// \ingroup jam_heap
+export template<class... Ts>
+struct tracer<std::variant<Ts...>> : detail::structural_tracer {
+  /// \brief A valueless variant has no outgoing managed fields.
+  template<class Visitor>
+  static constexpr void trace(Visitor & visit, std::variant<Ts...> const & value)
+      requires (detail::visits<Ts, Visitor> && ...) {
+    if (value.valueless_by_exception()) return;
+    std::visit([&](auto const & part) constexpr {
+      detail::trace_parts(visit, part);
+    }, value);
+  }
+};
+
+/// \brief Generate field enumeration and cooperative allocation tracing from a manifest.
+/// \ingroup jam_heap
+export template<class T> requires (!detail::has_trace<T>) && detail::has_manifest<T>
+struct tracer<T> : detail::structural_tracer {
+  /// \brief Visit listed subobjects in manifest order without claiming their storage.
+  template<class Visitor>
+  static native_inline constexpr void trace(Visitor & visit, T const & value) noexcept
+      requires std::remove_cvref_t<decltype(T::manifest)>::template accepts<Visitor> {
+    auto const & [...member] = T::manifest.members;
+    visit((value.*member)...);
+  }
+  /// \brief Claim records in a loop, queueing branches and walking one same-type edge locally.
+  template<class Visitor>
+  static void trace(Visitor & visit, ptr<T> const & at) noexcept
+      requires std::remove_cvref_t<decltype(T::manifest)>::template accepts<Visitor> {
+    visit.template trace_manifest<T>(at);
+  }
+};
+
+}
+
+namespace jam {
+
+namespace detail {
+#if defined(JAM_CONTEXT_X28)
+#if !defined(__aarch64__)
+#error "JAM_CONTEXT_X28 requires AArch64 and -ffixed-x28"
+#endif
+register heap * active_heap asm("x28");
+#else
+inline thread_local heap * active_heap = nullptr;
+#endif
+}
+
+/// \brief Bind an existing heap, restoring the previous binding on scope exit.
+/// \ingroup jam_heap
+/// The heap must outlive the scope. Scopes nest on one thread and may re-enter
+/// a heap. They neither own the heap nor synchronize access to it.
+export class heap_scope {
+  heap * previous;
+public:
+  /// \brief Use the supplied heap for implicit operations on this thread.
+  [[nodiscard]] native_inline explicit heap_scope(heap & arena) noexcept;
+  /// \brief Restore the binding saved at construction.
+  native_inline ~heap_scope() noexcept { detail::active_heap = previous; }
+  heap_scope(heap_scope const &) = delete;
+  heap_scope & operator=(heap_scope const &) = delete;
+};
 
 /// \brief A typed heap offset, with no root registration or ownership.
 /// \ingroup jam_heap
@@ -734,110 +458,6 @@ public:
 export template<class T> weak_ptr(ptr<T> const &) -> weak_ptr<T>;
 /// \brief Deduce the target type from a root.
 export template<class T> weak_ptr(root<T> const &) -> weak_ptr<T>;
-
-namespace detail {
-template<class T> inline constexpr bool is_ptr = false;
-template<class T> inline constexpr bool is_ptr<ptr<T>> = true;
-template<class T> inline constexpr bool is_weak_ptr = false;
-template<class T> inline constexpr bool is_weak_ptr<weak_ptr<T>> = true;
-template<class T, class Visitor>
-concept visits = requires(Visitor & visit, std::remove_reference_t<T> const & value) {
-  tracer<std::remove_cvref_t<T>>::trace(visit, value);
-};
-}
-
-/// \brief Tag a reference slot and enqueue its target.
-/// \ingroup jam_heap
-export template<class T>
-struct tracer<ptr<T>> {
-  /// \brief Preserve the field address and dispatch to the matching heap visitor.
-  template<visitor Visitor>
-  static constexpr void trace(Visitor & visit, ptr<T> const & value)
-      noexcept(noexcept(visit(value))) {
-    visit(value);
-  }
-};
-
-/// \brief Declare a weak field for forwarding without following its target.
-/// \ingroup jam_heap
-export template<class T>
-struct tracer<weak_ptr<T>> {
-  /// \brief Preserve the original field address for pointer-mask declaration.
-  template<visitor Visitor>
-  static constexpr void trace(Visitor & visit, weak_ptr<T> const & value)
-      noexcept(noexcept(visit(value))) { visit(value); }
-};
-
-namespace detail {
-template<class Visitor, class... Ts>
-constexpr void trace_parts(Visitor & visit, Ts const &... values) noexcept {
-  auto part = [&](auto const & value) constexpr noexcept {
-    if constexpr (requires { visit(value); }) visit(value);
-    else tracer<std::remove_cvref_t<decltype(value)>>::trace(visit, value);
-  };
-  (part(values), ...);
-}
-}
-
-/// \brief Visit each tuple element in the enclosing allocation.
-/// \ingroup jam_heap
-export template<class... Ts>
-struct tracer<std::tuple<Ts...>> : detail::structural_tracer {
-  /// \brief Tuple views retain their elements' original addresses.
-  template<class Visitor>
-  static constexpr void trace(Visitor & visit, std::tuple<Ts...> const & value)
-      requires (detail::visits<Ts, Visitor> && ...) {
-    std::apply([&](auto const &... part) constexpr {
-      detail::trace_parts(visit, part...);
-    }, value);
-  }
-};
-
-/// \brief Visit each array element in the enclosing allocation.
-/// \ingroup jam_heap
-export template<class T, std::size_t N>
-struct tracer<std::array<T, N>> : detail::structural_tracer {
-  /// \brief Visit elements in order, preserving their original addresses.
-  template<class Visitor>
-  static constexpr void trace(Visitor & visit, std::array<T, N> const & value)
-      requires detail::visits<T, Visitor> {
-    for (auto const & part : value) detail::trace_parts(visit, part);
-  }
-};
-
-/// \brief Visit only the active variant alternative in the enclosing allocation.
-/// \ingroup jam_heap
-export template<class... Ts>
-struct tracer<std::variant<Ts...>> : detail::structural_tracer {
-  /// \brief A valueless variant has no outgoing managed fields.
-  template<class Visitor>
-  static constexpr void trace(Visitor & visit, std::variant<Ts...> const & value)
-      requires (detail::visits<Ts, Visitor> && ...) {
-    if (value.valueless_by_exception()) return;
-    std::visit([&](auto const & part) constexpr {
-      detail::trace_parts(visit, part);
-    }, value);
-  }
-};
-
-/// \brief Generate field enumeration and cooperative allocation tracing from a manifest.
-/// \ingroup jam_heap
-export template<class T> requires (!detail::has_trace<T>) && detail::has_manifest<T>
-struct tracer<T> : detail::structural_tracer {
-  /// \brief Visit listed subobjects in manifest order without claiming their storage.
-  template<class Visitor>
-  static native_inline constexpr void trace(Visitor & visit, T const & value) noexcept
-      requires std::remove_cvref_t<decltype(T::manifest)>::template accepts<Visitor> {
-    auto const & [...member] = T::manifest.members;
-    visit((value.*member)...);
-  }
-  /// \brief Claim records in a loop, queueing branches and walking one same-type edge locally.
-  template<class Visitor>
-  static void trace(Visitor & visit, ptr<T> const & at) noexcept
-      requires std::remove_cvref_t<decltype(T::manifest)>::template accepts<Visitor> {
-    visit.template trace_manifest<T>(at);
-  }
-};
 
 /// \brief Sizing policy for one generation. Sizes are platform pages.
 /// \ingroup jam_heap
@@ -993,7 +613,7 @@ public:
     visitor(heap & h, detail::frontier<trace_job> & tasks, std::size_t id) noexcept
         : arena(h), pending(tasks), worker(id) {}
 
-    native_inline std::size_t pointer_slot(void const * field) const noexcept {
+    [[nodiscard]] native_inline std::size_t pointer_slot(void const * field) const noexcept {
       auto const address = reinterpret_cast<std::uintptr_t>(field);
       auto const begin = reinterpret_cast<std::uintptr_t>(record);
       auto const delta = address - begin;
@@ -1219,7 +839,7 @@ private:
 
   // Marking never changes mappings; no payload copy or stack snapshot is needed.
   template<class T>
-  native_inline T * record_address(offset at) noexcept {
+  [[nodiscard]] native_inline T * record_address(offset at) noexcept {
     require_record<T>();
     assert(at && (at & offset_mask) < containing(at).cursor
            && record_words<T> <= containing(at).cursor - (at & offset_mask));
@@ -1279,38 +899,19 @@ public:
     static constexpr unsigned block_shift = 5;
     static constexpr std::size_t maximum_bytes = std::size_t{1} << 34;
 
-    static constexpr bool valid_options(generation_options const & config) noexcept {
+    [[nodiscard]] static constexpr bool valid_options(generation_options const & config) noexcept {
       return config.capacity.count() != 0 && config.capacity <= config.maximum && config.maximum <= units::bytes{maximum_bytes}
           && config.reserve.count() != 0 && config.reserve <= units::bytes{maximum_bytes / 2}
           && config.shrink_shift < std::numeric_limits<std::size_t>::digits;
     }
-    static settings configure(generation_options config) {
-      if (config.maximum > units::bytes{maximum_bytes} || config.capacity > units::bytes{maximum_bytes} || config.reserve > units::bytes{maximum_bytes})
-        throw std::length_error("jam generation exceeds 16 GiB");
-      constexpr auto page = static_cast<std::size_t>(units::pages::ratio::num);
-      if (detail::heap_mapping::page_size() != page)
-        detail::heap_failure("platform page size differs from build invariant");
-      if (!valid_options(config) || page < 512 || page > maximum_bytes || !std::has_single_bit(page))
-        detail::heap_failure("invalid byte sizes, page size or worker count");
-      if (config.reserve > config.capacity / 2)
-        detail::heap_failure("capacity must hold twice the reserve");
-      auto const capacity = units::bytes{config.capacity}.count();
-      auto const reserve = units::bytes{config.reserve}.count();
-      return {page / 8, reserve / 8, 2 * reserve / 8, capacity, config};
-    }
-    explicit generation(settings s, detail::compactor const & c, detail::work_pool & w, std::byte * address) noexcept
-        : policy(s.policy), compactor(c), workers(w),
-          page_word_count(s.page_words), reserve_word_count(s.reserved),
-          minimum_capacity(s.minimum), storage(s.bytes, address, units::bytes{s.policy.maximum}.count()),
-          view_base(reinterpret_cast<word *>(storage.data())), metadata(s.bytes / (8 * block_words)) {
-      alignment.resize(((metadata.size() + 7) / 8) * 4);
-    }
-    static constexpr unsigned exponent(std::size_t bytes) noexcept {
+    [[nodiscard]] static settings configure(generation_options config);
+    explicit generation(settings s, detail::compactor const & c, detail::work_pool & w, std::byte * address) noexcept;
+    [[nodiscard]] static constexpr unsigned exponent(std::size_t bytes) noexcept {
       if (!std::has_single_bit(bytes) || bytes < 8 || bytes > 64u)
         detail::heap_failure("unsupported record alignment");
       return std::countr_zero(bytes) - 3;
     }
-    unsigned flags(std::size_t index) const noexcept {
+    [[nodiscard]] unsigned flags(std::size_t index) const noexcept {
       return (alignment[index >> 1] >> ((index & 1) * 4)) & 15;
     }
     native_inline void add_flags(std::size_t index, unsigned bits) noexcept {
@@ -1336,7 +937,7 @@ public:
         words -= count;
       }
     }
-    static constexpr word pointer_cells(bitmap live) noexcept {
+    [[nodiscard]] static constexpr word pointer_cells(bitmap live) noexcept {
       word x = live;
       x = (x | (x << 16)) & 0x0000ffff0000ffffULL;
       x = (x | (x << 8)) & 0x00ff00ff00ff00ffULL;
@@ -1345,7 +946,7 @@ public:
       x = (x | (x << 1)) & 0x5555555555555555ULL;
       return x | (x << 1);
     }
-    std::uint8_t const * alignment_table() const noexcept {
+    [[nodiscard]] std::uint8_t const * alignment_table() const noexcept {
       return has_alignment ? alignment.data() : nullptr;
     }
     [[nodiscard]] offset base(block const & item) const noexcept {
@@ -1359,21 +960,9 @@ public:
       if (!(item.live & bit)) return null;
       return base(item) + static_cast<offset>(std::popcount(detail::retained(item, alignment_table(), value >> block_shift) & (bit - 1)));
     }
-    void resize(std::size_t words) noexcept {
-      assert(words % page_word_count == 0 && words >= minimum_capacity && words <= maximum_bytes / 8);
-      assert(cursor <= words - reserve_word_count);
-      std::vector<block> next_metadata(words / block_words);
-      std::copy_n(metadata.begin(), (cursor + block_words - 1) / block_words, next_metadata.begin());
-      auto const next_origin = words - reserve_word_count;
-      auto next = storage.resized(origin * 8, cursor * 8, words * 8, next_origin * 8);
-      alignment.resize(((next_metadata.size() + 7) / 8) * 4);
-      storage.replace(next); metadata.swap(next_metadata);
-      origin = next_origin;
-      view_base = reinterpret_cast<word *>(storage.data()) + origin;
-    }
+    void resize(std::size_t words) noexcept;
 
-    generation(generation_options config, detail::compactor const & c, detail::work_pool & w, std::byte * address)
-        : generation(configure(config), c, w, address) {}
+    generation(generation_options config, detail::compactor const & c, detail::work_pool & w, std::byte * address);
 
   public:
     /// \brief Capacity in eight-byte cells, including the reserve. \ingroup jam_heap
@@ -1395,8 +984,7 @@ public:
       return static_cast<cell *>(self.view_base);
     }
     /// \brief Borrow an allocated cell. \ingroup jam_heap
-    template<class Self>
-    [[nodiscard]] decltype(auto) operator[](this Self & self native_lifetimebound, offset index) noexcept {
+    [[nodiscard]] decltype(auto) operator[](this auto & self native_lifetimebound, offset index) noexcept {
       assert(index < self.cursor); return self.data()[index];
     }
     /** \brief Read one managed reference field by value.
@@ -1454,14 +1042,7 @@ public:
       return static_cast<offset>(aligned);
     }
     /// \brief Clear marks and alignment requirements; pointer declarations survive. \ingroup jam_heap
-    void clear_marks() noexcept {
-      for (auto & item : metadata) {
-        item.live = 0;
-        item.destination = 0;
-      }
-      std::fill(alignment.begin(), alignment.end(), 0);
-      has_alignment = false;
-    }
+    void clear_marks() noexcept;
     /** \brief Mark a complete reachable record; concurrent markers are permitted.
      * \ingroup jam_heap
      * \param first Record start in cells.
@@ -1519,160 +1100,23 @@ public:
      * Shrink once below the configured occupancy threshold if live cells and reserve fit.
      * Resource failures terminate because a moving collection cannot unwind.
      */
-    void compact(std::span<offset> roots = {}) noexcept {
-      require_mutator();
-      std::atomic_signal_fence(std::memory_order_seq_cst);
-      collecting = true;
-      compact_impl(roots);
-      collecting = false;
-      std::atomic_signal_fence(std::memory_order_seq_cst);
-    }
+    void compact(std::span<offset> roots = {}) noexcept;
 
   private:
-    std::size_t prepare(std::size_t start, bool keep_null) noexcept {
-      // Keep the null cell in the packed prefix, including aligned collections.
-      // It is padding, never a record or a source of outgoing pointers.
-      data()[0] = 0;
-      if (keep_null) metadata[0].live |= bitmap{1};
-      else metadata[0].live &= ~bitmap{1};
-      metadata[0].pointers &= ~word{(1u << fields_per_word) - 1};
-      auto const old_blocks = (cursor + block_words - 1) / block_words;
-      // A parallel prefix scan could compose joined groups' layout functions:
-      // F(x) = align_up(x, 1 << k) + retained_cells_after_dilation. Resolve group
-      // boundaries/k first; composing (max k, summed counts) loses padding.
-      // Eight input-residue displacements suffice (k <= 3), with associative
-      // composition c[r] = a[r] + b[(r + a[r]) & 7]. All destinations must be
-      // ready before workers forward arbitrary pointers into distant blocks.
-      // This whole pass measured only 0.5-1.7% of GC on eight-byte-aligned trees
-      // and chains with 1/4 workers, so scan overhead could erase the benefit.
-      // Sparse retention and higher alignments were not covered; reprofile those
-      // workloads before adding a parallel scan.
-      has_alignment = false;
-      std::size_t live_words = start;
-      for (std::size_t begin = 0; begin < old_blocks;) {
-        auto end = begin + 1;
-        unsigned k = std::popcount(flags(begin) & 7u);
-        while ((flags(end - 1) & 8u) && end < old_blocks) {
-          k = std::max(k, static_cast<unsigned>(std::popcount(flags(end) & 7u))); ++end;
-        }
-        live_words = (live_words + (std::size_t{1} << k) - 1) & ~((std::size_t{1} << k) - 1);
-        for (auto i = begin; i != end; ++i) {
-          auto & item = metadata[i];
-          item.pointers &= pointer_cells(item.live);
-          // Publish the joined group's effective k in the existing nibbles.
-          // live remains the exact claims; dilation is only a register value.
-          auto const shift = (i & 1) * 4;
-          alignment[i >> 1] = static_cast<std::uint8_t>((alignment[i >> 1] & ~(7u << shift))
-              | (((1u << k) - 1) << shift));
-          has_alignment |= k != 0;
-          item.destination = static_cast<offset>(live_words);
-          live_words += std::popcount(detail::retained(item.live, k));
-        }
-        begin = end;
-      }
-      return live_words;
-    }
-    void move_to(word * target, detail::forwarding_tables tables) noexcept {
-      auto const old_blocks = (cursor + block_words - 1) / block_words;
-      auto const source = data();
-      auto const source_pages = (cursor + page_word_count - 1) / page_word_count;
-      auto const wave_pages = reserve_word_count / page_word_count;
-      auto move_page = [&](std::size_t page) noexcept {
-        auto const begin = page * (page_word_count / block_words);
-        auto const end = std::min(old_blocks, begin + page_word_count / block_words);
-        compactor.move(source, target, metadata.data(), begin, end, tables, alignment_table());
-      };
-      if (workers.available_workers() > 1 && source_pages > 1) {
-        auto done = std::make_unique<std::atomic<bool>[]>(source_pages);
-        std::atomic<std::size_t> next{0}, front{0};
-        auto task = [&](std::size_t) noexcept {
-          for (;;) {
-            auto const page = next.fetch_add(1, std::memory_order_relaxed);
-            if (page >= source_pages) return;
-            auto floor = front.load(std::memory_order_acquire);
-            while (page - floor >= wave_pages) {
-              front.wait(floor, std::memory_order_relaxed);
-              floor = front.load(std::memory_order_acquire);
-            }
-            move_page(page);
-            done[page].store(true, std::memory_order_release);
-            // Every completion publishes through this RMW chain, even when an
-            // older page still blocks the prefix. The last publisher therefore
-            // sees all earlier done flags; a store-buffering cycle cannot stall.
-            floor = front.fetch_add(0, std::memory_order_acq_rel);
-            for (;;) {
-              auto end = floor;
-              while (end != source_pages && done[end].load(std::memory_order_acquire)) ++end;
-              if (end == floor) break;
-              if (front.compare_exchange_strong(floor, end, std::memory_order_acq_rel)) {
-                front.notify_all(); break;
-              }
-              floor = front.load(std::memory_order_acquire);
-            }
-          }
-        };
-        workers.run(std::min(workers.available_workers(), wave_pages),
-          [](void * context, std::size_t i) noexcept {
-            (*static_cast<decltype(task) *>(context))(i);
-          }, &task);
-      } else for (std::size_t page = 0; page < source_pages; ++page) move_page(page);
-    }
-    void zero_gaps(word * target, std::size_t previous_end) const noexcept {
-      auto const old_blocks = (cursor + block_words - 1) / block_words;
-      for (std::size_t i = 0; i != old_blocks; ++i) {
-        auto const next = std::size_t(metadata[i].destination & offset_mask);
-        std::fill(target + previous_end, target + next, word{0});
-        previous_end = next + std::popcount(detail::retained(metadata[i], alignment_table(), i));
-      }
-    }
-    void pack_into(std::vector<block> & output) const noexcept {
-      auto const old_blocks = (cursor + block_words - 1) / block_words;
-      compactor.pack(metadata.data(), output.data(), old_blocks, alignment_table());
-    }
-    void ensure(std::size_t words) noexcept {
-      auto const maximum = units::bytes{policy.maximum}.count() / sizeof(word);
-      if (words > maximum - reserve_word_count) detail::heap_failure("generation capacity overflow");
-      while (words > capacity() - reserve_word_count) resize(std::min(2 * capacity(), maximum));
-    }
-    std::size_t rotated_origin() const noexcept {
+    [[nodiscard]] std::size_t prepare(std::size_t start, bool keep_null) noexcept;
+    void move_to(word * target, detail::forwarding_tables tables) noexcept;
+    void zero_gaps(word * target, std::size_t previous_end) const noexcept;
+    void pack_into(std::vector<block> & output) const noexcept;
+    void ensure(std::size_t words) noexcept;
+    [[nodiscard]] std::size_t rotated_origin() const noexcept {
       return (origin + capacity() - reserve_word_count) % capacity();
     }
-    word * at_origin(std::size_t start) const noexcept {
+    [[nodiscard]] word * at_origin(std::size_t start) const noexcept {
       return reinterpret_cast<word *>(storage.data()) + start;
     }
-    void adopt(std::size_t next_origin, std::size_t words) noexcept {
-      auto const old_blocks = (cursor + block_words - 1) / block_words;
-      cursor = words; origin = next_origin; view_base = at_origin(origin);
-      auto const blocks = (cursor + block_words - 1) / block_words;
-      for (std::size_t i = 0; i != blocks; ++i) {
-        auto const count = std::min(block_words, cursor - i * block_words);
-        metadata[i].live = ~bitmap{0} >> (block_words - count);
-        metadata[i].destination = 0;
-      }
-      for (auto i = blocks; i < old_blocks; ++i) metadata[i] = {};
-      std::fill(alignment.begin(), alignment.end(), 0);
-      has_alignment = false;
-      auto const smaller = std::max(minimum_capacity, (capacity() / page_word_count / 2) * page_word_count);
-      if (policy.shrink_shift && smaller < capacity()
-          && cursor < (capacity() >> policy.shrink_shift)
-          && cursor <= smaller - reserve_word_count) resize(smaller);
-    }
-    void reset() noexcept {
-      for (auto & item : metadata) item = {};
-      std::fill(alignment.begin(), alignment.end(), 0);
-      has_alignment = false;
-      cursor = 1; data()[0] = 0;
-    }
-    void compact_impl(std::span<offset> roots) noexcept {
-      auto const live_words = prepare(0, true);
-      auto const next_origin = rotated_origin();
-      auto * target = at_origin(next_origin);
-      move_to(target, {metadata.data(), nullptr, alignment_table(), nullptr});
-      for (auto & root : roots) root = forward(root);
-      zero_gaps(target, 0);
-      pack_into(metadata);
-      adopt(next_origin, live_words);
-    }
+    void adopt(std::size_t next_origin, std::size_t words) noexcept;
+    void reset() noexcept;
+    void compact_impl(std::span<offset> roots) noexcept;
   };
 private:
   detail::compactor const compactor = detail::choose_compactor();
@@ -1690,23 +1134,12 @@ private:
   static_assert(sizeof(root_slot) == 24);
   std::vector<root_slot> root_slots;
   std::uint32_t roots_head = 0, free_root = 0;
-  native_inline std::uint32_t add_root(offset at, trace_function trace) noexcept {
+  [[nodiscard]] native_inline std::uint32_t add_root(offset at, trace_function trace) noexcept {
     assert(heap::current() == this);
     require_mutator();
-    if (!at) return 0;
-    auto slot = free_root;
-    if (slot) free_root = root_slots[slot - 1].next;
-    else {
-      if (root_slots.size() == std::numeric_limits<std::uint32_t>::max())
-        detail::heap_failure("root slot capacity overflow");
-      root_slots.push_back({});
-      slot = static_cast<std::uint32_t>(root_slots.size());
-    }
-    root_slots[slot - 1] = {at, 1, 0, roots_head, trace};
-    if (roots_head) root_slots[roots_head - 1].previous = slot;
-    roots_head = slot;
-    return slot;
+    return at ? allocate_root(at, trace) : 0;
   }
+  [[nodiscard]] std::uint32_t allocate_root(offset at, trace_function trace) noexcept;
   native_inline void retain_root(std::uint32_t slot) noexcept {
     require_mutator();
     auto & count = root_slots[slot - 1].copies;
@@ -1718,12 +1151,9 @@ private:
     require_mutator();
     auto & entry = root_slots[slot - 1];
     if (--entry.copies) return;
-    if (entry.previous) root_slots[entry.previous - 1].next = entry.next;
-    else roots_head = entry.next;
-    if (entry.next) root_slots[entry.next - 1].previous = entry.previous;
-    entry = {0, 0, 0, free_root, nullptr};
-    free_root = slot;
+    recycle_root(slot);
   }
+  void recycle_root(std::uint32_t slot) noexcept;
   std::vector<std::shared_ptr<weak_entry>> weak_entries;
   std::deque<std::shared_ptr<weak_entry>> pending_finalizers;
   weak_entry * running_finalizer = nullptr;
@@ -1736,19 +1166,9 @@ private:
   static constexpr unsigned block_shift = 5;
   static constexpr offset young_bit = 0x80000000u;
   static constexpr offset offset_mask = 0x7fffffffu;
-  static heap_options configure(heap_options config) {
-    static_cast<void>(generation::configure(config.old));
-    static_cast<void>(generation::configure(config.young));
-    if (!config.workers) detail::heap_failure("worker count must be positive");
-    return config;
-  }
+  [[nodiscard]] static heap_options configure(heap_options config);
   struct configured {};
-  heap(configured, heap_options config) noexcept
-      : workers(config.workers),
-        reservation(units::bytes{config.old.maximum}.count(), units::bytes{config.young.maximum}.count()),
-        arena(config.old, compactor, workers, reservation.data()),
-        nursery(config.young, compactor, workers, reservation.data() + 2 * units::bytes{config.old.maximum}.count()),
-        policy(config), minors_left(config.minor_collections) {}
+  heap(configured, heap_options config) noexcept;
   [[nodiscard]] native_inline generation & containing(offset at) noexcept { return at & young_bit ? nursery : arena; }
   [[nodiscard]] native_inline generation const & containing(offset at) const noexcept { return at & young_bit ? nursery : arena; }
   template<class Self>
@@ -1761,7 +1181,7 @@ private:
     auto * base = (__builtin_add_overflow(bits, bits, &doubled) ? self.nursery : self.arena).data();
     return reinterpret_cast<byte *>(base) + std::size_t(doubled) * 4;
   }
-  native_inline bool old_slot(void const * address, std::uint32_t & slot) const noexcept {
+  [[nodiscard]] native_inline bool old_slot(void const * address, std::uint32_t & slot) const noexcept {
     auto const delta = reinterpret_cast<std::uintptr_t>(address) - reinterpret_cast<std::uintptr_t>(arena.storage.data());
     auto const bytes = arena.storage.bytes();
     if (delta >= 2 * bytes) return false;
@@ -1776,99 +1196,26 @@ private:
     std::uint32_t slot;
     if (old_slot(address, slot)) forget_slot(slot);
   }
-  native_noinline void forget_slot(std::uint32_t slot) noexcept {
-    remembered.erase(slot);
-  }
-  native_noinline void remember_slot(std::uint32_t slot, trace_function trace) noexcept {
-    require_mutator();
-    remembered.insert_or_assign(slot, trace);
-  }
+  native_noinline void forget_slot(std::uint32_t slot) noexcept;
+  native_noinline void remember_slot(std::uint32_t slot, trace_function trace) noexcept;
   void require_mutator() const noexcept {
     if (collecting) detail::heap_failure("mutation during collection");
   }
-  offset forward(offset value, bool minor) const noexcept {
+  [[nodiscard]] offset forward(offset value, bool minor) const noexcept {
     if (!value || (minor && !(value & young_bit))) return value;
     return containing(value).forward(value & offset_mask);
   }
   // Read only with the marking frontier drained; workers may otherwise own these bits.
-  bool marked(offset at) const noexcept {
+  [[nodiscard]] bool marked(offset at) const noexcept {
     if (!at) return false;
     if (minor_collection && !(at & young_bit)) return true;
     auto const local = at & offset_mask;
     return (containing(at).metadata[local >> block_shift].live >> (local % block_words)) & 1;
   }
-  void run_finalizer(std::shared_ptr<weak_entry> const & entry) noexcept {
-    entry->previous_running = running_finalizer;
-    running_finalizer = entry.get();
-    {
-      heap_scope binding{*this};
-      entry->invoke(*this, *entry);
-    }
-    running_finalizer = entry->previous_running;
-  }
-  void drain_finalizers() noexcept {
-    if (running_finalizer) return;
-    while (!pending_finalizers.empty()) {
-      auto entry = std::move(pending_finalizers.front());
-      pending_finalizers.pop_front();
-      run_finalizer(entry);
-    }
-  }
-  void finalize(std::shared_ptr<weak_entry> const & entry) noexcept {
-    require_mutator();
-    if (!entry->active) return;
-    entry->active = false;
-    std::erase(weak_entries, entry);
-    run_finalizer(entry);
-    drain_finalizers();
-  }
-  void compact_impl(std::span<offset> roots, bool minor = false, bool promote = false) noexcept {
-    auto const old_end = minor ? arena.cursor : arena.prepare(0, true);
-    auto const young_start = minor && !promote ? std::size_t(young_bit) : old_end;
-    auto const end = nursery.prepare(young_start, minor && !promote);
-    auto & destination = minor && !promote ? nursery : arena;
-    auto const live_words = end - (minor && !promote ? std::size_t(young_bit) : 0);
-    destination.ensure(live_words);
-    // Growth may rebase metadata, so form the shared forwarding tables afterward.
-    detail::forwarding_tables tables{minor ? nullptr : arena.metadata.data(), nursery.metadata.data(),
-      minor ? nullptr : arena.alignment_table(), nursery.alignment_table()};
-    auto const next_origin = minor && promote ? destination.origin : destination.rotated_origin();
-    auto * target = destination.at_origin(next_origin);
-    if (!minor) {
-      arena.move_to(target, tables);
-      arena.zero_gaps(target, 0);
-    }
-    nursery.move_to(target, tables);
-    nursery.zero_gaps(target, minor && !promote ? 0 : old_end);
-    for (auto & root : roots) root = forward(root, minor);
-    for (auto slot = roots_head; slot; slot = root_slots[slot - 1].next) {
-      auto & entry = root_slots[slot - 1];
-      entry.position = forward(entry.position, minor);
-    }
-    if (minor) for (auto entry = remembered.begin(); entry != remembered.end();) {
-      auto const slot = entry->first;
-      auto * address = reinterpret_cast<std::byte *>(arena.data()) + std::size_t(slot) * sizeof(offset);
-      offset value;
-      std::memcpy(&value, address, sizeof(value));
-      value = forward(value, true);
-      std::memcpy(address, &value, sizeof(value)); // Collector writes bypass barriers.
-      if (value) ++entry; else entry = remembered.erase(entry);
-    }
-    auto forward_entry = [&](weak_entry & entry) noexcept {
-      entry.key.at = forward(entry.key.at, minor);
-      entry.value.at = entry.active ? forward(entry.value.at, minor) : null;
-      entry.finalizer.at = forward(entry.finalizer.at, minor);
-    };
-    for (auto const & entry : weak_entries) forward_entry(*entry);
-    for (auto const & entry : pending_finalizers) forward_entry(*entry);
-    for (auto * entry = running_finalizer; entry; entry = entry->previous_running) forward_entry(*entry);
-    // Both generations and every external/remembered root have consumed the
-    // forwarding tables. Packing may now overwrite their pointer masks.
-    if (!minor) arena.pack_into(arena.metadata);
-    nursery.pack_into(destination.metadata);
-    destination.adopt(next_origin, live_words);
-    if (!minor || promote) { nursery.reset(); remembered.clear(); }
-  }
+  void run_finalizer(std::shared_ptr<weak_entry> const & entry) noexcept;
+  void drain_finalizers() noexcept;
+  void finalize(std::shared_ptr<weak_entry> const & entry) noexcept;
+  void compact_impl(std::span<offset> roots, bool minor = false, bool promote = false) noexcept;
 
 public:
   /// \brief Borrow a heap whose roots, barriers and reference policy belong to a host runtime.
@@ -1896,85 +1243,23 @@ public:
     /// \param storage Fresh heap borrowed for the capability lifetime.
     /// \param prefix Guard size in eight-byte cells, a positive native-page multiple.
     /// \pre Sole host capability; no ordinary Jam allocations, roots or collection.
-    explicit host(heap & storage, std::size_t prefix) noexcept : owner(storage), prefix(prefix) {
-      owner.require_mutator();
-      for (auto * g : {&owner.arena, &owner.nursery}) {
-        if (g->used() != 1 || g->policy.capacity != g->policy.maximum || g->policy.shrink_shift ||
-            !prefix || prefix % g->page_words() || prefix >= g->capacity() - g->reserved())
-          detail::heap_failure("host requires fresh fixed generations and a whole-page guard");
-      }
-      static_cast<void>(owner.arena.allocate(prefix - 1));
-      static_cast<void>(owner.nursery.allocate(prefix - 1));
-    }
+    explicit host(heap & storage, std::size_t prefix) noexcept;
     host(host const &) = delete;
     host & operator=(host const &) = delete;
     /// \brief Release the capability after finishing its last collection.
     /// \pre On Windows, all published windows have been explicitly unpublished.
-    ~host() noexcept {
-      if (state != phase::idle) detail::heap_failure("unfinished host collection");
-#if defined(_WIN32)
-      if (!publications.empty()) detail::heap_failure("host destroyed with published Windows views");
-#endif
-    }
+    ~host() noexcept;
     /// \brief Publish one generation at a stable VM-owned address.
     /// \pre Fixed capacity, no shrink, stopped mutators; skip/count are page multiples.
     /// target corresponds to cell skip, not cell zero. The host owns the reservation.
     /// On Windows, supply a containing placeholder or the exact window previously
     /// published from this generation. Do not alter its views outside this API.
-    void publish(generation which, void * target, std::size_t skip, std::size_t count) const noexcept {
-      if (state != phase::idle) detail::heap_failure("publish during host collection");
-      auto const & g = which == generation::young ? owner.nursery : owner.arena;
-      auto const & config = which == generation::young ? owner.policy.young : owner.policy.old;
-      if (config.capacity != config.maximum || config.shrink_shift ||
-          skip > g.capacity() || count > g.capacity() - skip)
-        detail::heap_failure("published heap requires a fixed generation");
-#if defined(_WIN32)
-      auto const address = reinterpret_cast<std::uintptr_t>(target);
-      auto const bytes = count * 8;
-      if (address % detail::heap_mapping::page_size() || skip % g.page_words() ||
-          count % g.page_words() || bytes > std::numeric_limits<std::uintptr_t>::max() - address)
-        detail::heap_failure("invalid published heap window");
-      if (!bytes) return;
-      for (auto const * space : {&owner.arena, &owner.nursery}) {
-        auto const begin = reinterpret_cast<std::uintptr_t>(space->storage.data());
-        if (address < begin + space->storage.bytes() * 2 && begin < address + bytes)
-          detail::heap_failure("published heap window overlaps a private view");
-      }
-      bool found = false;
-      for (auto const & window : publications) {
-        auto const begin = reinterpret_cast<std::uintptr_t>(window.target);
-        if (address < begin + window.bytes && begin < address + bytes) {
-          if (window.target != target || window.bytes != bytes || window.source != &g.storage)
-            detail::heap_failure("published heap windows must be disjoint or identical");
-          detail::heap_mapping::unpublish(window.target, window.bytes);
-          found = true;
-          break;
-        }
-      }
-      if (!found) publications.push_back({&g.storage, static_cast<std::byte *>(target), bytes});
-#endif
-      g.storage.publish(((g.origin + skip) % g.capacity()) * 8,
-        static_cast<std::byte *>(target), count * 8);
-    }
+    void publish(generation which, void * target, std::size_t skip, std::size_t count) const noexcept;
     /// \brief Remove a canonical alias without releasing the host's reservation.
     /// \pre Idle phase, stopped mutators; target/count identify an exact published
     /// window and count is in eight-byte cells. The reservation survives this call.
     /// \post The window is inaccessible; on Windows it is one placeholder.
-    void unpublish(void * target, std::size_t count) const noexcept {
-      if (state != phase::idle) detail::heap_failure("unpublish during host collection");
-      if (count > std::numeric_limits<std::size_t>::max() / 8)
-        detail::heap_failure("unpublished heap window is too large");
-#if defined(_WIN32)
-      auto const where = std::find_if(publications.begin(), publications.end(), [&](auto const & window) noexcept {
-        return window.target == target && window.bytes == count * 8;
-      });
-      if (where == publications.end()) detail::heap_failure("unpublish requires an exact published window");
-      detail::heap_mapping::unpublish(where->target, where->bytes);
-      publications.erase(where);
-#else
-      detail::heap_mapping::unpublish(static_cast<std::byte *>(target), count * 8);
-#endif
-    }
+    void unpublish(void * target, std::size_t count) const noexcept;
     /// \brief Allocate raw cells in either generation, preserving the tag bit.
     /// A host may subdivide the extent; scanner claims determine record boundaries.
     /// \pre Positive extent fits the selected generation; no active collection.
@@ -1984,23 +1269,7 @@ public:
     }
     /// \brief Start a VM-owned marking epoch; the VM supplies barriers and weak policy.
     /// \pre No jam roots, weak registrations, remembered slots or active collection.
-    void begin(bool minor) noexcept {
-      owner.require_mutator();
-      if (state != phase::idle) detail::heap_failure("host begin outside idle phase");
-      if (owner.roots_head || !owner.weak_entries.empty() || !owner.pending_finalizers.empty() ||
-          owner.running_finalizer || !owner.remembered.empty())
-        detail::heap_failure("host collection requires exclusively VM-owned roots");
-      std::atomic_signal_fence(std::memory_order_seq_cst);
-      owner.collecting = true;
-      owner.minor_collection = minor;
-      state = phase::marking;
-      owner.nursery.clear_marks();
-      for (auto & item : owner.nursery.metadata) item.pointers = 0;
-      if (!minor) {
-        owner.arena.clear_marks();
-        for (auto & item : owner.arena.metadata) item.pointers = 0;
-      }
-    }
+    void begin(bool minor) noexcept;
     /// \brief Drain roots using jam's ordinary frontier and persistent worker pool.
     /// \pre Marking phase; callbacks claim full objects before enumerating fields.
     /// marker_limit=1 keeps callbacks on the caller (e.g. a registered VM thread).
@@ -2028,28 +1297,7 @@ public:
     /// \return False if whole-nursery promotion does not fit. No forwarding is then visible;
     /// Retry without promotion in the same epoch; no further tracing is allowed.
     /// Majors retain both generations separately.
-    [[nodiscard]] bool prepare(bool promote = false) noexcept {
-      if (state != phase::marking && state != phase::retry)
-        detail::heap_failure("host prepare outside marking phase");
-      promoting = owner.minor_collection && promote;
-      if (!owner.minor_collection) {
-        if (prefix > 1) owner.arena.mark(1, prefix - 1);
-        old_words = owner.arena.prepare(0, true);
-      } else old_words = owner.arena.cursor;
-      if (promoting) {
-        old_words = owner.nursery.prepare(owner.arena.cursor, false);
-        if (old_words > owner.arena.capacity() - owner.arena.reserved()) {
-          state = phase::retry;
-          return false;
-        }
-        young_words = prefix;
-      } else {
-        if (prefix > 1) owner.nursery.mark(1, prefix - 1);
-        young_words = owner.nursery.prepare(young_bit, true) - young_bit;
-      }
-      state = phase::prepared;
-      return true;
-    }
+    [[nodiscard]] bool prepare(bool promote = false) noexcept;
     /// \brief Repair a root while original objects and both forwarding tables remain intact.
     [[nodiscard]] offset forward(offset at) const noexcept {
       if (state != phase::prepared)
@@ -2059,34 +1307,7 @@ public:
     /// \brief Move with the original SIMD kernel and pack only after both moves finish.
     /// \pre VM roots and old remembered fields have been repaired. Republish both aliases
     /// before resuming mutators. Majors need no combined-live-size fit in either generation.
-    void finish() noexcept {
-      if (state != phase::prepared)
-        detail::heap_failure("host finish outside prepared phase");
-      detail::forwarding_tables tables{owner.minor_collection ? nullptr : owner.arena.metadata.data(), owner.nursery.metadata.data(),
-        owner.minor_collection ? nullptr : owner.arena.alignment_table(), owner.nursery.alignment_table()};
-      auto const old_origin = owner.minor_collection ? owner.arena.origin : owner.arena.rotated_origin();
-      auto const young_origin = owner.nursery.rotated_origin();
-      if (!owner.minor_collection) {
-        auto * target = owner.arena.at_origin(old_origin);
-        owner.arena.move_to(target, tables);
-        owner.arena.zero_gaps(target, 0);
-      }
-      auto * target = promoting ? owner.arena.data() : owner.nursery.at_origin(young_origin);
-      owner.nursery.move_to(target, tables);
-      owner.nursery.zero_gaps(target, promoting ? owner.arena.cursor : 0);
-      // Both moves consumed the original tables. Packing may overwrite them now.
-      if (!owner.minor_collection) owner.arena.pack_into(owner.arena.metadata);
-      owner.nursery.pack_into(promoting ? owner.arena.metadata : owner.nursery.metadata);
-      if (!owner.minor_collection || promoting) owner.arena.adopt(old_origin, old_words);
-      if (promoting) owner.nursery.reset();
-      else owner.nursery.adopt(young_origin, young_words);
-      owner.collecting = false;
-      owner.minor_collection = false;
-      state = phase::idle;
-      if (promoting && young_words > 1)
-        static_cast<void>(owner.nursery.allocate(young_words - 1));
-      std::atomic_signal_fence(std::memory_order_seq_cst);
-    }
+    void finish() noexcept;
   };
   /// \brief Runtime-selected compaction implementation, including SIMD ISA admission.
   [[nodiscard]] char const * compactor_name() const noexcept { return compactor.name; }
@@ -2132,8 +1353,7 @@ public:
   /// \pre Capacity holds at least twice the reserve; workers are positive.
   /// \throws std::length_error if any generation size exceeds 16 GiB.
   /// Mapping/allocation/thread creation failures terminate; collection never unwinds.
-  explicit heap(heap_options config = {})
-      : heap(configured{}, configure(config)) {}
+  explicit heap(heap_options config = {});
   /// \brief Inspect generation zero's arena.
   [[nodiscard]] generation const & old() const noexcept { return arena; }
   /// \brief Inspect generation one's arena.
@@ -2143,10 +1363,7 @@ public:
   heap(heap const &) = delete;
   heap & operator=(heap const &) = delete;
   /// \brief Release the arena; every attached root must already be destroyed.
-  ~heap() noexcept {
-    if (roots_head || running_finalizer) detail::heap_failure("heap destroyed with attached roots or callbacks");
-    for (auto const & entry : weak_entries) entry->active = false;
-  }
+  ~heap() noexcept;
   /// \brief Register a record or null in the current heap.
   /// \pre This heap is current; a nonnull offset names an allocated record understood by the tracer.
   [[nodiscard]] native_inline root_handle root(offset at) noexcept {
@@ -2186,19 +1403,13 @@ public:
   /// Nonnull untyped roots or untyped visitor.field edges require collect(trace).
   /// External ptr copies expire, including stack variables and loaded snapshots.
   /// Only registered roots retain their meaning; reacquire pointers from them.
-  void collect() noexcept {
-    collect([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); });
-  }
+  void collect() noexcept;
   /// \brief Trace both generations and compact survivors into old; reset the countdown.
   /// \ingroup jam_heap
-  void collect_major() noexcept {
-    collect_major([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); });
-  }
+  void collect_major() noexcept;
   /// \brief Collect young without walking old; optionally promote survivors; preserve the countdown.
   /// \ingroup jam_heap
-  void collect_minor(bool promote = false) noexcept {
-    collect_minor([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); }, promote);
-  }
+  void collect_minor(bool promote = false) noexcept;
   /** \brief Scheduled collection with a fallback tracer for untyped records.
    * \ingroup jam_heap
    * \param trace A noexcept callable accepting visitor& and a record offset.
@@ -2259,8 +1470,10 @@ private:
     }, &state);
     initial.clear();
   }
-  template<class Trace>
-  void run_collection(Trace && trace, bool minor, bool promote) noexcept {
+  native_inline void seed_job(std::vector<trace_job> & initial, trace_job job) noexcept {
+    if (job.at && !marked(job.at)) initial.push_back(job);
+  }
+  [[nodiscard]] native_inline std::vector<trace_job> begin_collection(bool minor) noexcept {
     require_mutator();
     // Compiler-only safepoint: publish mutator stores before tracing. Worker
     // synchronization is supplied by the pool; this is not a hardware fence.
@@ -2283,40 +1496,55 @@ private:
       std::memcpy(&value, reinterpret_cast<std::byte const *>(arena.data()) + std::size_t(slot) * sizeof(offset), sizeof(value));
       if ((value & young_bit) && callback != &weak_slot) initial.push_back({value, callback});
     }
-    auto seed = [&](trace_job job) noexcept {
-      if (job.at && !marked(job.at)) initial.push_back(job);
-    };
-    auto seed_finalizer = [&](weak_entry const & entry) noexcept {
-      seed(entry.key); seed(entry.finalizer);
-    };
-    for (auto const & entry : pending_finalizers) seed_finalizer(*entry);
-    for (auto * entry = running_finalizer; entry; entry = entry->previous_running) seed_finalizer(*entry);
-    auto drain = [&]() noexcept {
-      drain_jobs(trace, initial, workers.available_workers());
-    };
-    drain();
+    for (auto const & entry : pending_finalizers) {
+      seed_job(initial, entry->key);
+      seed_job(initial, entry->finalizer);
+    }
+    for (auto * entry = running_finalizer; entry; entry = entry->previous_running) {
+      seed_job(initial, entry->key);
+      seed_job(initial, entry->finalizer);
+    }
+    return initial;
+  }
+  native_inline void order_weak_entries() noexcept {
     std::stable_sort(weak_entries.begin(), weak_entries.end(), [](auto const & a, auto const & b) noexcept {
       return a->key.at < b->key.at;
     });
-    std::size_t retained = 0;
-    for (auto const & entry : weak_entries) {
-      if (marked(entry->key.at)) {
-        seed(entry->value); seed(entry->finalizer);
-        weak_entries[retained++] = entry;
-      } else {
-        // Retire before retaining K/F: this entry never rearms, even on resurrection.
-        entry->active = false;
-        pending_finalizers.push_back(entry);
-        seed_finalizer(*entry);
-      }
-      drain();
+  }
+  [[nodiscard]] native_inline bool retain_weak(std::shared_ptr<weak_entry> const & entry,
+                               std::vector<trace_job> & initial) noexcept {
+    if (marked(entry->key.at)) {
+      seed_job(initial, entry->value);
+      seed_job(initial, entry->finalizer);
+      return true;
     }
-    weak_entries.resize(retained);
+    // Retire before retaining K/F: this entry never rearms, even on resurrection.
+    entry->active = false;
+    pending_finalizers.push_back(entry);
+    seed_job(initial, entry->key);
+    seed_job(initial, entry->finalizer);
+    return false;
+  }
+  void finish_collection(bool minor, bool promote) noexcept {
     compact_impl({}, minor, promote);
     collecting = false; minor_collection = false;
     if (!minor) minors_left = policy.minor_collections;
     std::atomic_signal_fence(std::memory_order_seq_cst);
     drain_finalizers();
+  }
+  void run_collection(auto && trace, bool minor, bool promote) noexcept {
+    std::size_t retained = 0;
+    {
+      auto initial = begin_collection(minor);
+      drain_jobs(trace, initial, workers.available_workers());
+      order_weak_entries();
+      for (auto const & entry : weak_entries) {
+        if (retain_weak(entry, initial)) weak_entries[retained++] = entry;
+        drain_jobs(trace, initial, workers.available_workers());
+      }
+    }
+    weak_entries.resize(retained);
+    finish_collection(minor, promote);
   }
 public:
   /// \brief Allocate and copy a typed record, returning an unrooted reference.
@@ -2373,11 +1601,8 @@ public:
   [[nodiscard]] std::size_t used() const noexcept { return arena.used() + nursery.used() - 1; }
   [[nodiscard]] std::size_t start() const noexcept { return arena.start(); }
   [[nodiscard]] std::size_t page_words() const noexcept { return arena.page_words(); }
-  template<class Self>
-  [[nodiscard]] native_inline native_pure auto data(this Self & self) noexcept
-      -> std::conditional_t<std::is_const_v<Self>, word const, word> * { return self.arena.data(); }
-  template<class Self>
-  [[nodiscard]] decltype(auto) operator[](this Self & self, offset index) noexcept { return self.containing(index)[index & offset_mask]; }
+  [[nodiscard]] native_inline native_pure auto * data(this auto & self) noexcept { return self.arena.data(); }
+  [[nodiscard]] decltype(auto) operator[](this auto & self, offset index) noexcept { return self.containing(index)[index & offset_mask]; }
   [[nodiscard]] offset field(offset cell, unsigned slot = 0) const noexcept { return containing(cell).field(cell & offset_mask, slot); }
   void set_field(offset cell, offset value, unsigned slot = 0) noexcept { require_mutator(); containing(cell).set_field(cell & offset_mask, value, slot);
     if (!(cell & young_bit) && (value & young_bit)) remembered.insert_or_assign(cell * 2 + slot, nullptr); }
@@ -2392,14 +1617,7 @@ public:
     return containing(first).claim(first & offset_mask, words, alignment_bytes);
   }
   native_inline void pointer(offset where, unsigned slot = 0) noexcept { containing(where).pointer(where & offset_mask, slot); }
-  void compact(std::span<offset> roots = {}) noexcept {
-    require_mutator();
-    if (!weak_entries.empty() || !pending_finalizers.empty() || running_finalizer)
-      detail::heap_failure("raw compact requires no weak registrations or pending finalizers");
-    std::atomic_signal_fence(std::memory_order_seq_cst);
-    collecting = true; compact_impl(roots); collecting = false;
-    std::atomic_signal_fence(std::memory_order_seq_cst);
-  }
+  void compact(std::span<offset> roots = {}) noexcept;
 
 };
 
@@ -2525,53 +1743,6 @@ jam::weak<V> heap::mk_weak(ptr<K> const & key, ptr<V> const & value,
   return jam::weak<V>{std::move(entry)};
 }
 
-/// \brief Register a weak key/value pair and managed finalizer in the current heap.
-/// The captureless runner receives a nullable F* and obeys normal borrow rules; no destructor is invoked.
-export template<traceable K, traceable V, traceable F>
-[[nodiscard]] native_inline weak<V> mk_weak(ptr<K> const & key, ptr<V> const & value,
-    ptr<F> const & finalizer, std::type_identity_t<void (*)(F *) noexcept> runner) noexcept {
-  return heap::current()->mk_weak(key, value, finalizer, runner);
-}
-
-/// \brief Allocate a record in the current heap; register a root before collection.
-export template<traceable T, class... Args>
-[[nodiscard]] native_inline ptr<T> mk(Args &&... args) noexcept {
-  return heap::current()->mk<T>(std::forward<Args>(args)...);
-}
-
-/// \brief Bulk-copy pointer bits without registration; the caller owns the barrier.
-export template<class T, std::size_t N>
-native_inline constexpr void unsafe_assign(std::array<ptr<T>, N> & target, std::array<ptr<T>, N> const & source) noexcept {
-  for (std::size_t i = 0; i != N; ++i) target[i].unsafe_assign(source[i]);
-}
-/// \brief Copy an array and register young lanes with one old-range check.
-export template<class T, std::size_t N>
-native_inline constexpr void assign(std::array<ptr<T>, N> & target, std::array<ptr<T>, N> const & source) noexcept {
-  unsafe_assign(target, source);
-  if !consteval { if (auto * h = heap::current()) h->remember(std::span<ptr<T>>{target}); }
-}
-
-/// \brief Bulk-copy weak pointer bits without registration; caller owns the barriers.
-export template<class T, std::size_t N>
-native_inline constexpr void unsafe_assign(std::array<weak_ptr<T>, N> & target,
-                                          std::array<weak_ptr<T>, N> const & source) noexcept {
-  for (std::size_t i = 0; i != N; ++i) target[i].unsafe_assign(source[i]);
-}
-/// \brief Copy weak fields and update remembered entries with one old-range check.
-export template<class T, std::size_t N>
-native_inline constexpr void assign(std::array<weak_ptr<T>, N> & target,
-                                   std::array<weak_ptr<T>, N> const & source) noexcept {
-  unsafe_assign(target, source);
-  if !consteval { if (auto * h = heap::current()) h->remember(std::span<weak_ptr<T>>{target}); }
-}
-
-/// \brief Collect the current heap; only registered roots remain meaningful outside it.
-export native_inline void collect() noexcept { heap::current()->collect(); }
-/// \brief Collect both generations of the current heap; reset its collection countdown.
-export native_inline void collect_major() noexcept { heap::current()->collect_major(); }
-/// \brief Collect the current heap's young generation; optionally promote survivors.
-export native_inline void collect_minor(bool promote = false) noexcept { heap::current()->collect_minor(promote); }
-
 template<class T>
 constexpr void weak_ptr<T>::update_barrier() noexcept {
   if !consteval { if (auto * h = heap::current()) h->remember(*this); }
@@ -2692,5 +1863,510 @@ native_inline void ptr<T>::prefetch() const noexcept {
   auto const * arena = heap::current();
   assert(arena && local_offset() < arena->containing(position).used());
   __builtin_prefetch(arena->decode(position), 0, 3);
+}
+}
+
+namespace jam {
+heap::generation::settings heap::generation::configure(generation_options config) {
+  if (config.maximum > units::bytes{maximum_bytes} || config.capacity > units::bytes{maximum_bytes} || config.reserve > units::bytes{maximum_bytes})
+    throw std::length_error("jam generation exceeds 16 GiB");
+  constexpr auto page = static_cast<std::size_t>(units::pages::ratio::num);
+  if (detail::heap_mapping::page_size() != page)
+    detail::heap_failure("platform page size differs from build invariant");
+  if (!valid_options(config) || page < 512 || page > maximum_bytes || !std::has_single_bit(page))
+    detail::heap_failure("invalid byte sizes, page size or worker count");
+  if (config.reserve > config.capacity / 2)
+    detail::heap_failure("capacity must hold twice the reserve");
+  auto const capacity = units::bytes{config.capacity}.count();
+  auto const reserve = units::bytes{config.reserve}.count();
+  return {page / 8, reserve / 8, 2 * reserve / 8, capacity, config};
+}
+
+heap::generation::generation(settings s, detail::compactor const & c, detail::work_pool & w, std::byte * address) noexcept
+    : policy(s.policy), compactor(c), workers(w),
+      page_word_count(s.page_words), reserve_word_count(s.reserved),
+      minimum_capacity(s.minimum), storage(s.bytes, address, units::bytes{s.policy.maximum}.count()),
+      view_base(reinterpret_cast<word *>(storage.data())), metadata(s.bytes / (8 * block_words)) {
+  alignment.resize(((metadata.size() + 7) / 8) * 4);
+}
+
+void heap::generation::resize(std::size_t words) noexcept {
+  assert(words % page_word_count == 0 && words >= minimum_capacity && words <= maximum_bytes / 8);
+  assert(cursor <= words - reserve_word_count);
+  std::vector<block> next_metadata(words / block_words);
+  std::copy_n(metadata.begin(), (cursor + block_words - 1) / block_words, next_metadata.begin());
+  auto const next_origin = words - reserve_word_count;
+  auto next = storage.resized(origin * 8, cursor * 8, words * 8, next_origin * 8);
+  alignment.resize(((next_metadata.size() + 7) / 8) * 4);
+  storage.replace(next); metadata.swap(next_metadata);
+  origin = next_origin;
+  view_base = reinterpret_cast<word *>(storage.data()) + origin;
+}
+
+heap::generation::generation(generation_options config, detail::compactor const & c, detail::work_pool & w, std::byte * address)
+    : generation(configure(config), c, w, address) {}
+
+void heap::generation::clear_marks() noexcept {
+  for (auto & item : metadata) {
+    item.live = 0;
+    item.destination = 0;
+  }
+  std::fill(alignment.begin(), alignment.end(), 0);
+  has_alignment = false;
+}
+
+void heap::generation::compact(std::span<offset> roots) noexcept {
+  require_mutator();
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+  collecting = true;
+  compact_impl(roots);
+  collecting = false;
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+}
+
+std::size_t heap::generation::prepare(std::size_t start, bool keep_null) noexcept {
+  // Keep the null cell in the packed prefix, including aligned collections.
+  // It is padding, never a record or a source of outgoing pointers.
+  data()[0] = 0;
+  if (keep_null) metadata[0].live |= bitmap{1};
+  else metadata[0].live &= ~bitmap{1};
+  metadata[0].pointers &= ~word{(1u << fields_per_word) - 1};
+  auto const old_blocks = (cursor + block_words - 1) / block_words;
+  // A parallel prefix scan could compose joined groups' layout functions:
+  // F(x) = align_up(x, 1 << k) + retained_cells_after_dilation. Resolve group
+  // boundaries/k first; composing (max k, summed counts) loses padding.
+  // Eight input-residue displacements suffice (k <= 3), with associative
+  // composition c[r] = a[r] + b[(r + a[r]) & 7]. All destinations must be
+  // ready before workers forward arbitrary pointers into distant blocks.
+  // This whole pass measured only 0.5-1.7% of GC on eight-byte-aligned trees
+  // and chains with 1/4 workers, so scan overhead could erase the benefit.
+  // Sparse retention and higher alignments were not covered; reprofile those
+  // workloads before adding a parallel scan.
+  has_alignment = false;
+  std::size_t live_words = start;
+  for (std::size_t begin = 0; begin < old_blocks;) {
+    auto end = begin + 1;
+    unsigned k = std::popcount(flags(begin) & 7u);
+    while ((flags(end - 1) & 8u) && end < old_blocks) {
+      k = std::max(k, static_cast<unsigned>(std::popcount(flags(end) & 7u))); ++end;
+    }
+    live_words = (live_words + (std::size_t{1} << k) - 1) & ~((std::size_t{1} << k) - 1);
+    for (auto i = begin; i != end; ++i) {
+      auto & item = metadata[i];
+      item.pointers &= pointer_cells(item.live);
+      // Publish the joined group's effective k in the existing nibbles.
+      // live remains the exact claims; dilation is only a register value.
+      auto const shift = (i & 1) * 4;
+      alignment[i >> 1] = static_cast<std::uint8_t>((alignment[i >> 1] & ~(7u << shift))
+          | (((1u << k) - 1) << shift));
+      has_alignment |= k != 0;
+      item.destination = static_cast<offset>(live_words);
+      live_words += std::popcount(detail::retained(item.live, k));
+    }
+    begin = end;
+  }
+  return live_words;
+}
+
+void heap::generation::move_to(word * target, detail::forwarding_tables tables) noexcept {
+  auto const old_blocks = (cursor + block_words - 1) / block_words;
+  auto const source = data();
+  auto const source_pages = (cursor + page_word_count - 1) / page_word_count;
+  auto const wave_pages = reserve_word_count / page_word_count;
+  auto move_page = [&](std::size_t page) noexcept {
+    auto const begin = page * (page_word_count / block_words);
+    auto const end = std::min(old_blocks, begin + page_word_count / block_words);
+    compactor.move(source, target, metadata.data(), begin, end, tables, alignment_table());
+  };
+  if (workers.available_workers() > 1 && source_pages > 1) {
+    auto done = std::make_unique<std::atomic<bool>[]>(source_pages);
+    std::atomic<std::size_t> next{0}, front{0};
+    auto task = [&](std::size_t) noexcept {
+      for (;;) {
+        auto const page = next.fetch_add(1, std::memory_order_relaxed);
+        if (page >= source_pages) return;
+        auto floor = front.load(std::memory_order_acquire);
+        while (page - floor >= wave_pages) {
+          front.wait(floor, std::memory_order_relaxed);
+          floor = front.load(std::memory_order_acquire);
+        }
+        move_page(page);
+        done[page].store(true, std::memory_order_release);
+        // Every completion publishes through this RMW chain, even when an
+        // older page still blocks the prefix. The last publisher therefore
+        // sees all earlier done flags; a store-buffering cycle cannot stall.
+        floor = front.fetch_add(0, std::memory_order_acq_rel);
+        for (;;) {
+          auto end = floor;
+          while (end != source_pages && done[end].load(std::memory_order_acquire)) ++end;
+          if (end == floor) break;
+          if (front.compare_exchange_strong(floor, end, std::memory_order_acq_rel)) {
+            front.notify_all(); break;
+          }
+          floor = front.load(std::memory_order_acquire);
+        }
+      }
+    };
+    workers.run(std::min(workers.available_workers(), wave_pages),
+      [](void * context, std::size_t i) noexcept {
+        (*static_cast<decltype(task) *>(context))(i);
+      }, &task);
+  } else for (std::size_t page = 0; page < source_pages; ++page) move_page(page);
+}
+
+void heap::generation::zero_gaps(word * target, std::size_t previous_end) const noexcept {
+  auto const old_blocks = (cursor + block_words - 1) / block_words;
+  for (std::size_t i = 0; i != old_blocks; ++i) {
+    auto const next = std::size_t(metadata[i].destination & offset_mask);
+    std::fill(target + previous_end, target + next, word{0});
+    previous_end = next + std::popcount(detail::retained(metadata[i], alignment_table(), i));
+  }
+}
+
+void heap::generation::pack_into(std::vector<block> & output) const noexcept {
+  auto const old_blocks = (cursor + block_words - 1) / block_words;
+  compactor.pack(metadata.data(), output.data(), old_blocks, alignment_table());
+}
+
+void heap::generation::ensure(std::size_t words) noexcept {
+  auto const maximum = units::bytes{policy.maximum}.count() / sizeof(word);
+  if (words > maximum - reserve_word_count) detail::heap_failure("generation capacity overflow");
+  while (words > capacity() - reserve_word_count) resize(std::min(2 * capacity(), maximum));
+}
+
+void heap::generation::adopt(std::size_t next_origin, std::size_t words) noexcept {
+  auto const old_blocks = (cursor + block_words - 1) / block_words;
+  cursor = words; origin = next_origin; view_base = at_origin(origin);
+  auto const blocks = (cursor + block_words - 1) / block_words;
+  for (std::size_t i = 0; i != blocks; ++i) {
+    auto const count = std::min(block_words, cursor - i * block_words);
+    metadata[i].live = ~bitmap{0} >> (block_words - count);
+    metadata[i].destination = 0;
+  }
+  for (auto i = blocks; i < old_blocks; ++i) metadata[i] = {};
+  std::fill(alignment.begin(), alignment.end(), 0);
+  has_alignment = false;
+  auto const smaller = std::max(minimum_capacity, (capacity() / page_word_count / 2) * page_word_count);
+  if (policy.shrink_shift && smaller < capacity()
+      && cursor < (capacity() >> policy.shrink_shift)
+      && cursor <= smaller - reserve_word_count) resize(smaller);
+}
+
+void heap::generation::reset() noexcept {
+  for (auto & item : metadata) item = {};
+  std::fill(alignment.begin(), alignment.end(), 0);
+  has_alignment = false;
+  cursor = 1; data()[0] = 0;
+}
+
+void heap::generation::compact_impl(std::span<offset> roots) noexcept {
+  auto const live_words = prepare(0, true);
+  auto const next_origin = rotated_origin();
+  auto * target = at_origin(next_origin);
+  move_to(target, {metadata.data(), nullptr, alignment_table(), nullptr});
+  for (auto & root : roots) root = forward(root);
+  zero_gaps(target, 0);
+  pack_into(metadata);
+  adopt(next_origin, live_words);
+}
+}
+
+namespace jam {
+heap_options heap::configure(heap_options config) {
+  static_cast<void>(generation::configure(config.old));
+  static_cast<void>(generation::configure(config.young));
+  if (!config.workers) detail::heap_failure("worker count must be positive");
+  return config;
+}
+
+heap::heap(configured, heap_options config) noexcept
+    : workers(config.workers),
+      reservation(units::bytes{config.old.maximum}.count(), units::bytes{config.young.maximum}.count()),
+      arena(config.old, compactor, workers, reservation.data()),
+      nursery(config.young, compactor, workers, reservation.data() + 2 * units::bytes{config.old.maximum}.count()),
+      policy(config), minors_left(config.minor_collections) {}
+
+void heap::compact_impl(std::span<offset> roots, bool minor, bool promote) noexcept {
+  auto const old_end = minor ? arena.cursor : arena.prepare(0, true);
+  auto const young_start = minor && !promote ? std::size_t(young_bit) : old_end;
+  auto const end = nursery.prepare(young_start, minor && !promote);
+  auto & destination = minor && !promote ? nursery : arena;
+  auto const live_words = end - (minor && !promote ? std::size_t(young_bit) : 0);
+  destination.ensure(live_words);
+  // Growth may rebase metadata, so form the shared forwarding tables afterward.
+  detail::forwarding_tables tables{minor ? nullptr : arena.metadata.data(), nursery.metadata.data(),
+    minor ? nullptr : arena.alignment_table(), nursery.alignment_table()};
+  auto const next_origin = minor && promote ? destination.origin : destination.rotated_origin();
+  auto * target = destination.at_origin(next_origin);
+  if (!minor) {
+    arena.move_to(target, tables);
+    arena.zero_gaps(target, 0);
+  }
+  nursery.move_to(target, tables);
+  nursery.zero_gaps(target, minor && !promote ? 0 : old_end);
+  for (auto & root : roots) root = forward(root, minor);
+  for (auto slot = roots_head; slot; slot = root_slots[slot - 1].next) {
+    auto & entry = root_slots[slot - 1];
+    entry.position = forward(entry.position, minor);
+  }
+  if (minor) for (auto entry = remembered.begin(); entry != remembered.end();) {
+    auto const slot = entry->first;
+    auto * address = reinterpret_cast<std::byte *>(arena.data()) + std::size_t(slot) * sizeof(offset);
+    offset value;
+    std::memcpy(&value, address, sizeof(value));
+    value = forward(value, true);
+    std::memcpy(address, &value, sizeof(value)); // Collector writes bypass barriers.
+    if (value) ++entry; else entry = remembered.erase(entry);
+  }
+  auto forward_entry = [&](weak_entry & entry) noexcept {
+    entry.key.at = forward(entry.key.at, minor);
+    entry.value.at = entry.active ? forward(entry.value.at, minor) : null;
+    entry.finalizer.at = forward(entry.finalizer.at, minor);
+  };
+  for (auto const & entry : weak_entries) forward_entry(*entry);
+  for (auto const & entry : pending_finalizers) forward_entry(*entry);
+  for (auto * entry = running_finalizer; entry; entry = entry->previous_running) forward_entry(*entry);
+  // Both generations and every external/remembered root have consumed the
+  // forwarding tables. Packing may now overwrite their pointer masks.
+  if (!minor) arena.pack_into(arena.metadata);
+  nursery.pack_into(destination.metadata);
+  destination.adopt(next_origin, live_words);
+  if (!minor || promote) { nursery.reset(); remembered.clear(); }
+}
+
+heap::heap(heap_options config)
+    : heap(configured{}, configure(config)) {}
+
+heap::~heap() noexcept {
+  if (roots_head || running_finalizer) detail::heap_failure("heap destroyed with attached roots or callbacks");
+  for (auto const & entry : weak_entries) entry->active = false;
+}
+
+void heap::collect() noexcept {
+  collect([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); });
+}
+
+void heap::collect_major() noexcept {
+  collect_major([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); });
+}
+
+void heap::collect_minor(bool promote) noexcept {
+  collect_minor([](visitor &, offset) noexcept { detail::heap_failure("untyped target in typed collection"); }, promote);
+}
+
+void heap::compact(std::span<offset> roots) noexcept {
+  require_mutator();
+  if (!weak_entries.empty() || !pending_finalizers.empty() || running_finalizer)
+    detail::heap_failure("raw compact requires no weak registrations or pending finalizers");
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+  collecting = true; compact_impl(roots); collecting = false;
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+}
+}
+
+namespace jam {
+std::uint32_t heap::allocate_root(offset at, trace_function trace) noexcept {
+  auto slot = free_root;
+  if (slot) free_root = root_slots[slot - 1].next;
+  else {
+    if (root_slots.size() == std::numeric_limits<std::uint32_t>::max())
+      detail::heap_failure("root slot capacity overflow");
+    root_slots.push_back({});
+    slot = static_cast<std::uint32_t>(root_slots.size());
+  }
+  root_slots[slot - 1] = {at, 1, 0, roots_head, trace};
+  if (roots_head) root_slots[roots_head - 1].previous = slot;
+  roots_head = slot;
+  return slot;
+}
+
+void heap::recycle_root(std::uint32_t slot) noexcept {
+  auto & entry = root_slots[slot - 1];
+  if (entry.previous) root_slots[entry.previous - 1].next = entry.next;
+  else roots_head = entry.next;
+  if (entry.next) root_slots[entry.next - 1].previous = entry.previous;
+  entry = {0, 0, 0, free_root, nullptr};
+  free_root = slot;
+}
+
+native_noinline void heap::forget_slot(std::uint32_t slot) noexcept {
+  remembered.erase(slot);
+}
+
+native_noinline void heap::remember_slot(std::uint32_t slot, trace_function trace) noexcept {
+  require_mutator();
+  remembered.insert_or_assign(slot, trace);
+}
+}
+
+namespace jam {
+void heap::run_finalizer(std::shared_ptr<weak_entry> const & entry) noexcept {
+  entry->previous_running = running_finalizer;
+  running_finalizer = entry.get();
+  {
+    heap_scope binding{*this};
+    entry->invoke(*this, *entry);
+  }
+  running_finalizer = entry->previous_running;
+}
+
+void heap::drain_finalizers() noexcept {
+  if (running_finalizer) return;
+  while (!pending_finalizers.empty()) {
+    auto entry = std::move(pending_finalizers.front());
+    pending_finalizers.pop_front();
+    run_finalizer(entry);
+  }
+}
+
+void heap::finalize(std::shared_ptr<weak_entry> const & entry) noexcept {
+  require_mutator();
+  if (!entry->active) return;
+  entry->active = false;
+  std::erase(weak_entries, entry);
+  run_finalizer(entry);
+  drain_finalizers();
+}
+}
+
+namespace jam {
+heap::host::host(heap & storage, std::size_t prefix) noexcept : owner(storage), prefix(prefix) {
+  owner.require_mutator();
+  for (auto * g : {&owner.arena, &owner.nursery}) {
+    if (g->used() != 1 || g->policy.capacity != g->policy.maximum || g->policy.shrink_shift ||
+        !prefix || prefix % g->page_words() || prefix >= g->capacity() - g->reserved())
+      detail::heap_failure("host requires fresh fixed generations and a whole-page guard");
+  }
+  static_cast<void>(owner.arena.allocate(prefix - 1));
+  static_cast<void>(owner.nursery.allocate(prefix - 1));
+}
+
+heap::host::~host() noexcept {
+  if (state != phase::idle) detail::heap_failure("unfinished host collection");
+#if defined(_WIN32)
+  if (!publications.empty()) detail::heap_failure("host destroyed with published Windows views");
+#endif
+}
+
+void heap::host::publish(generation which, void * target, std::size_t skip, std::size_t count) const noexcept {
+  if (state != phase::idle) detail::heap_failure("publish during host collection");
+  auto const & g = which == generation::young ? owner.nursery : owner.arena;
+  auto const & config = which == generation::young ? owner.policy.young : owner.policy.old;
+  if (config.capacity != config.maximum || config.shrink_shift ||
+      skip > g.capacity() || count > g.capacity() - skip)
+    detail::heap_failure("published heap requires a fixed generation");
+#if defined(_WIN32)
+  auto const address = reinterpret_cast<std::uintptr_t>(target);
+  auto const bytes = count * 8;
+  if (address % detail::heap_mapping::page_size() || skip % g.page_words() ||
+      count % g.page_words() || bytes > std::numeric_limits<std::uintptr_t>::max() - address)
+    detail::heap_failure("invalid published heap window");
+  if (!bytes) return;
+  for (auto const * space : {&owner.arena, &owner.nursery}) {
+    auto const begin = reinterpret_cast<std::uintptr_t>(space->storage.data());
+    if (address < begin + space->storage.bytes() * 2 && begin < address + bytes)
+      detail::heap_failure("published heap window overlaps a private view");
+  }
+  bool found = false;
+  for (auto const & window : publications) {
+    auto const begin = reinterpret_cast<std::uintptr_t>(window.target);
+    if (address < begin + window.bytes && begin < address + bytes) {
+      if (window.target != target || window.bytes != bytes || window.source != &g.storage)
+        detail::heap_failure("published heap windows must be disjoint or identical");
+      detail::heap_mapping::unpublish(window.target, window.bytes);
+      found = true;
+      break;
+    }
+  }
+  if (!found) publications.push_back({&g.storage, static_cast<std::byte *>(target), bytes});
+#endif
+  g.storage.publish(((g.origin + skip) % g.capacity()) * 8,
+    static_cast<std::byte *>(target), count * 8);
+}
+
+void heap::host::unpublish(void * target, std::size_t count) const noexcept {
+  if (state != phase::idle) detail::heap_failure("unpublish during host collection");
+  if (count > std::numeric_limits<std::size_t>::max() / 8)
+    detail::heap_failure("unpublished heap window is too large");
+#if defined(_WIN32)
+  auto const where = std::find_if(publications.begin(), publications.end(), [&](auto const & window) noexcept {
+    return window.target == target && window.bytes == count * 8;
+  });
+  if (where == publications.end()) detail::heap_failure("unpublish requires an exact published window");
+  detail::heap_mapping::unpublish(where->target, where->bytes);
+  publications.erase(where);
+#else
+  detail::heap_mapping::unpublish(static_cast<std::byte *>(target), count * 8);
+#endif
+}
+
+void heap::host::begin(bool minor) noexcept {
+  owner.require_mutator();
+  if (state != phase::idle) detail::heap_failure("host begin outside idle phase");
+  if (owner.roots_head || !owner.weak_entries.empty() || !owner.pending_finalizers.empty() ||
+      owner.running_finalizer || !owner.remembered.empty())
+    detail::heap_failure("host collection requires exclusively VM-owned roots");
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+  owner.collecting = true;
+  owner.minor_collection = minor;
+  state = phase::marking;
+  owner.nursery.clear_marks();
+  for (auto & item : owner.nursery.metadata) item.pointers = 0;
+  if (!minor) {
+    owner.arena.clear_marks();
+    for (auto & item : owner.arena.metadata) item.pointers = 0;
+  }
+}
+
+[[nodiscard]] bool heap::host::prepare(bool promote) noexcept {
+  if (state != phase::marking && state != phase::retry)
+    detail::heap_failure("host prepare outside marking phase");
+  promoting = owner.minor_collection && promote;
+  if (!owner.minor_collection) {
+    if (prefix > 1) owner.arena.mark(1, prefix - 1);
+    old_words = owner.arena.prepare(0, true);
+  } else old_words = owner.arena.cursor;
+  if (promoting) {
+    old_words = owner.nursery.prepare(owner.arena.cursor, false);
+    if (old_words > owner.arena.capacity() - owner.arena.reserved()) {
+      state = phase::retry;
+      return false;
+    }
+    young_words = prefix;
+  } else {
+    if (prefix > 1) owner.nursery.mark(1, prefix - 1);
+    young_words = owner.nursery.prepare(young_bit, true) - young_bit;
+  }
+  state = phase::prepared;
+  return true;
+}
+
+void heap::host::finish() noexcept {
+  if (state != phase::prepared)
+    detail::heap_failure("host finish outside prepared phase");
+  detail::forwarding_tables tables{owner.minor_collection ? nullptr : owner.arena.metadata.data(), owner.nursery.metadata.data(),
+    owner.minor_collection ? nullptr : owner.arena.alignment_table(), owner.nursery.alignment_table()};
+  auto const old_origin = owner.minor_collection ? owner.arena.origin : owner.arena.rotated_origin();
+  auto const young_origin = owner.nursery.rotated_origin();
+  if (!owner.minor_collection) {
+    auto * target = owner.arena.at_origin(old_origin);
+    owner.arena.move_to(target, tables);
+    owner.arena.zero_gaps(target, 0);
+  }
+  auto * target = promoting ? owner.arena.data() : owner.nursery.at_origin(young_origin);
+  owner.nursery.move_to(target, tables);
+  owner.nursery.zero_gaps(target, promoting ? owner.arena.cursor : 0);
+  // Both moves consumed the original tables. Packing may overwrite them now.
+  if (!owner.minor_collection) owner.arena.pack_into(owner.arena.metadata);
+  owner.nursery.pack_into(promoting ? owner.arena.metadata : owner.nursery.metadata);
+  if (!owner.minor_collection || promoting) owner.arena.adopt(old_origin, old_words);
+  if (promoting) owner.nursery.reset();
+  else owner.nursery.adopt(young_origin, young_words);
+  owner.collecting = false;
+  owner.minor_collection = false;
+  state = phase::idle;
+  if (promoting && young_words > 1)
+    static_cast<void>(owner.nursery.allocate(young_words - 1));
+  std::atomic_signal_fence(std::memory_order_seq_cst);
 }
 }

@@ -20,7 +20,7 @@
 #include "../etc/page-size.h"
 
 import jam;
-import native;
+import native.features;
 
 namespace {
 

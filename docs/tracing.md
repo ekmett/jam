@@ -60,9 +60,16 @@ ones; the forwarder clears unclaimed targets after marking has finished.
 
 For a type you cannot change, specialize `jam::tracer<T>`. Its ordinary hook is
 `trace(Visitor &, T const &)`. Hooks take precedence over manifests. A type with
-neither is treated as a leaf; Jam cannot discover unlisted pointers. Deriving a
-specialization from `jam::leaf<T>` explicitly makes that promise. Raw C++ pointers
-are data, not managed edges.
+neither is treated as a leaf; Jam cannot discover unlisted pointers. Raw C++
+pointers are data, not managed edges.
+
+`jam::leaf<T>` is an advanced customization helper, not a base class for heap
+objects. `template<> struct jam::tracer<T> : jam::leaf<T> {};` explicitly makes
+value tracing do nothing, for example when a foreign type has an unrelated
+`trace` member. Scalars and records without hooks or manifests already get that
+behavior; they need no annotation. Suppressing traversal of actual managed
+fields would let their targets die. An allocation-level `claim_and_trace` hook
+still takes precedence.
 
 `ptr<T>` may name an incomplete type. Typed heap operations check
 `jam::traceable<T>` once it is complete. All edges to an allocation must agree on

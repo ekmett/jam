@@ -1,0 +1,108 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+/// \file
+/// \brief Virtual reservations and coherent circular heap mappings.
+module;
+#include <native/attributes.h>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+export module jam.mapping;
+
+export namespace jam::detail {
+native_cold native_noreturn
+void heap_failure(char const * operation, int code = 0) noexcept;
+
+// One reservation gives both generations stable, ordered address ranges. Only
+// the active ring views acquire backing; maximum capacities reserve address space.
+class generation_reservation {
+  std::byte * base_;
+  std::size_t bytes_;
+public:
+  generation_reservation(std::size_t old_maximum, std::size_t young_maximum) noexcept;
+  generation_reservation(generation_reservation const &) = delete;
+  ~generation_reservation() noexcept;
+  std::byte * data() const noexcept { return base_; }
+};
+
+/// \brief Two adjacent coherent views of one circular heap's backing pages.
+/// \details Resizing aliases surviving pages rather than copying their contents.
+class heap_mapping {
+#if defined(_WIN32)
+  struct backing;
+#endif
+  struct span {
+    std::size_t begin, end;
+#if defined(_WIN32)
+    std::shared_ptr<backing> section;
+    std::size_t offset;
+#endif
+  };
+  struct reservation {};
+  std::byte * address = nullptr;
+  std::size_t capacity = 0;
+  std::size_t fixed_extent = 0;
+  // Linux's zero-old-size mremap must remain within one original VMA/object.
+  std::vector<span> spans;
+
+  [[noreturn]] static void system_failure(char const * operation) noexcept;
+  static void validate_size(std::size_t bytes) noexcept;
+  explicit heap_mapping(reservation, std::size_t bytes) noexcept;
+#if defined(_WIN32)
+  static void alias(span const & source, std::byte * target, std::size_t count,
+                    std::size_t offset = 0) noexcept;
+#else
+  static void alias(std::byte * source, std::byte * target, std::size_t count) noexcept;
+#endif
+  void fresh(std::size_t begin, std::size_t count) noexcept;
+  void finish_aliases() noexcept;
+  void discard_gap(std::size_t start, std::size_t live) const noexcept;
+
+  void reset_fixed() noexcept;
+
+public:
+  /// \brief Reserve \p bytes of backing and twice that amount of virtual space.
+  explicit heap_mapping(std::size_t bytes) noexcept;
+  heap_mapping(std::size_t bytes, std::byte * base, std::size_t maximum) noexcept;
+  // Stage surviving aliases before touching the fixed range: source and target
+  // rings may overlap during growth, shrinking or view rotation.
+  void replace(heap_mapping & staged) noexcept;
+  heap_mapping(heap_mapping const &) = delete;
+  heap_mapping & operator=(heap_mapping const &) = delete;
+  heap_mapping(heap_mapping && other) noexcept
+    : address(std::exchange(other.address, nullptr)), capacity(std::exchange(other.capacity, 0)),
+      fixed_extent(std::exchange(other.fixed_extent, 0)), spans(std::move(other.spans)) {}
+  heap_mapping & operator=(heap_mapping && other) noexcept { swap(other); return *this; }
+  /// \brief Release both virtual views.
+  ~heap_mapping() noexcept;
+  /// \brief The first of the two adjacent views.
+  native_inline native_pure std::byte * data() const noexcept { return address; }
+  /// \brief Capacity of one view, in bytes.
+  native_inline native_pure std::size_t bytes() const noexcept { return capacity; }
+  /// \brief Native OS page size, also the mapping granularity.
+  static std::size_t page_size() noexcept;
+  /// \brief Publish a logical arc into a caller-owned, page-aligned reservation.
+  /// \pre Mutators are stopped. Target does not overlap either private ring view.
+  /// On Windows, target is an unmapped placeholder containing the whole arc.
+  void publish(std::size_t start, std::byte * target, std::size_t count) const noexcept;
+  /// \brief Restore an exact published window to inaccessible reserved memory.
+  /// \pre The window consists entirely of unmodified views published by this API.
+  static void unpublish(std::byte * target, std::size_t count) noexcept;
+  /// \brief Exchange mappings without moving payload bytes.
+  void swap(heap_mapping & other) noexcept {
+    std::swap(address, other.address);
+    std::swap(capacity, other.capacity);
+    std::swap(fixed_extent, other.fixed_extent);
+    spans.swap(other.spans);
+  }
+  /// \brief Resize by remapping the live circular arc to a new logical start.
+  /// \details Starts must be page aligned. The final partial live page survives;
+  /// the remaining gap gets fresh backing. Both old views remain usable until
+  /// this object is destroyed; resizing may discard contents of its dead gap.
+  heap_mapping resized(std::size_t old_start_bytes, std::size_t live_bytes,
+                       std::size_t new_bytes, std::size_t new_start_bytes) const noexcept;
+};
+}

@@ -16,7 +16,7 @@ module;
 #include <ratio>
 #include <type_traits>
 
-export module jam:units;
+export module jam.units;
 
 namespace jam::units::detail {
 [[noreturn]] inline void overflow() noexcept {

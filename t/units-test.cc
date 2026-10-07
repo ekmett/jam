@@ -7,7 +7,7 @@
 #include <limits>
 #include <ratio>
 #include <type_traits>
-import jam;
+import jam.units;
 
 namespace adl_check {
 using jam::units::operator""_KiB;

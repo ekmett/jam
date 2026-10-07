@@ -7,7 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <type_traits>
-import jam;
+import jam.simd;
+import native.features;
 
 void check(bool valid, char const * message) {
   if (!valid) { std::fprintf(stderr, "%s\n", message); std::abort(); }

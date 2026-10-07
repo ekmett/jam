@@ -105,9 +105,15 @@ add_library(jam STATIC)
 add_library(jam::jam ALIAS jam)
 target_compile_features(jam PUBLIC cxx_std_26)
 set_target_properties(jam PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
+set(jam_interfaces
+  src/jam.ccm src/jam_unqualified.ccm
+  src/jam/heap.ccm src/jam/mapping.ccm
+  src/jam/packed.ccm src/jam/work.ccm src/jam/units.ccm src/jam/simd.ccm)
+set(jam_implementations
+  src/jam/mapping_impl.cc src/jam/packed_impl.cc)
 target_sources(jam PUBLIC FILE_SET modules TYPE CXX_MODULES
-  BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src"
-  FILES src/jam.ccm src/jam_unqualified.ccm src/jam/heap.ccm src/jam/packed.ccm src/jam/work.ccm src/jam/units.ccm src/jam/simd.ccm)
+  BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src" FILES ${jam_interfaces})
+target_sources(jam PRIVATE ${jam_implementations})
 target_link_libraries(jam PUBLIC Threads::Threads native::native)
 target_compile_definitions(jam PUBLIC JAM_PAGE_BYTES=${JAM_PAGE_BYTES})
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -191,7 +197,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_GENERATE_LATEX NO)
   set(DOXYGEN_GENERATE_XML YES)
   set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
-  set(DOXYGEN_FILE_PATTERNS "*.ccm" "*.md")
+  set(DOXYGEN_FILE_PATTERNS "*.ccm" "*.cc" "*.md")
   set(DOXYGEN_EXTENSION_MAPPING "ccm=C++")
   set(DOXYGEN_EXTRACT_ALL NO)
   set(DOXYGEN_EXTRACT_PRIVATE NO)
@@ -224,7 +230,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
   set(DOXYGEN_QUIET YES)
   file(GLOB jam_vm_guides CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/vm/*.md")
-  doxygen_add_docs(jam-docs src/jam.ccm src/jam_unqualified.ccm src/jam/heap.ccm src/jam/units.ccm src/jam/simd.ccm README.md LICENSE.md
+  doxygen_add_docs(jam-docs ${jam_interfaces} ${jam_implementations} README.md LICENSE.md
     docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md docs/finalizers.md
     ${jam_vm_guides} vm/README.md vm/NOTICE.md
     docs/simd.md docs/collector.md docs/single-base.md docs/hosting.md docs/building.md

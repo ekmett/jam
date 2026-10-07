@@ -3,6 +3,10 @@
 <!-- SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com> -->
 <!-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
+`import jam.simd;` enables pointer vectors and gathers, and also provides the
+scalar Jam API and `native.simd`. Import `native.features` separately for CPU
+inspection. `import jam;` alone does not include SIMD.
+
 `native::simd<ptr<T>, N, A>` stores actual pointer subobjects. Put the vector in a
 manifest and its lanes are traced and forwarded in place. `native::wide<V, K>`
 visits each register. Numeric vectors remain ordinary data. Both can be complete

@@ -19,8 +19,7 @@
 
 #include "../etc/page-size.h"
 
-import jam;
-import native;
+import jam.simd;
 
 auto const page_bytes = static_cast<std::uint64_t>(system_page_size());
 

@@ -56,6 +56,42 @@ For cross compilation, set `JAM_PAGE_BYTES` to the target's page size. The heap
 checks it at runtime. `JAM_CONTEXT_X28=ON` selects the optional AArch64
 [register carrier](collector.md); TLS is the default.
 
+## Module layout
+
+`import jam` provides the scalar heap API. Add `import jam.simd` for pointer
+vectors and gathers. The implementation uses independently
+importable modules, so a consumer can name the layer it needs:
+
+| Module | Contents | Jam dependencies |
+| --- | --- | --- |
+| `jam.units` | Space quantities, conversions and literals | None |
+| `jam.mapping` | OS reservations and circular mappings | None |
+| `jam.work` | Worker pool and marking frontier | None |
+| `jam.packed` | Rank metadata and compactor interface | None |
+| `jam.heap` | Heap, pointers, roots, tracing and collection | Units, mapping, work, packed |
+| `jam.simd` | SIMD pointer storage and gathers | Jam |
+| `jam` | Scalar API and current-heap convenience functions | Heap, units |
+| `jam.unqualified` | Scalar API with names in scope | Jam |
+
+Mapping, scheduling and packing live in `jam::detail`; their module names
+provide compilation boundaries, not a promise of stable public internals.
+`jam.packed` imports only `native.isa` in its interface. Its SIMD kernels compile
+separately against `native`, alongside code that uses the compactor interface.
+`jam.simd` re-exports `jam` and `native.simd`; its x86 gathers privately import
+`native.x86.memory`. The compactor imports `native.simd` and `native.features`,
+plus `native.x86.bmi2`, `native.x86.memory` and `native.x86.vpopcntdq` on x86.
+CPU inspection in application code requires `import native.features;`.
+The scalar API does not re-export native. The current native CMake target still
+builds all its providers; targeted imports shorten dependency chains without
+pruning that target's source list.
+
+Tracing declarations, heap lifecycle, collection, root bookkeeping and finalizers
+compile in `jam.heap`; there are no module partitions. Worker-pool
+bodies compile in `jam.work`. Neither adds a separate implementation unit.
+Pointer decoding, barriers, allocation and tracing templates stay available for
+inlining. `jam.heap` provides explicit heap operations; `jam` adds `mk`,
+`mk_weak`, bulk array assignment and the current-heap `collect` functions.
+
 ## Benchmarking
 
 Enable `JAM_BUILD_BENCHMARKS=ON` to build `heap-bench`:

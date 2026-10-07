@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
 /// \file
-/// \brief Import jam with its public names available unqualified.
+/// \brief Import the scalar Jam API with its public names available unqualified.
 export module jam.unqualified;
 export import jam;
 export using namespace jam;

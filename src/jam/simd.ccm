@@ -17,9 +17,12 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module jam:simd;
-export import :heap;
-export import native;
+export module jam.simd;
+export import jam;
+export import native.simd;
+#if defined(__x86_64__) || defined(_M_X64)
+import native.x86.memory;
+#endif
 
 export namespace native {
 template<class T>
