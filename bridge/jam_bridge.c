@@ -4,9 +4,25 @@
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE 1
 #endif
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <jni.h>
 #include "jam_vm_Weak.h"
+
+#if defined(_WIN32)
+static FARPROC vm_symbol(char const *name) {
+  HMODULE module = GetModuleHandleW(L"jvm.dll");
+  return module ? GetProcAddress(module, name) : NULL;
+}
+#else
+static void *vm_symbol(char const *name) {
+  return dlsym(RTLD_DEFAULT, name);
+}
+#endif
 
 static jlong (JNICALL *weak_create)(JNIEnv *, jclass, jobject, jobject, jobject);
 static jobject (JNICALL *weak_deref)(JNIEnv *, jclass, jlong);
@@ -23,17 +39,17 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
   // Resolve at load time so a stock JVM reports a Java linkage error instead
   // of aborting on a missing lazy-bound JVM symbol at the first guest call.
   weak_create = (jlong (JNICALL *)(JNIEnv *, jclass, jobject, jobject, jobject))
-    dlsym(RTLD_DEFAULT, "JVM_JamWeakCreate");
+    vm_symbol("JVM_JamWeakCreate");
   weak_deref = (jobject (JNICALL *)(JNIEnv *, jclass, jlong))
-    dlsym(RTLD_DEFAULT, "JVM_JamWeakDeref");
+    vm_symbol("JVM_JamWeakDeref");
   weak_take = (jobject (JNICALL *)(JNIEnv *, jclass, jlongArray))
-    dlsym(RTLD_DEFAULT, "JVM_JamWeakTake");
+    vm_symbol("JVM_JamWeakTake");
   weak_finalize = (jobject (JNICALL *)(JNIEnv *, jclass, jlong))
-    dlsym(RTLD_DEFAULT, "JVM_JamWeakFinalize");
+    vm_symbol("JVM_JamWeakFinalize");
   weak_complete = (void (JNICALL *)(JNIEnv *, jclass, jlong))
-    dlsym(RTLD_DEFAULT, "JVM_JamWeakComplete");
+    vm_symbol("JVM_JamWeakComplete");
   collections = (jlong (JNICALL *)(JNIEnv *, jclass, jint))
-    dlsym(RTLD_DEFAULT, "JVM_JamCollections");
+    vm_symbol("JVM_JamCollections");
   if (!weak_create || !weak_deref || !weak_take || !weak_finalize || !weak_complete || !collections) {
     jclass error = (*env)->FindClass(env, "java/lang/UnsatisfiedLinkError");
     if (error) (*env)->ThrowNew(env, error, "jam-vm requires a JVM exporting the Jam weak hooks");

@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+"""Exercise the VM, both generations and interpreter/C1/C2 barriers."""
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+from platform_paths import jdk_home
+
+root = Path(__file__).resolve().parents[1]
+vm = Path(os.environ.get('JAM_JAVA', jdk_home() / 'bin/java'))
+javac = Path(os.environ.get('JAM_JAVAC', vm.parent / 'javac'))
+prefix = os.environ.get('JAM_EVIDENCE_PREFIX', 'jam')
+classes = root / 'build-java-tests'
+evidence = root / 'evidence'
+classes.mkdir(exist_ok=True)
+evidence.mkdir(exist_ok=True)
+subprocess.run([sys.executable, str(root / 'tools/build_bridge.py'), '--java-home',
+                str(javac.parent.parent)], check=True)
+jar = root / 'build/bridge/jam-vm.jar'
+subprocess.run([str(javac), '-cp', str(jar), '-d', str(classes),
+                *map(str, sorted((root / 'tests/java').glob('*.java')))], check=True)
+flags = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
+         '-XX:JamWorkers=4', '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC', '-Xlog:gc',
+         '--enable-native-access=ALL-UNNAMED',
+         '-Djava.library.path=' + os.pathsep.join(str(root / p) for p in ('build/bridge/lib', 'build-jam')),
+         '-cp', os.pathsep.join((str(classes), str(jar)))]
+
+
+def run(name, test, options=()):
+    log = evidence / f'{prefix}-{name}.log'
+    with log.open('w') as output:
+        result = subprocess.run([str(vm), *flags, *options, test], cwd=root,
+                                stdout=output, stderr=subprocess.STDOUT, timeout=300)
+    lines = log.read_text().splitlines()
+    if result.returncode:
+        raise SystemExit(f'{name} failed (exit {result.returncode}):\n' + '\n'.join(lines[-50:]))
+    print('\n'.join(lines[-2:]), flush=True)
+
+
+for test in ('HeapSmoke', 'WeakSmoke', 'BoundarySmoke'):
+    run(test, test)
+for mode, compiler in (
+        ('interpreter', ['-Xint']),
+        ('c1', ['-Xbatch', '-XX:TieredStopAtLevel=1', '-XX:+PrintCompilation']),
+        ('c2', ['-Xbatch', '-XX:-TieredCompilation', '-XX:CompileThreshold=1000', '-XX:+PrintCompilation'])):
+    methods = ('store', 'arrayStore', 'unsafeStore', 'largeStore', 'copy')
+    run(f'GenerationSmoke-{mode}', 'GenerationSmoke', [*compiler, '-XX:+UnlockDiagnosticVMOptions',
+        f'-XX:LogFile={evidence / (prefix + "-compiler-" + mode + ".log")}',
+        *('-XX:CompileCommand=dontinline,GenerationSmoke::' + method for method in methods)])
+    run(f'CompiledBarrierSmoke-{mode}', 'CompiledBarrierSmoke', [*compiler,
+        '-Xms128m', '-Xmx128m', '-XX:JamYoungSize=8m', '-XX:CompileCommand=dontinline,CompiledBarrierSmoke::*'])
+run('GenerationCapacitySmoke', 'GenerationCapacitySmoke',
+    ['-Xms64m', '-Xmx64m', '-XX:JamYoungSize=32m', '-XX:JamPromoteEvery=1000'])

@@ -1,0 +1,341 @@
+diff --git a/docs/hosting.md b/docs/hosting.md
+index 2a288d8..422c82a 100644
+--- a/docs/hosting.md
++++ b/docs/hosting.md
+@@ -81,11 +81,31 @@ Jam's private views. Publication aliases the backing pages; it does not copy
+ objects. Republish after movement while mutators are stopped. For the simple
+ `base + offset * 8` decoder, place the young window 16 GiB above the old window.
+ 
+-Publication is supported on macOS and Linux. Windows hosted publication is
+-explicitly unsupported: replacing live views needs placeholder management that
+-this API does not yet supply. Ordinary Windows heaps are unaffected.
+-
+-The host owns and releases its reservation. Jam never releases it, and no
+-published alias may be accessed after the heap dies. The reservation itself may
+-be released afterward. `storage.old()` and `storage.young()` expose used cells,
+-capacity and ring origins; `storage.compactor_name()` reports the selected kernel.
++On Windows, the initial target must lie in a single placeholder reserved with
++`VirtualAlloc2` and `MEM_RESERVE_PLACEHOLDER`. Jam splits that placeholder at the
++window and backing-view boundaries, then maps its existing sections with
++`MapViewOfFile3`. Page-aligned offsets suffice; placeholder replacement does not
++require allocation-granularity alignment. A window may be republished only at
++the same address and size, from the same generation. Published windows must be
++disjoint. Do not alter their mappings or protection outside this API.
++
++Remove an alias while mutators are stopped and no collection is active:
++
++```cpp
++host.unpublish(target, count_cells);
++```
++
++The address and count identify one complete published window. Unpublication
++restores inaccessible reserved memory without releasing the address range. On
++Windows it restores one placeholder covering exactly that window, which can be
++published again or coalesced with adjacent placeholders by the host. Guards and
++unrelated mappings outside the window are untouched. Changing a Windows
++window's size or generation requires unpublishing it first.
++
++The host owns and releases its reservation. On Windows, unpublish every window
++before destroying the capability or heap; the reservation must remain valid
++through those calls and may be released after heap destruction. On macOS and
++Linux, aliases may instead remain until the reservation is released, but must
++never be accessed after the heap dies. `storage.old()` and `storage.young()`
++expose used cells, capacity and ring origins; `storage.compactor_name()` reports
++the selected kernel.
+diff --git a/heap.ccm b/heap.ccm
+index ed10732..2c782b0 100644
+--- a/heap.ccm
++++ b/heap.ccm
+@@ -156,8 +156,15 @@ class heap_mapping {
+                     std::size_t offset = 0) noexcept {
+     MEMORY_BASIC_INFORMATION region{};
+     if (!::VirtualQuery(target, &region, sizeof(region))) system_failure("query heap placeholder");
++    // VirtualQuery starts at the queried page, which can be inside a placeholder.
++    // Query its allocation base before deciding whether either end needs splitting.
++    if (region.State == MEM_RESERVE && region.BaseAddress != region.AllocationBase &&
++        !::VirtualQuery(region.AllocationBase, &region, sizeof(region)))
++      system_failure("query whole heap placeholder");
+     auto const begin = static_cast<std::byte *>(region.BaseAddress);
+     auto const prefix = static_cast<std::size_t>(target - begin);
++    if (region.State != MEM_RESERVE || prefix > region.RegionSize || count > region.RegionSize - prefix)
++      heap_failure("heap alias requires a containing placeholder");
+     if (prefix && !::VirtualFree(begin, prefix, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
+       system_failure("split heap placeholder prefix");
+     if (count < region.RegionSize - prefix &&
+@@ -323,12 +330,8 @@ public:
+   }
+   /// \brief Publish a logical arc into a caller-owned, page-aligned reservation.
+   /// \pre Mutators are stopped. Target does not overlap either private ring view.
+-  /// The caller releases the target reservation; no access after this mapping dies.
++  /// On Windows, target is an unmapped placeholder containing the whole arc.
+   void publish(std::size_t start, std::byte * target, std::size_t count) const noexcept {
+-#if defined(_WIN32)
+-    static_cast<void>(start); static_cast<void>(target); static_cast<void>(count);
+-    heap_failure("host publication is not supported on Windows");
+-#else
+     if (start >= capacity || start % page_size() || count % page_size() ||
+         count > capacity || reinterpret_cast<std::uintptr_t>(target) % page_size())
+       heap_failure("invalid published heap arc");
+@@ -337,11 +340,42 @@ public:
+         [](span const & s, std::size_t value) noexcept { return s.end <= value; });
+       assert(where != spans.end() && where->begin <= start);
+       auto const part = std::min(count, where->end - start);
++#if defined(_WIN32)
++      alias(*where, target, part, start - where->begin);
++#else
+       alias(address + start, target, part);
++#endif
+       start = (start + part) % capacity;
+       target += part;
+       count -= part;
+     }
++  }
++  /// \brief Restore an exact published window to inaccessible reserved memory.
++  /// \pre The window consists entirely of unmodified views published by this API.
++  static void unpublish(std::byte * target, std::size_t count) noexcept {
++    if (!count || count % page_size() || reinterpret_cast<std::uintptr_t>(target) % page_size())
++      heap_failure("invalid unpublished heap window");
++#if defined(_WIN32)
++    auto * cursor = target;
++    auto remaining = count;
++    std::size_t views = 0;
++    while (remaining) {
++      MEMORY_BASIC_INFORMATION region{};
++      if (!::VirtualQuery(cursor, &region, sizeof(region))) system_failure("query published heap view");
++      if (region.AllocationBase != cursor || region.BaseAddress != cursor || region.Type != MEM_MAPPED ||
++          region.State != MEM_COMMIT || !region.RegionSize || region.RegionSize > remaining)
++        heap_failure("published heap window was modified by its host");
++      if (!::UnmapViewOfFile2(::GetCurrentProcess(), cursor, MEM_PRESERVE_PLACEHOLDER))
++        system_failure("restore published heap placeholder");
++      cursor += region.RegionSize;
++      remaining -= region.RegionSize;
++      ++views;
++    }
++    if (views > 1 && !::VirtualFree(target, count, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
++      system_failure("coalesce published heap placeholders");
++#else
++    if (::mmap(target, count, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED)
++      system_failure("restore published heap reservation");
+ #endif
+   }
+   /// \brief Exchange mappings without moving payload bytes.
+@@ -1840,6 +1874,14 @@ public:
+     phase state = phase::idle;
+     std::size_t old_words = 0, young_words = 0;
+     bool promoting = false;
++#if defined(_WIN32)
++    struct publication {
++      detail::heap_mapping const * source;
++      std::byte * target;
++      std::size_t bytes;
++    };
++    mutable std::vector<publication> publications;
++#endif
+   public:
+     /// \brief Select the arena for raw allocation or publication.
+     enum class generation { old, young };
+@@ -1860,12 +1902,18 @@ public:
+     host(host const &) = delete;
+     host & operator=(host const &) = delete;
+     /// \brief Release the capability after finishing its last collection.
++    /// \pre On Windows, all published windows have been explicitly unpublished.
+     ~host() noexcept {
+       if (state != phase::idle) detail::heap_failure("unfinished host collection");
++#if defined(_WIN32)
++      if (!publications.empty()) detail::heap_failure("host destroyed with published Windows views");
++#endif
+     }
+     /// \brief Publish one generation at a stable VM-owned address.
+     /// \pre Fixed capacity, no shrink, stopped mutators; skip/count are page multiples.
+     /// target corresponds to cell skip, not cell zero. The host owns the reservation.
++    /// On Windows, supply a containing placeholder or the exact window previously
++    /// published from this generation. Do not alter its views outside this API.
+     void publish(generation which, void * target, std::size_t skip, std::size_t count) const noexcept {
+       if (state != phase::idle) detail::heap_failure("publish during host collection");
+       auto const & g = which == generation::young ? owner.nursery : owner.arena;
+@@ -1873,9 +1921,53 @@ public:
+       if (config.capacity != config.maximum || config.shrink_shift ||
+           skip > g.capacity() || count > g.capacity() - skip)
+         detail::heap_failure("published heap requires a fixed generation");
++#if defined(_WIN32)
++      auto const address = reinterpret_cast<std::uintptr_t>(target);
++      auto const bytes = count * 8;
++      if (address % detail::heap_mapping::page_size() || skip % g.page_words() ||
++          count % g.page_words() || bytes > std::numeric_limits<std::uintptr_t>::max() - address)
++        detail::heap_failure("invalid published heap window");
++      if (!bytes) return;
++      for (auto const * space : {&owner.arena, &owner.nursery}) {
++        auto const begin = reinterpret_cast<std::uintptr_t>(space->storage.data());
++        if (address < begin + space->storage.bytes() * 2 && begin < address + bytes)
++          detail::heap_failure("published heap window overlaps a private view");
++      }
++      bool found = false;
++      for (auto const & window : publications) {
++        auto const begin = reinterpret_cast<std::uintptr_t>(window.target);
++        if (address < begin + window.bytes && begin < address + bytes) {
++          if (window.target != target || window.bytes != bytes || window.source != &g.storage)
++            detail::heap_failure("published heap windows must be disjoint or identical");
++          detail::heap_mapping::unpublish(window.target, window.bytes);
++          found = true;
++          break;
++        }
++      }
++      if (!found) publications.push_back({&g.storage, static_cast<std::byte *>(target), bytes});
++#endif
+       g.storage.publish(((g.origin + skip) % g.capacity()) * 8,
+         static_cast<std::byte *>(target), count * 8);
+     }
++    /// \brief Remove a canonical alias without releasing the host's reservation.
++    /// \pre Idle phase, stopped mutators; target/count identify an exact published
++    /// window and count is in eight-byte cells. The reservation survives this call.
++    /// \post The window is inaccessible; on Windows it is one placeholder.
++    void unpublish(void * target, std::size_t count) const noexcept {
++      if (state != phase::idle) detail::heap_failure("unpublish during host collection");
++      if (count > std::numeric_limits<std::size_t>::max() / 8)
++        detail::heap_failure("unpublished heap window is too large");
++#if defined(_WIN32)
++      auto const where = std::find_if(publications.begin(), publications.end(), [&](auto const & window) noexcept {
++        return window.target == target && window.bytes == count * 8;
++      });
++      if (where == publications.end()) detail::heap_failure("unpublish requires an exact published window");
++      detail::heap_mapping::unpublish(where->target, where->bytes);
++      publications.erase(where);
++#else
++      detail::heap_mapping::unpublish(static_cast<std::byte *>(target), count * 8);
++#endif
++    }
+     /// \brief Allocate raw cells in either generation, preserving the tag bit.
+     /// A host may subdivide the extent; scanner claims determine record boundaries.
+     /// \pre Positive extent fits the selected generation; no active collection.
+diff --git a/tests/host-test.cc b/tests/host-test.cc
+index ae5b5e3..36b5ac9 100644
+--- a/tests/host-test.cc
++++ b/tests/host-test.cc
+@@ -6,8 +6,17 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <thread>
+-#if !defined(_WIN32)
++#if defined(_WIN32)
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <windows.h>
++#else
++#include <cerrno>
++#include <csignal>
+ #include <sys/mman.h>
++#include <sys/resource.h>
++#include <sys/wait.h>
++#include <unistd.h>
+ #endif
+ import jam;
+ 
+@@ -128,13 +137,60 @@ void external_targets() {
+   f.host.finish();
+   check(f.at(owner).left == live && !f.at(owner).right, "weak field clears during relocation");
+ }
+-#if !defined(_WIN32)
++void inaccessible(std::byte * address) {
++#if defined(_WIN32)
++  MEMORY_BASIC_INFORMATION region{};
++  check(::VirtualQuery(address, &region, sizeof(region)) != 0, "query canonical reservation");
++  check(region.State == MEM_RESERVE, "guard and unpublished pages remain reserved and inaccessible");
++#else
++  auto const child = ::fork();
++  check(child != -1, "start guard probe");
++  if (child == 0) {
++    rlimit const limit{0, 0};
++    static_cast<void>(::setrlimit(RLIMIT_CORE, &limit));
++    auto const value = *reinterpret_cast<volatile unsigned char *>(address);
++    static_cast<void>(value);
++    ::_exit(0);
++  }
++  int status = 0;
++  pid_t finished;
++  do { finished = ::waitpid(child, &status, 0); } while (finished == -1 && errno == EINTR);
++  check(finished == child && WIFSIGNALED(status) &&
++    (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS),
++    "guard and unpublished pages remain inaccessible");
++#endif
++}
+ void publication() {
+-  auto * target = static_cast<std::byte *>(::mmap(nullptr, JAM_PAGE_BYTES * 9, PROT_NONE,
++  constexpr auto page = JAM_PAGE_BYTES;
++  // The young window ends exactly at the reservation's end: its initial
++  // publication must still split the placeholder prefix.
++  constexpr auto bytes = page * 22;
++#if defined(_WIN32)
++  auto * base = static_cast<std::byte *>(::VirtualAlloc2(nullptr, nullptr, bytes,
++    MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0));
++  check(base != nullptr, "reserve canonical placeholders");
++  // A host-owned mapping separates the two windows. Jam must leave it intact.
++  check(::VirtualFree(base, page * 11, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER), "split sentinel prefix");
++  check(::VirtualFree(base + page * 11, page, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER), "split sentinel suffix");
++  auto const sentinel = ::CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, page, nullptr);
++  check(sentinel != nullptr, "create unrelated backing");
++  check(::MapViewOfFile3(sentinel, ::GetCurrentProcess(), base + page * 11, 0, page,
++    MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0) == base + page * 11, "map unrelated backing");
++#else
++  auto * base = static_cast<std::byte *>(::mmap(nullptr, bytes, PROT_NONE,
+     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+-  check(target != MAP_FAILED, "reserve canonical view");
++  check(base != MAP_FAILED, "reserve canonical views");
++  check(!::mprotect(base + page * 11, page, PROT_READ | PROT_WRITE), "commit unrelated page");
++#endif
++  auto * const old_target = base + page;
++  auto * const target = base + page * 13;
++  auto * const unrelated = reinterpret_cast<std::uint64_t *>(base + page * 11);
++  *unrelated = 123456;
+   {
+     fixture f(1);
++    static_cast<void>(f.make(generation::old, 999));
++    auto old = f.make(generation::old, 123);
++    f.host.publish(generation::old, old_target, page_words, page_words * 9);
+     for (unsigned i = 0; i != 24; ++i) {
+       f.host.publish(generation::young, target, page_words, page_words * 9);
+       static_cast<void>(f.make(generation::young, 999));
+@@ -143,20 +199,38 @@ void publication() {
+       check(published->id == 42, "private writes visible in canonical alias");
+       published->id = 84;
+       check(f.at(p).id == 84, "canonical writes visible in private view");
+-      f.host.begin(true); f.trace(p); check(f.host.prepare(), "published minor");
+-      p = f.host.forward(p); f.host.finish();
++      bool const minor = i % 4 != 3;
++      f.host.begin(minor); f.trace(p); f.trace(old);
++      check(f.host.prepare(), "published collection");
++      p = f.host.forward(p); old = f.host.forward(old); f.host.finish();
+       f.host.publish(generation::young, target, page_words, page_words * 9);
++      if (!minor) f.host.publish(generation::old, old_target, page_words, page_words * 9);
+       published = reinterpret_cast<node *>(target + ((p & ~young_bit) - page_words) * 8);
+       check(published->id == 84, "republished alias follows rotated backing");
++      check(reinterpret_cast<node *>(old_target + (old - page_words) * 8)->id == 123,
++        "old publication survives young replacement and follows major rotation");
++      check(*unrelated == 123456, "publication preserves unrelated host mappings");
+     }
++    f.host.unpublish(target, page_words * 9);
++    f.host.publish(generation::young, target, page_words, page_words * 9);
++    check(reinterpret_cast<node *>(target)->id == 84, "an unpublished window can be published again");
++    f.host.unpublish(target, page_words * 9);
++    f.host.unpublish(old_target, page_words * 9);
+   }
+-  check(!::munmap(target, JAM_PAGE_BYTES * 9), "host releases reservation after heap destruction");
+-}
++  // Workers have stopped before POSIX guard probes fork.
++  for (auto index : {0, 1, 9, 10, 12, 13, 21}) inaccessible(base + index * page);
++  check(*unrelated == 123456, "unpublication preserves unrelated host mappings");
++#if defined(_WIN32)
++  check(::UnmapViewOfFile2(::GetCurrentProcess(), unrelated, MEM_PRESERVE_PLACEHOLDER), "restore unrelated placeholder");
++  check(::CloseHandle(sentinel), "release unrelated backing");
++  check(::VirtualFree(base, bytes, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS), "coalesce host reservation");
++  check(::VirtualFree(base, 0, MEM_RELEASE), "host releases reservation after heap destruction");
++#else
++  check(!::munmap(base, bytes), "host releases reservation after heap destruction");
+ #endif
++}
+ int main() {
+   cycles(1); cycles(4); retry_and_subdivision(); external_targets();
+-#if !defined(_WIN32)
+   publication();
+-#endif
+   std::puts("host phases, promotion retry, tracing and publication passed");
+ }

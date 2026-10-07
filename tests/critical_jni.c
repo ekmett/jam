@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 #include <jni.h>
 #include <stdatomic.h>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <time.h>
+#endif
 
 static atomic_int entered;
 JNIEXPORT jboolean JNICALL Java_Critical_entered(JNIEnv *env, jclass klass) {
@@ -14,8 +19,12 @@ JNIEXPORT void JNICALL Java_Critical_hold(JNIEnv *env, jclass klass, jintArray a
   jint *data = (*env)->GetPrimitiveArrayCritical(env, array, 0);
   if (!data) return;
   atomic_store(&entered, 1);
+#if defined(_WIN32)
+  Sleep(200);
+#else
   struct timespec delay = {0, 200000000};
   nanosleep(&delay, 0);
+#endif
   ++data[0];
   (*env)->ReleasePrimitiveArrayCritical(env, array, data, 0);
 }

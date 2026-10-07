@@ -7,11 +7,16 @@ licenses. Changes to OpenJDK in `patches/hotspot-jam.patch` and
 `patches/labsjdk-compat.patch` retain the notices and terms of the corresponding
 OpenJDK files.
 
+Changes to Jam in `patches/jam-host-windows.patch` retain Jam's license notices
+and terms. The extension supplies Windows mappings for the hosted heap.
+
 Changes to Graal in `patches/graal-jam.patch` retain the notices and terms of
 the corresponding Graal files. Packaged runtimes include the upstream JDK and
 Graal notices, Jam and native licenses, and the LLVM runtime license under
 `legal/`. LLVM's libc++, libc++abi and libunwind use Apache-2.0 with LLVM
 exceptions; see the bundled license for their complete terms.
+Windows packages include the LLVM compiler-runtime license and the Microsoft
+redistribution documents supplied with their MSVC runtime DLLs.
 
 ## Documentation presentation
 

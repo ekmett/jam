@@ -1,26 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-"""Check the clean Jam pin and reproduce the HotSpot adaptation from its patch."""
-import json
+"""Check the pinned Jam extension and reproduce the HotSpot adaptation from its patch."""
 import argparse
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+from prepare_jam import prepare as prepare_jam
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--graal', action='store_true', help='Check LabsJDK and Graal adaptations')
 options = parser.parse_args()
 label = 'labsjdk25' if options.graal else 'jdk25'
-jam = root / 'upstream/jam'
-pin = json.loads((root / 'config/source-pins.json').read_text())['jam']['commit']
-head = subprocess.check_output(['git', '-C', str(jam), 'rev-parse', 'HEAD'], text=True).strip()
-dirty = subprocess.check_output(['git', '-C', str(jam), 'status', '--porcelain'], text=True)
-if head != pin or dirty:
-    raise SystemExit('Jam must be an unmodified checkout of the pinned revision.')
-print('Jam is unmodified at the pinned revision.')
+prepare_jam(check=True)
 with tarfile.open(root / 'upstream' / (label + '.tar.gz')) as archive:
     members = {m.name.split('/', 1)[1]: m for m in archive.getmembers()
                if '/' in m.name and m.isfile()}

@@ -10,8 +10,17 @@ import platform
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def java_tool(home, name):
+    suffixes = ('.exe', '.cmd', '') if platform.system() == 'Windows' else ('',)
+    for suffix in suffixes:
+        path = home / 'bin' / (name + suffix)
+        if path.is_file():
+            return path
+    raise SystemExit(f'Missing JDK tool: {home}/bin/{name}')
+
+
 def jdk_home(graal=False):
-    system = {'Darwin': 'macosx', 'Linux': 'linux'}.get(platform.system())
+    system = {'Darwin': 'macosx', 'Linux': 'linux', 'Windows': 'windows'}.get(platform.system())
     machine = platform.machine().lower()
     architecture = {'arm64': 'aarch64', 'aarch64': 'aarch64',
                     'x86_64': 'x86_64', 'amd64': 'x86_64'}.get(machine)

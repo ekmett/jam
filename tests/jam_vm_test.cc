@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
 #include "jam_vm.h"
-#include <sys/mman.h>
-#include <unistd.h>
+#include "reservation.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -33,9 +32,9 @@ static uint32_t make(jam_vm * vm, void * base, uint64_t identity, uint32_t left 
   return offset;
 }
 static void run(size_t workers) {
-  size_t page = static_cast<size_t>(getpagesize()), bytes = page * 64, reserve = page * 4;
-  void * base = mmap(nullptr, (1ull << 34) + page + bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  check(base != MAP_FAILED, "VM reservation");
+  size_t page = test::page_size(), bytes = page * 64, reserve = page * 4;
+  void * base = test::reserve((1ull << 34) + page + bytes);
+  check(base != nullptr, "VM reservation");
   jam_vm * vm = jam_vm_create(base, page, bytes, bytes, reserve, workers);
   std::printf("workers=%zu compactor=%s\n", workers, jam_vm_compactor(vm));
   if (require_simd) check(std::strcmp(jam_vm_compactor(vm), "baseline") != 0, "SIMD selected on this host");
@@ -85,12 +84,12 @@ static void run(size_t workers) {
   // VM allocation slowpath receives failure, not jam's capacity abort.
   check(!jam_vm_allocate(vm, bytes, 0), "out of space returns null");
   jam_vm_destroy(vm);
-  check(munmap(base, (1ull << 34) + page + bytes) == 0, "VM releases canonical reservation");
+  check(test::release(base, (1ull << 34) + page + bytes), "VM releases canonical reservation");
 }
 static void generalized_weaks() {
-  size_t page = static_cast<size_t>(getpagesize()), bytes = page * 16;
-  void * base = mmap(nullptr, (1ull << 34) + page + bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  check(base != MAP_FAILED, "weak heap reservation");
+  size_t page = test::page_size(), bytes = page * 16;
+  void * base = test::reserve((1ull << 34) + page + bytes);
+  check(base != nullptr, "weak heap reservation");
   jam_vm * vm = jam_vm_create(base, page, bytes, bytes, page * 2, 4);
   uint32_t k1 = make(vm, base, 1), k2 = make(vm, base, 2);
   uint32_t v1 = make(vm, base, 3, k2), v2 = make(vm, base, 4);
@@ -143,6 +142,6 @@ static void generalized_weaks() {
   jam_vm_finish(vm);
   check(jam_vm_used(vm, 0) == page / 8, "completed finalizers release captures and cycles");
   jam_vm_destroy(vm);
-  munmap(base, (1ull << 34) + page + bytes);
+  check(test::release(base, (1ull << 34) + page + bytes), "release weak reservation");
 }
 int main(int argc, char **) { require_simd = argc > 1; run(1); run(4); generalized_weaks(); std::puts("actual jam adapter checks passed"); }

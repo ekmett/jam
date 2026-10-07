@@ -72,8 +72,8 @@ low-level claims, native loading and the thc handoff.
 * [HotSpot integration](docs/hotspot-integration.md)
 * [Supported configurations](docs/status.md)
 
-The current targets are macOS 26 arm64 and Linux x86_64, using the patched
-JDK 25 or [GraalVM 25.3.4.1](docs/build.md#graalvm), with fixed capacities,
+The current targets are macOS 26 arm64, Linux x86_64 and Windows x86_64, using
+the patched JDK 25 or [GraalVM 25.3.4.1](docs/build.md#graalvm), with fixed capacities,
 stop-the-world collection and compressed oops. Native executables use the
 SubstrateVM adapter, selected with `native-image --gc=jam`.
 

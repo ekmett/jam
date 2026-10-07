@@ -12,6 +12,9 @@ import shutil
 import subprocess
 from package_jdk import (check_elf_paths, check_loaded_libraries, load_commands,
                          loader_environment, runtime_libraries, SYSTEM)
+from pe_runtime import check_pe_paths
+from platform_paths import java_tool
+from runtime_probe import run as audit_runtime
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -25,8 +28,9 @@ evidence = root / 'evidence'
 for directory in (classes, scratch, evidence):
     directory.mkdir(parents=True, exist_ok=True)
 environment = dict(os.environ, TMPDIR=str(scratch))
+windows = platform.system() == 'Windows'
 jar = home / 'lib/jam/jam-vm.jar'
-image_options = [home / 'bin/native-image', '--gc=jam', '-ETMPDIR',
+image_options = [java_tool(home, 'native-image'), '--gc=jam', '-ETMPDIR',
                  '-J-Djava.io.tmpdir=' + str(scratch),
                  '-J-Xmx' + os.environ.get('JAM_NATIVE_IMAGE_HEAP', '6g'),
                  '--parallelism=' + os.environ.get('JAM_JOBS', '3')]
@@ -34,8 +38,11 @@ image_options = [home / 'bin/native-image', '--gc=jam', '-ETMPDIR',
 
 def run(label, command, timeout=300, expected=None, trace_libraries=False, reject=False):
     runtime_environment = loader_environment(environment) if trace_libraries else environment
-    result = subprocess.run(list(map(str, command)), cwd=root, env=runtime_environment,
-                            text=True, capture_output=True, timeout=timeout)
+    if trace_libraries:
+        result = audit_runtime(list(map(str, command)), cwd=root, env=runtime_environment, timeout=timeout)
+    else:
+        result = subprocess.run(list(map(str, command)), cwd=root, env=runtime_environment,
+                                text=True, capture_output=True, timeout=timeout)
     output = result.stdout + result.stderr
     (evidence / f'substrate-{label}.log').write_text(output + f'\nexit={result.returncode}\n')
     if (result.returncode == 0 if reject else result.returncode != 0) or expected is not None and expected not in output:
@@ -43,15 +50,21 @@ def run(label, command, timeout=300, expected=None, trace_libraries=False, rejec
     return output
 
 
-run('javac', [home / 'bin/javac', '--add-modules', 'org.graalvm.nativeimage',
+run('javac', [java_tool(home, 'javac'), '--add-modules', 'org.graalvm.nativeimage',
                '-cp', jar, '-d', classes, *sorted((root / 'tests/substrate').glob('*.java')),
                root / 'tests/bridge/WeakBridgeSmoke.java'])
-compiler = ['xcrun', 'clang'] if platform.system() == 'Darwin' else shlex.split(os.environ.get('CC', 'cc'))
-archiver = ['xcrun', 'ar'] if platform.system() == 'Darwin' else shlex.split(os.environ.get('AR', 'ar'))
-run('pin-compile', [*compiler, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
-                    '-c', root / 'tests/substrate/pin_writer.c', '-o', work / 'pin_writer.o'])
-run('pin-archive', [*archiver, 'rcs', work / 'libjam_pin_test.a', work / 'pin_writer.o'])
-executable = work / 'substrate-smoke'
+if windows:
+    run('pin-compile', [os.environ.get('JAM_CXX', 'clang-cl'), '/nologo', '/std:c11', '/O2', '/MD',
+                        '/W4', '/WX', '/c', root / 'tests/substrate/pin_writer.c',
+                        '/Fo' + str(work / 'pin_writer.obj')])
+    run('pin-archive', ['lib', '/nologo', '/OUT:' + str(work / 'jam_pin_test.lib'), work / 'pin_writer.obj'])
+else:
+    compiler = ['xcrun', 'clang'] if platform.system() == 'Darwin' else shlex.split(os.environ.get('CC', 'cc'))
+    archiver = ['xcrun', 'ar'] if platform.system() == 'Darwin' else shlex.split(os.environ.get('AR', 'ar'))
+    run('pin-compile', [*compiler, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                        '-c', root / 'tests/substrate/pin_writer.c', '-o', work / 'pin_writer.o'])
+    run('pin-archive', [*archiver, 'rcs', work / 'libjam_pin_test.a', work / 'pin_writer.o'])
+executable = work / ('substrate-smoke.exe' if windows else 'substrate-smoke')
 run('image-build', [*image_options,
                     '--initialize-at-build-time=IsolateSmoke$EntryPoints',
                     '-Djam.pin.include=' + str(root / 'tests/substrate'),
@@ -61,17 +74,24 @@ run('image-build', [*image_options,
     expected='Garbage collector: Jam')
 
 def relocate(executable):
-    # The executable and its sibling runtime directory are the deployment unit.
+    # Windows loads adjacent DLLs; Unix images use their sibling runtime directory.
     bundle = executable.with_name(executable.name + '.jam')
     for library in runtime_names:
-        if not (bundle / library).is_file():
+        if not ((executable.parent if windows else bundle) / library).is_file():
             raise SystemExit(f'Missing native-image runtime: {library}')
     relocated = work / 'relocated'
     relocated.mkdir(exist_ok=True)
     shutil.copy2(executable, relocated / executable.name)
     shutil.copytree(bundle, relocated / bundle.name, dirs_exist_ok=True)
+    if windows:
+        for library in runtime_names:
+            shutil.copy2(executable.parent / library, relocated / library)
     result = relocated / executable.name
-    for binary in (result, *(relocated / bundle.name / name for name in runtime_names)):
+    libraries = relocated if windows else relocated / bundle.name
+    for binary in (result, *(libraries / name for name in runtime_names)):
+        if windows:
+            check_pe_paths(binary, relocated)
+            continue
         if platform.system() == 'Linux':
             check_elf_paths(binary, relocated)
             continue
@@ -86,8 +106,9 @@ runtime_names = runtime_libraries(home / 'lib/jam')
 
 
 def run_executable(label, executable, arguments, expected):
-    output = run(label, [executable, *arguments], expected=expected, trace_libraries=True)
-    bundle = executable.with_name(executable.name + '.jam')
+    output = run(label, [executable, *(['-Djam.runtime.audit=true'] if windows else []), *arguments],
+                 expected=expected, trace_libraries=True)
+    bundle = executable.parent if windows else executable.with_name(executable.name + '.jam')
     check_loaded_libraries(output, bundle, runtime_names)
 
 
@@ -115,9 +136,9 @@ for dependency in dependencies:
     if not dependency.is_file():
         raise SystemExit(f'Missing Truffle build dependency: {dependency}; build GraalVM first.')
 classpath = os.pathsep.join(map(str, (truffle_classes, jar, *dependencies)))
-run('truffle-javac', [home / 'bin/javac', '-cp', classpath, '-d', truffle_classes,
+run('truffle-javac', [java_tool(home, 'javac'), '-cp', classpath, '-d', truffle_classes,
                       root / 'tests/substrate/truffle/TruffleSmoke.java'])
-executable = work / 'truffle-smoke'
+executable = work / ('truffle-smoke.exe' if windows else 'truffle-smoke')
 run('truffle-image-build', [*image_options, '--macro:truffle-svm',
                            # Truffle's partial evaluator requires initialized guest classes.
                            '--initialize-at-build-time=' + ','.join(
@@ -138,7 +159,7 @@ if amd64:
     run('masking-build-rejection', [*image_options, '-R:+MemoryMaskingAndFencing',
                                    '-cp', classpath, 'TruffleSmoke', work / 'unsupported-masking'],
         expected='The option is not supported when using Jam', reject=True)
-    run('masking-runtime-rejection', [work / 'relocated/truffle-smoke', '-XX:+MemoryMaskingAndFencing'],
+    run('masking-runtime-rejection', [work / 'relocated' / executable.name, '-XX:+MemoryMaskingAndFencing'],
         expected='MemoryMaskingAndFencing is not supported when using Jam', reject=True)
     print('Unsupported memory masking: rejected at build time and runtime')
 print('Relocated Jam executables passed.')

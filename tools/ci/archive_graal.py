@@ -16,6 +16,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from package_jdk import load_commands, SYSTEM
+from pe_runtime import check_pe_paths
+from platform_paths import java_tool
 
 JARS = {
     'truffle': ('truffle-api', 'truffle-runtime', 'truffle-compiler'),
@@ -23,10 +25,15 @@ JARS = {
 }
 
 
-def portable_jni(source, destination):
+def portable_jni(source, destination, java_home):
     """Drop unused build search paths from the C-only test library's copy."""
     shutil.copy2(source, destination)
     destination.chmod(destination.stat().st_mode | 0o200)
+    if platform.system() == 'Windows':
+        # The fixture is loaded by this packaged JVM, whose bin directory owns
+        # its MSVC runtime. It must not borrow a CRT from the build toolchain.
+        check_pe_paths(destination, java_home)
+        return
     _, dependencies, rpaths = load_commands(destination)
     if platform.system() == 'Darwin':
         if any(not path.startswith(SYSTEM) for path in dependencies):
@@ -57,11 +64,13 @@ def main():
     options = parser.parse_args()
     home = options.java_home.resolve()
     output = options.output.resolve()
-    if platform.system() not in ('Darwin', 'Linux'):
-        raise SystemExit('The CI runtime archive supports macOS and Linux.')
+    if platform.system() not in ('Darwin', 'Linux', 'Windows'):
+        raise SystemExit('The CI runtime archive supports macOS, Linux and Windows.')
     if output.exists() or output.is_relative_to(home):
         raise SystemExit('Choose a new archive path outside the packaged runtime.')
-    for relative in ('bin/java', 'bin/native-image', 'lib/jam/jam-vm.jar', 'legal/jam-vm/NOTICE.md'):
+    java_tool(home, 'java')
+    java_tool(home, 'native-image')
+    for relative in ('lib/jam/jam-vm.jar', 'legal/jam-vm/NOTICE.md'):
         if not (home / relative).is_file():
             raise SystemExit(f'Missing packaged runtime input: {relative}')
     for path in home.rglob('*'):
@@ -70,14 +79,15 @@ def main():
             raise SystemExit(f'Broken or external runtime symlink: {path.relative_to(home)}')
     jars = [Path('upstream/graal25') / suite / 'mxbuild/dists' / (name + '.jar')
             for suite, names in JARS.items() for name in names]
-    jni = Path('build-jam') / ('libjam_jni.dylib' if platform.system() == 'Darwin' else 'libjam_jni.so')
+    jni = Path('build-jam') / ('jam_jni.dll' if platform.system() == 'Windows' else
+                             'libjam_jni.dylib' if platform.system() == 'Darwin' else 'libjam_jni.so')
     for relative in (*jars, jni):
         if not (ROOT / relative).is_file():
             raise SystemExit(f'Missing CI consumer input: {relative}')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='jam-ci-archive-', dir=output.parent) as temporary:
         copy = Path(temporary) / jni.name
-        portable_jni(ROOT / jni, copy)
+        portable_jni(ROOT / jni, copy, home)
         archive_path = Path(temporary) / 'runtime.tar.gz'
         with tarfile.open(archive_path, 'w:gz', compresslevel=1) as archive:
             # Preserve the distribution's symlinks, executable modes and signed

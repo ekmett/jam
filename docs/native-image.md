@@ -18,8 +18,13 @@ lifetime of an isolate.
 Keep `application` and its generated `application.jam/` directory together.
 That directory contains the collector and its C++ runtime. You can move the
 pair out of the build checkout; the executable does not need a JVM installation
-at runtime. Build and run on macOS arm64 or Linux x86_64; the executable and
-its libraries belong to the platform on which they were built.
+at runtime. Build and run on macOS arm64, Linux x86_64 or Windows x86_64. The
+executable and its libraries belong to the platform on which they were built.
+
+On Windows, use `native-image.cmd`. Keep the generated DLLs beside the `.exe`,
+along with its `.jam/` directory of notices and runtime metadata. DLL lookup
+uses the executable's directory. Images sharing a directory must use the same
+Jam runtime; the builder refuses to replace a different DLL already there.
 
 ## Weak associations
 

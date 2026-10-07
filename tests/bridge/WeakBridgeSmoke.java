@@ -76,7 +76,7 @@ public final class WeakBridgeSmoke {
         Weak.complete(permanent);
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         if (args.length != 0) {
             try {
                 Weak.checkAvailable();
@@ -151,5 +151,11 @@ public final class WeakBridgeSmoke {
               "throwing finalizer is completed without retry");
         generalized();
         System.out.println("Weak bridge passed: JVM runnables, retirement, pumping and nested GC");
+        if (Boolean.getBoolean("jam.runtime.audit")) {
+            System.clearProperty("jam.runtime.audit");
+            System.out.println("jam-runtime-audit-ready");
+            System.out.flush();
+            if (System.in.read() != '\n') throw new AssertionError("runtime audit did not resume");
+        }
     }
 }

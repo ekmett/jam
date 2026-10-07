@@ -19,10 +19,12 @@ ROOT = Path(__file__).resolve().parents[1]
 def build(java_home):
     jdk = Path(java_home).resolve()
     system = platform.system()
-    if system not in ("Darwin", "Linux"):
-        raise SystemExit("The bridge currently supports Darwin and Linux builds")
-    include = "darwin" if system == "Darwin" else "linux"
-    library = "libjam_bridge.dylib" if system == "Darwin" else "libjam_bridge.so"
+    if system not in ("Darwin", "Linux", "Windows"):
+        raise SystemExit("The bridge supports macOS, Linux and Windows builds")
+    windows = system == "Windows"
+    include = {"Darwin": "darwin", "Linux": "linux", "Windows": "win32"}[system]
+    library = {"Darwin": "libjam_bridge.dylib", "Linux": "libjam_bridge.so", "Windows": "jam_bridge.dll"}[system]
+    suffix = ".exe" if windows else ""
     output = ROOT / "build/bridge"
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bridge-", dir=output.parent) as temporary:
@@ -30,22 +32,29 @@ def build(java_home):
         for directory in ("classes", "include", "lib", "api"):
             (stage / directory).mkdir()
         sources = sorted((ROOT / "bridge/java").rglob("*.java"))
-        subprocess.run([str(jdk / "bin/javac"), "--release", "25", "-Xlint:all", "-Werror",
+        subprocess.run([str(jdk / "bin" / ("javac" + suffix)), "--release", "25", "-Xlint:all", "-Werror",
                         "-h", str(stage / "include"), "-d", str(stage / "classes"), *map(str, sources)], check=True)
-        compiler = shlex.split(os.environ.get("CC", "cc"))
-        flags = ["-dynamiclib"] if system == "Darwin" else ["-shared", "-fPIC"]
-        subprocess.run([*compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-                        "-fvisibility=hidden", *flags, "-I" + str(jdk / "include"),
+        compiler = shlex.split(os.environ.get("CC", "clang-cl" if windows else "cc"))
+        if windows:
+            flags = ["/nologo", "/std:c11", "/O2", "/W4", "/WX", "/LD",
+                     "/I" + str(jdk / "include"), "/I" + str(jdk / "include" / include),
+                     "/I" + str(stage / "include"), str(ROOT / "bridge/jam_bridge.c"),
+                     "/Fe" + str(stage / "lib" / library), "/link", "/IMPLIB:" + str(stage / "jam_bridge.lib")]
+        else:
+            flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-fvisibility=hidden", *(["-dynamiclib"] if system == "Darwin" else ["-shared", "-fPIC"]),
+                        "-I" + str(jdk / "include"),
                         "-I" + str(jdk / "include" / include), "-I" + str(stage / "include"),
                         str(ROOT / "bridge/jam_bridge.c"), "-o", str(stage / "lib" / library),
-                        *([] if system == "Darwin" else ["-ldl"])], check=True)
+                        *([] if system == "Darwin" else ["-ldl"])]
+        subprocess.run([*compiler, *flags], cwd=stage, check=True)
         manifest = stage / "MANIFEST.MF"
         manifest.write_text("Manifest-Version: 1.0\nAutomatic-Module-Name: jam.vm\n\n")
-        subprocess.run([str(jdk / "bin/jar"), "--create", "--file", str(stage / "jam-vm.jar"),
+        subprocess.run([str(jdk / "bin" / ("jar" + suffix)), "--create", "--file", str(stage / "jam-vm.jar"),
                         "--manifest", str(manifest), "-C", str(stage / "classes"), "."], check=True)
-        subprocess.run([str(jdk / "bin/jar"), "--create", "--file", str(stage / "jam-vm-sources.jar"),
+        subprocess.run([str(jdk / "bin" / ("jar" + suffix)), "--create", "--file", str(stage / "jam-vm-sources.jar"),
                         "-C", str(ROOT / "bridge/java"), "."], check=True)
-        subprocess.run([str(jdk / "bin/javadoc"), "-quiet", "-Xdoclint:all", "-Werror",
+        subprocess.run([str(jdk / "bin" / ("javadoc" + suffix)), "-quiet", "-Xdoclint:all", "-Werror",
                         "-d", str(stage / "api"), *map(str, sources)], check=True)
         # Replace generated outputs only, after every tool has succeeded.
         for name in ("jam-vm.jar", "jam-vm-sources.jar", "lib", "include", "api"):

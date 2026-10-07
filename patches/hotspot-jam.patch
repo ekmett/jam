@@ -106,6 +106,127 @@
  
    __ srli(obj, obj, CardTable::card_shift());
  
+--- a/src/hotspot/os/windows/os_windows.cpp
++++ b/src/hotspot/os/windows/os_windows.cpp
+@@ -3300,6 +3300,91 @@
+   return map_or_reserve_memory_aligned(size, alignment, fd, mem_tag);
+ }
+ 
++#if INCLUDE_JAMGC
++// HeapReserver owns one candidate at a time and releases unsuccessful probes
++// before trying another. Keep the original extent even after the compressed-oop
++// guard is trimmed from the ReservedHeapSpace exposed to the collector.
++static char* volatile jam_heap_placeholder_base = nullptr;
++static size_t jam_heap_placeholder_size = 0;
++
++char* os::win32::reserve_jam_heap(char* requested_address, size_t bytes, size_t alignment) {
++  assert(UseJamGC, "Jam reservation only");
++  assert(is_aligned(requested_address, alignment), "requested address alignment");
++  assert(is_aligned(bytes, os::vm_allocation_granularity()), "reservation size alignment");
++  guarantee(Atomic::load_acquire(&jam_heap_placeholder_base) == nullptr,
++            "release the previous Jam heap reservation before another probe");
++  if (SimulateFullAddressSpace) return nullptr;
++
++  // Like ZGC, resolve the Windows 10 placeholder API at runtime. Other collectors
++  // keep their existing OS admission and do not require a new import library.
++  typedef PVOID (WINAPI *VirtualAlloc2Fn)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
++  static HMODULE const kernelbase = GetModuleHandleW(L"KernelBase.dll");
++  static VirtualAlloc2Fn const allocate = kernelbase == nullptr ? nullptr :
++    reinterpret_cast<VirtualAlloc2Fn>(GetProcAddress(kernelbase, "VirtualAlloc2"));
++  if (allocate == nullptr) {
++    vm_exit_during_initialization("Jam requires Windows version 1803 or later for heap placeholders");
++  }
++
++  // Address requirements avoid the release/reacquire loop used for ordinary
++  // Windows reservations. An exact requested address must omit this parameter.
++  MEM_ADDRESS_REQUIREMENTS requirements = {};
++  requirements.Alignment = alignment;
++  MEM_EXTENDED_PARAMETER parameter = {};
++  parameter.Type = MemExtendedParameterAddressRequirements;
++  parameter.Pointer = &requirements;
++  char* const base = static_cast<char*>(allocate(GetCurrentProcess(), requested_address, bytes,
++    MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
++    requested_address == nullptr ? &parameter : nullptr, requested_address == nullptr ? 1 : 0));
++  if (base == nullptr) {
++    PreserveLastError ple;
++    log_debug(gc, heap, coops)("Jam placeholder reservation failed at " PTR_FORMAT
++                              " for %zu bytes (error %u)", p2i(requested_address), bytes, (uint)ple.v);
++    return nullptr;
++  }
++  assert(is_aligned(base, alignment), "VirtualAlloc2 must satisfy alignment");
++  assert(requested_address == nullptr || base == requested_address, "exact address required");
++  jam_heap_placeholder_size = bytes;
++  Atomic::release_store(&jam_heap_placeholder_base, base);
++  MemTracker::record_virtual_memory_reserve(base, bytes, CALLER_PC, mtJavaHeap);
++  log_debug(os, map)("Reserved Jam placeholders " RANGE_FORMAT, RANGE_FORMAT_ARGS(base, bytes));
++  return base;
++}
++
++static bool release_jam_heap(char* base, size_t bytes) {
++  if (bytes != jam_heap_placeholder_size) {
++    log_error(gc)("Release the complete Jam heap reservation, including its compressed-oop guard");
++    return false;
++  }
++  // After jam_vm_destroy, every published window has been restored to a
++  // placeholder. Never unmap a live alias or consume a neighboring reservation.
++  size_t remaining = bytes;
++  char* cursor = base;
++  unsigned regions = 0;
++  while (remaining != 0) {
++    MEMORY_BASIC_INFORMATION info = {};
++    if (!VirtualQuery(cursor, &info, sizeof(info)) || info.AllocationBase != cursor ||
++        info.State != MEM_RESERVE || info.RegionSize == 0 || info.RegionSize > remaining) {
++      log_error(gc)("Jam heap aliases must be unpublished before releasing their reservation");
++      return false;
++    }
++    cursor += info.RegionSize;
++    remaining -= info.RegionSize;
++    ++regions;
++  }
++  if (regions > 1 && !virtualFree(base, bytes, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS)) {
++    return false;
++  }
++  // Clear ownership before making the addresses available to another allocator.
++  // os::release_memory supplies NMT locking and records the release on success.
++  Atomic::release_store(&jam_heap_placeholder_base, (char*)nullptr);
++  if (!virtualFree(base, 0, MEM_RELEASE)) {
++    Atomic::release_store(&jam_heap_placeholder_base, base);
++    return false;
++  }
++  return true;
++}
++#endif // INCLUDE_JAMGC
++
+ char* os::pd_reserve_memory(size_t bytes, bool exec) {
+   return pd_attempt_reserve_memory_at(nullptr /* addr */, bytes, exec);
+ }
+@@ -3573,6 +3658,12 @@
+ }
+ 
+ bool os::pd_release_memory(char* addr, size_t bytes) {
++#if INCLUDE_JAMGC
++  char* const jam_base = Atomic::load_acquire(&jam_heap_placeholder_base);
++  if (jam_base != nullptr && addr == jam_base) {
++    return release_jam_heap(addr, bytes);
++  }
++#endif
+   // Given a range we are to release, we require a mapping to start at the beginning of that range;
+   //  if NUMA or LP we allow the range to contain multiple mappings, which have to cover the range
+   //  completely; otherwise the range must match an OS mapping exactly.
+--- a/src/hotspot/os/windows/os_windows.hpp
++++ b/src/hotspot/os/windows/os_windows.hpp
+@@ -61,6 +61,11 @@
+ 
+  public:
+   // Windows-specific interface:
++#if INCLUDE_JAMGC
++  // Reserve the canonical Jam heap as placeholders. The full range, including
++  // its compressed-oop guard, must survive until all Jam aliases are removed.
++  static char* reserve_jam_heap(char* requested_address, size_t bytes, size_t alignment);
++#endif
+   static void   initialize_system_info();
+   static void   setmode_streams();
+   static bool   is_windows_11_or_greater();
 --- a/src/hotspot/share/gc/jam/jamArguments.cpp
 +++ b/src/hotspot/share/gc/jam/jamArguments.cpp
 @@ -0,0 +1,100 @@
@@ -2497,6 +2618,37 @@
    declare_constant(CollectedHeap::Z)                                      \
    declare_constant(CollectedHeap::Shenandoah)                             \
                                                                            \
+--- a/src/hotspot/share/memory/memoryReserver.cpp
++++ b/src/hotspot/share/memory/memoryReserver.cpp
+@@ -83,6 +83,12 @@
+                                   size_t alignment,
+                                   bool exec,
+                                   MemTag mem_tag) {
++#if defined(_WINDOWS) && INCLUDE_JAMGC
++  if (UseJamGC && mem_tag == mtJavaHeap) {
++    assert(!exec, "Jam heap is not executable");
++    return os::win32::reserve_jam_heap(requested_address, size, alignment);
++  }
++#endif
+   // If the memory was requested at a particular address, use
+   // os::attempt_reserve_memory_at() to avoid mapping over something
+   // important.  If the reservation fails, return null.
+@@ -508,7 +514,14 @@
+         WIN64_ONLY(&& !UseLargePages)
+         AIX_ONLY(&& (os::Aix::supports_64K_mmap_pages() || os::vm_page_size() == 4*K))) {
+       // Protect memory at the base of the allocated region.
+-      if (!os::protect_memory(reserved.base(), noaccess_prefix, os::MEM_PROT_NONE, reserved.special())) {
++      bool needs_protection = true;
++#if defined(_WINDOWS) && INCLUDE_JAMGC
++      // Jam's placeholder is already inaccessible. Windows protect_memory
++      // commits first, which cannot be done inside a placeholder reservation.
++      needs_protection = !UseJamGC;
++#endif
++      if (needs_protection &&
++          !os::protect_memory(reserved.base(), noaccess_prefix, os::MEM_PROT_NONE, reserved.special())) {
+         fatal("cannot protect protection page");
+       }
+       log_debug(gc, heap, coops)("Protected page at the reserved heap base: "
 --- a/src/hotspot/share/runtime/thread.cpp
 +++ b/src/hotspot/share/runtime/thread.cpp
 @@ -235,6 +235,7 @@

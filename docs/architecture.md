@@ -46,6 +46,12 @@ logical arc of each ring into that range and republishes it after collection.
 The ring's private aliases retain jam's overlap and copy-credit invariants.
 The canonical alias gives Java a stable decoding rule.
 
+On Windows, the VM reserves these addresses with placeholders. Jam replaces
+only the managed windows with views of its existing backing sections. Moving
+the ring origin changes the views without releasing the outer address range.
+Destroying the backend restores the placeholders before the VM releases that
+reservation.
+
 Let `B` be the compressed-oop base and `i` a nonnull cell offset. With shift
 three, HotSpot decodes it as:
 

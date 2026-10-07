@@ -59,5 +59,10 @@ public final class SubstrateSmoke {
             case "capacity" -> CapacitySmoke.main(new String[0]);
             default -> throw new IllegalArgumentException(args[0]);
         }
+        if (Boolean.getBoolean("jam.runtime.audit")) {
+            System.out.println("jam-runtime-audit-ready");
+            System.out.flush();
+            if (System.in.read() != '\n') throw new AssertionError("runtime audit did not resume");
+        }
     }
 }

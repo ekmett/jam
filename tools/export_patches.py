@@ -19,6 +19,9 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
     paths += [root / 'upstream/jdk25' / p for p in [
         'make/autoconf/jvm-features.m4',
         'make/hotspot/lib/JvmFeatures.gmk',
+        'src/hotspot/os/windows/os_windows.cpp',
+        'src/hotspot/os/windows/os_windows.hpp',
+        'src/hotspot/share/memory/memoryReserver.cpp',
         'src/hotspot/share/utilities/macros.hpp',
         'src/hotspot/share/gc/shared/gc_globals.hpp',
         'src/hotspot/share/gc/shared/collectedHeap.hpp',

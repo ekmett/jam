@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
 #include "jam_vm.h"
-#include <sys/mman.h>
-#include <unistd.h>
+#include "reservation.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -18,16 +17,16 @@ static void check(bool value, char const * message) {
 }
 struct object { uint64_t header; uint32_t left, right; uint64_t identity; };
 struct heap {
-  size_t page = static_cast<size_t>(getpagesize());
+  size_t page = test::page_size();
   size_t bytes = page * 8;
   size_t span = (1ull << 34) + page + bytes;
-  void * base = mmap(nullptr, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void * base = test::reserve(span);
   jam_vm * vm;
   explicit heap(size_t workers) {
-    check(base != MAP_FAILED, "sparse canonical reservation");
+    check(base != nullptr, "sparse canonical reservation");
     vm = jam_vm_create(base, page, bytes, bytes, page * 2, workers);
   }
-  ~heap() { jam_vm_destroy(vm); check(!munmap(base, span), "release reservation"); }
+  ~heap() { jam_vm_destroy(vm); check(test::release(base, span), "release reservation"); }
   object & at(uint32_t o) { return *reinterpret_cast<object *>(static_cast<char *>(base) + 8ull * o); }
   uint32_t make(bool young, uint64_t id, uint32_t left = 0, uint32_t right = 0) {
     auto o = jam_vm_allocate(vm, 3, young);

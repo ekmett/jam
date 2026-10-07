@@ -203,7 +203,7 @@ public final class TruffleSmoke {
         check(Weak.deref(token) == null, "finalized association is retired");
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         check(ImageInfo.inImageRuntimeCode(), "run this probe as a native executable");
         if (args.length > 0 && args[0].equals("check-masking")) {
             try {
@@ -247,5 +247,10 @@ public final class TruffleSmoke {
         check(Weak.pump() == 0, "completed finalizers leave no pending claims");
         Reference.reachabilityFence(target);
         System.out.println("Jam Native Image compiled Truffle consumer passed");
+        if (Boolean.getBoolean("jam.runtime.audit")) {
+            System.out.println("jam-runtime-audit-ready");
+            System.out.flush();
+            if (System.in.read() != '\n') throw new AssertionError("runtime audit did not resume");
+        }
     }
 }

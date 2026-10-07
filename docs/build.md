@@ -4,7 +4,7 @@ jam-vm builds two things: a native jam backend and a patched JDK. The backend
 uses C++26 modules. The JDK uses its normal C++14 toolchain and calls the
 backend through [a C header](../adapter/jam_vm.h).
 
-Build on macOS 26 arm64 or Linux x86_64. See
+Build on macOS 26 arm64, Linux x86_64 or Windows 11 x86_64. See
 [supported configurations](status.md) for the current limits.
 
 ## Tools
@@ -27,19 +27,20 @@ The tested toolchains use:
 | C++ compiler for jam | LLVM 23.1.2 |
 | C++ library on Darwin | libc++ 22.1.8, both headers and runtime, from Homebrew `llvm@22` |
 | C++ library on Linux | libc++ 23.1.2 from the LLVM distribution |
+| C++ library on Windows | MSVC 14.44 from Visual Studio 2022 |
 | CMake | 4.4.3 |
 | Ninja | 1.12 or newer |
 | Autoconf | 2.72 |
 | GNU M4 / Make | 1.4.20 / 4.3 or newer |
 | Boot JDK | JDK 24 or 25; the recorded build uses GraalVM Community 25.3.4.1 |
-| HotSpot compiler | Apple Clang 21 or GCC 11, compiling as C++14 |
+| HotSpot compiler | Apple Clang 21, GCC 11 or MSVC 19.44, compiling as C++14 |
 
 The Darwin build pairs LLVM 23's compiler with libc++ 22's headers and runtime.
 Linux uses the compiler and libc++ from the same LLVM 23 distribution.
 Keep the selected headers and runtime together.
 
-The scripts default to tools under `.toolchains/`; they do not install those
-tools. Override their locations for your installation:
+The Unix build scripts default to tools under `.toolchains/`. Override their
+locations for your installation:
 
 ```sh
 export JAM_CMAKE=/absolute/path/to/cmake
@@ -67,11 +68,12 @@ python3 tools/prepare_jdk.py
 ```
 
 The [manifest](../config/source-pins.json) records the source revisions and
-archive hashes. `upstream/jam` and `upstream/native` remain clean pinned
-checkouts. Jam needs no local patch. Preparation extracts OpenJDK into
+archive hashes. Preparation applies the
+[Windows hosting extension](../patches/jam-host-windows.patch) to the pinned
+Jam checkout and leaves `upstream/native` unchanged. It extracts OpenJDK into
 `upstream/jdk25` and applies the [HotSpot patch](../patches/hotspot-jam.patch).
 
-The preparation script refuses to replace an existing JDK source directory.
+The JDK preparation script refuses to replace an existing source directory.
 Run it once in a fresh checkout. Repeated builds use the prepared sources.
 
 ## Build the backend and JVM
@@ -151,8 +153,8 @@ python3 tools/check_patches.py
 overrides that choice. Without overrides it uses the host platform's fastdebug
 JDK image. These checks exercise the public API, Java reference behavior,
 barriers and generation transitions. Generated logs stay local and are ignored
-by Git. `check_patches.py` checks the unmodified Jam pin and reconstructs the
-HotSpot sources from the patch.
+by Git. `check_patches.py` checks the Jam extension against its pin and
+reconstructs the HotSpot sources from the patch.
 
 ## Packaging
 
@@ -177,6 +179,73 @@ licenses from the matching LLVM source revision.
 For the weak API, put `lib/jam/jam-vm.jar` on the application's class path and
 `lib/jam` on `java.library.path`. See [integrating thc](thc-integration.md) for
 registration and finalizer pumping.
+
+## Windows
+
+Install Git, Python 3.10 or newer, and Visual Studio 2022 with the C++ build
+tools and Windows SDK. Enable Win32 long paths from an elevated PowerShell:
+
+```powershell
+Set-ItemProperty 'HKLM:/SYSTEM/CurrentControlSet/Control/FileSystem' `
+  -Name LongPathsEnabled -Type DWord -Value 1
+```
+
+Start a new shell after changing the setting. The Graal dependency cache
+contains paths longer than the legacy 260-character limit. Use a checkout
+path without spaces. From PowerShell,
+the dependency script installs the remaining tools into a directory you choose:
+
+```powershell
+$env:JAM_CI_TOOLS = "$PWD/.toolchains/windows"
+./tools/ci/setup_windows.ps1 hotspot
+python tools/fetch_sources.py --full
+python tools/prepare_jdk.py
+./tools/build_native.ps1
+./tools/build_hotspot.ps1
+```
+
+Jam uses `clang-cl` and the MSVC C++ library. HotSpot uses MSVC directly.
+Cygwin supplies OpenJDK's shell and build tools; the resulting JVM is a native
+Windows program. In a new PowerShell session, restore the tool environment with
+`. "$env:JAM_CI_TOOLS/env.ps1"`.
+
+Package the JDK before moving it or running it outside the build environment:
+
+```powershell
+$jdk = python tools/platform_paths.py
+$env:Path = "$PWD/build-jam;$env:Path"
+python tools/build_bridge.py --java-home $jdk
+python tools/package_jdk.py --java-home $jdk --output build/jam-jdk `
+  --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Build-Tools-License.docx" `
+  --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Redistribution.html"
+./build/jam-jdk/bin/java.exe -Xshare:off -Xms256m -Xmx256m `
+  -XX:+UnlockExperimentalVMOptions -XX:+UseJamGC -jar application.jar
+```
+
+The package puts Jam and its runtime DLLs in `bin/`, and keeps the Native Image
+inputs and Java API in `lib/jam/`. The MSVC redistribution documents and LLVM
+compiler-runtime license travel with the package. For a manually installed
+toolchain, set `JAM_MSVC_REDIST` to its `x64/Microsoft.VC143.CRT` directory and
+`JAM_COMPILER_RUNTIME_LICENSE` to the matching compiler-rt license.
+
+For GraalVM, start in a fresh checkout:
+
+```powershell
+./tools/ci/setup_windows.ps1 graal
+python tools/fetch_sources.py --graal
+python tools/prepare_jdk.py --graal
+python tools/prepare_graal.py
+$env:JAM_HOTSPOT_SOURCE = "$PWD/upstream/labsjdk25"
+./tools/build_native.ps1
+./tools/build_hotspot.ps1 -Graal
+python tools/build_graal.py
+```
+
+Use `build/graalvm/bin/java.exe` for the JVM and
+`build/graalvm/bin/native-image.cmd --gc=jam` for native executables. Windows
+class paths use `;` between entries.
+
+## Rebuilding
 
 HotSpot's collector registration is compiled into `libjvm`. A stock JVM cannot
 discover Jam through JNI, JVMTI or `-agentpath`. Once the adapter is present,

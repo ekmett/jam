@@ -51,8 +51,9 @@ export namespace thc {
 /// \brief Host-owned jam heap: two canonical windows, original rings and SIMD kernels.
 /// encode(p)=(p-base)/8, decode(o)=base+8*o; bit31 selects the young window.
 /// A retaining minor fixes every old offset; a major preserves the generation bit.
-/// \pre Mutators are stopped or the host allocation lock is held. Canonical PROT_NONE
-/// reservation spans both generations through base+16GiB+prefix+young_bytes.
+/// \pre Mutators are stopped or the host allocation lock is held. An inaccessible
+/// reservation (placeholders on Windows) spans both generations through
+/// base+16GiB+prefix+young_bytes.
 class hosted_heap {
   using generation = jam::heap::host::generation;
   jam::heap storage;
@@ -130,6 +131,9 @@ public:
   }
   ~hosted_heap() noexcept {
     if (attached_threads.load(std::memory_order_relaxed)) detail::invalid("heap destroyed with attached VM thread descriptors");
+    for (unsigned young = 0; young != 2; ++young)
+      host.unpublish(base + (young ? young_displacement : 0) + prefix_words * 8,
+                     words[young]);
   }
   /// \brief Whether Jam's actual dynamic heap binding selects this heap.
   [[nodiscard]] bool current() const noexcept { return jam::heap::current() == &storage; }

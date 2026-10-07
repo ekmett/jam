@@ -7,12 +7,13 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 from platform_paths import jdk_home
 
 root = Path(__file__).resolve().parents[1]
 vm = Path(os.environ.get('JAM_JAVA', jdk_home() / 'bin/java')).resolve()
 classes = root / 'build-bridge-test'
-subprocess.run(['python3', str(root / 'tools/build_bridge.py'), '--java-home', str(vm.parent.parent)], check=True)
+subprocess.run([sys.executable, str(root / 'tools/build_bridge.py'), '--java-home', str(vm.parent.parent)], check=True)
 subprocess.run([str(vm.parent / 'javac'), '-cp', str(root / 'build/bridge/jam-vm.jar'),
                 '-d', str(classes), str(root / 'tests/bridge/WeakBridgeSmoke.java')], check=True)
 flags = ['-Xshare:off', '-Xms32m', '-Xmx32m', '--enable-native-access=ALL-UNNAMED',
