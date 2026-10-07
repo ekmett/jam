@@ -226,8 +226,8 @@ void mixed_alignment_traces_preserve_records() noexcept {
   });
   std::array<aligned_offset, 3> const forwarded{
     root.get(), heap.field(root.get()), heap.field(heap.field(root.get()))};
-  check(forwarded == std::array<aligned_offset, 3>{2, 4, 8} && heap.used() == 16,
-        "traced 16- and 32-byte neighbors use the maximum block alignment");
+  check(forwarded == std::array<aligned_offset, 3>{2, 4, 8} && heap.used() == 11,
+        "mixed-alignment tracing retains alignment without the dead suffix");
   for (std::size_t i = 0; i != records.size(); ++i) {
     check((forwarded[i] * 8) % alignments[i] == 0, "visitor claims retain each requested alignment");
     check(visits[i].load(std::memory_order_relaxed) == 1, "each mixed-alignment record is traced once");

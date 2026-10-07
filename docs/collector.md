@@ -18,11 +18,21 @@ metadata reuse. Callbacks run after the collector releases its mutation guard.
 Allocation and liveness use eight-byte cells. Each 256-byte rank block has
 16 bytes of metadata: live cells, a forwarding base and pointer slots. Alignment
 adds one byte per 512 bytes. Records may require 8-, 16-, 32- or 64-byte alignment.
-Dilation retains the necessary alignment groups, including padding. Those cells
+Each block's alignment nibble stores `k = 0..3` in thermometer form: `000`, `001`,
+`011`, `111`, meaning alignment of `8 << k` bytes. Atomic OR then computes
+`max(k)`, so concurrent markers can combine alignment requirements without a
+compare-and-swap loop. The fourth bit joins the block to its successor when an
+allocation spans the boundary.
+
+Dilation retains the necessary alignment groups, including interior padding,
+but drops every cell after the block's last exact live cell. A record crossing
+the block boundary marks its final cell, so trimming leaves joined boundaries
+intact. The next independent group still aligns its own start. Those retained cells
 count toward used space, but the live mask keeps the exact claims throughout
 forwarding. The prefix pass writes each joined group's effective alignment into
 the existing alignment nibbles. Each consumer derives the dilated mask in
-registers; no second liveness bitmap is needed.
+registers; no second liveness bitmap is needed. Vector forwarding can omit the
+suffix trim: it counts bits below a live target, whose rank is unchanged.
 
 Forwarding checks the target's exact claim and clears unclaimed targets. For a
 survivor it combines the block's destination base with the count of earlier

@@ -1532,14 +1532,10 @@ public:
               | (((1u << k) - 1) << shift));
           has_alignment |= k != 0;
           item.destination = static_cast<offset>(live_words);
-          live_words += std::popcount(detail::dilate(item.live, k));
+          live_words += std::popcount(detail::retained(item.live, k));
         }
         begin = end;
       }
-      // Dilation can retain unallocated cells at the final record's rounded end.
-      auto const padded = std::min(capacity() - reserve_word_count, (cursor + 7) & ~std::size_t{7});
-      std::fill(data() + cursor, data() + padded, word{0});
-
       return live_words;
     }
     void move_to(word * target, detail::forwarding_tables tables) noexcept {

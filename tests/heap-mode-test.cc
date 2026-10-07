@@ -125,8 +125,11 @@ void aligned_neighbors_and_rotations() noexcept {
         if (j + 1 == widths[i]) expected = replace(expected, 0, H::null);
         check(heap[roots[i] + j] == expected, "aligned records retain all payload cells and cyclic fields");
       }
-      check(heap.field(static_cast<offset>(roots[i] + widths[i]), 0) == std::numeric_limits<offset>::max(),
-            "unmarked neighboring pointer bytes are copied without forwarding");
+      // This neighbor is interior padding before the second live record.
+      // Suffix neighbors may be discarded, and are no longer safe to inspect.
+      if (i == 0)
+        check(heap.field(static_cast<offset>(roots[i] + widths[i]), 0) == std::numeric_limits<offset>::max(),
+              "interior unmarked pointer bytes are copied without forwarding");
     }
     check(heap.start() + heap.used() > heap.capacity() || round != 0,
           "aligned fixture crosses the ring seam on its first rotation");
@@ -216,8 +219,8 @@ void mixed_alignment_claims_share_one_rank_block() noexcept {
   for (auto const & winner : winners)
     check(winner.load(std::memory_order_relaxed) == 1, "mixed-alignment markers own their records once");
   heap.compact(std::span<offset>{roots});
-  check(roots == std::vector<offset>{2, 4, 8} && heap.used() == 16,
-        "16- and 32-byte marks in one block take max alignment, not 1|2=3");
+  check(roots == std::vector<offset>{2, 4, 8} && heap.used() == 11,
+        "mixed alignment preserves target ranks without retaining the final padding");
   for (std::size_t i = 0; i < roots.size(); ++i)
     for (std::size_t j = 0; j < widths[i]; ++j) {
       auto expected = original[i][j];

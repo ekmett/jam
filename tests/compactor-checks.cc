@@ -38,9 +38,10 @@ extern "C" void check_compactors() noexcept {
       auto expand = [](std::uint32_t bits, unsigned k) noexcept {
         std::uint32_t result = 0;
         auto const width = 1u << k;
-        for (unsigned begin = 0; begin != 32; begin += width) {
+        auto const end = static_cast<unsigned>(std::bit_width(bits));
+        for (unsigned begin = 0; begin < end; begin += width) {
           auto const group = ((1u << width) - 1) << begin;
-          if (bits & group) result |= group;
+          if (bits & group) result |= ((1u << std::min(width, end - begin)) - 1) << begin;
         }
         return result;
       };
@@ -196,11 +197,11 @@ extern "C" void check_compactors() noexcept {
     baseline.move(masked_source.data(), masked_expected.data() + 1, masked_metadata.data(), 0, 1);
     variant.move(masked_source.data(), masked_actual.data() + 1, masked_metadata.data(), 0, 1);
     check(masked_actual == masked_expected);
-    // Every dead cell is retained by dilation, but its stale declarations are
-    // still data. Also exercise the final padded dword of the nibble table.
+    // Interior dead cells are retained, but their stale declarations are still
+    // data. The dead suffix is dropped. Exercise the nibble table's final dword.
     alignas(4) std::array<std::uint8_t, 4> masked_alignment{3, 0, 0, 0};
     auto masked_reference = masked_metadata;
-    masked_reference[0].live = ~std::uint32_t{0};
+    masked_reference[0].live = 0x7fffffffu;
     masked_reference[0].pointers &= 0x1111111111111111ULL;
     masked_expected.fill(sentinel); masked_actual.fill(sentinel);
     baseline.move(masked_source.data(), masked_expected.data() + 1, masked_reference.data(), 0, 1);
