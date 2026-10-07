@@ -1,5 +1,12 @@
 # jam
 
+![C++](https://img.shields.io/badge/C%2B%2B-00599C?style=flat&logo=c%2B%2B&logoColor=white)
+![Arm](https://img.shields.io/badge/arm-%230091BD.svg?style=for-the-badge&logo=arm&logoColor=white)
+![Intel](https://img.shields.io/badge/intel-%230068B5.svg?style=for-the-badge&logo=intel&logoColor=white)
+![AMD](https://img.shields.io/badge/amd-%23ED1C24.svg?style=for-the-badge&logo=amd&logoColor=white)
+[![Build](https://github.com/ekmett/jam/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ekmett/jam/actions/workflows/ci.yml)
+[![Documentation](https://img.shields.io/badge/docs-Doxygen-blue?style=flat&logo=doxygen&logoColor=white)](https://ekmett.github.io/jam/)
+
 <!-- SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com> -->
 <!-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
