@@ -48,7 +48,7 @@ void store_prefix(std::uint32_t * target, __m256i value, unsigned count) noexcep
 }
 #endif
 
-export module jam:compact;
+export module jam:packed;
 import native;
 
 export namespace jam::detail {

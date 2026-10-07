@@ -1,7 +1,8 @@
 # Compaction layout
 
 A Lean model of the layout pass and its alignment costs. The model follows
-`compact.ccm` and `generation::prepare` in `heap.ccm`, starting from commit
+`src/jam/packed.ccm` (formerly `compact.ccm`) and `generation::prepare` in
+`src/jam/heap.ccm`, starting from commit
 `dd42e70520be8cfd69d414e8ce135e177c853067`.
 
 ```sh

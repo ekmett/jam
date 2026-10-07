@@ -107,7 +107,7 @@ target_compile_features(jam PUBLIC cxx_std_26)
 set_target_properties(jam PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
 target_sources(jam PUBLIC FILE_SET modules TYPE CXX_MODULES
   BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src"
-  FILES src/jam.ccm src/jam_unqualified.ccm src/jam/heap.ccm src/jam/compact.ccm src/jam/work.ccm src/jam/units.ccm src/jam/simd.ccm)
+  FILES src/jam.ccm src/jam_unqualified.ccm src/jam/heap.ccm src/jam/packed.ccm src/jam/work.ccm src/jam/units.ccm src/jam/simd.ccm)
 target_link_libraries(jam PUBLIC Threads::Threads native::native)
 target_compile_definitions(jam PUBLIC JAM_PAGE_BYTES=${JAM_PAGE_BYTES})
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")

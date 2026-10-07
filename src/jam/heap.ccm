@@ -54,7 +54,7 @@ module;
 
 export module jam:heap;
 import :work;
-import :compact;
+import :packed;
 export import :units;
 
 namespace jam::detail {

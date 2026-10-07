@@ -12,7 +12,7 @@ module;
 #include <vector>
 
 module jam;
-import :compact;
+import :packed;
 import native;
 
 extern "C" void check_compactors() noexcept {
