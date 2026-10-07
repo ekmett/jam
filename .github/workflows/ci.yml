@@ -420,7 +420,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tools/package_jdk.py --java-home $jdk --output build/jam-jdk `
             --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Build-Tools-License.docx" `
-            --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Redistribution.html"
+            --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Redistribution.md"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Move-Item build/jam-jdk "$env:RUNNER_TEMP/jam-jdk"
           python tools/check_package.py --java-home "$env:RUNNER_TEMP/jam-jdk"

@@ -217,7 +217,7 @@ $env:Path = "$PWD/build-jam;$env:Path"
 python tools/build_bridge.py --java-home $jdk
 python tools/package_jdk.py --java-home $jdk --output build/jam-jdk `
   --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Build-Tools-License.docx" `
-  --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Redistribution.html"
+  --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Redistribution.md"
 ./build/jam-jdk/bin/java.exe -Xshare:off -Xms256m -Xmx256m `
   -XX:+UnlockExperimentalVMOptions -XX:+UseJamGC -jar application.jar
 ```

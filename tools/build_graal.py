@@ -97,7 +97,7 @@ def packaging_arguments(options):
             directory = Path(tools)
             if not licenses:
                 licenses = [directory / 'Microsoft-Build-Tools-License.docx',
-                            directory / 'Microsoft-Redistribution.html']
+                            directory / 'Microsoft-Redistribution.md']
             if compiler_license is None:
                 compiler_license = directory / 'compiler-rt-LICENSE.TXT'
         if compiler_license is None:

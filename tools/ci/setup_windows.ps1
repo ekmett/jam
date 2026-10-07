@@ -77,7 +77,7 @@ if ($Mode -ne 'native') {
     # compiler-builtins notice omitted from the binary LLVM archive.
     $null = Get-Archive compiler-rt-LICENSE.TXT '1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d' 'https://raw.githubusercontent.com/llvm/llvm-project/85ac560262434c9ccfc0c183ec22d4138ed647fb/compiler-rt/LICENSE.TXT'
     $null = Get-Archive Microsoft-Build-Tools-License.docx '2f66b86a00e8d9833789897ce23d05a4a2dbea370cf39c8c1098dbc17d0e7bdc' 'https://visualstudio.microsoft.com/wp-content/uploads/2024/03/Visual-Studio-2022-Diagnostic-Build-Tools-Agent-License_Update-March-2024_EN.docx'
-    $null = Get-Archive Microsoft-Redistribution.html 'a616275981c776f997eb518e8ca9de55c7d51b0f490f5487f01798134810b62c' 'https://aka.ms/vs/17/redist.txt'
+    $null = Get-Archive Microsoft-Redistribution.md '0240b9a75f8fd997d998af27ea84b901f576782177f8ff535b7b07924c9570f7' 'https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution?accept=text/markdown'
 }
 
 # Resolve Visual Studio on each runner; its installation is not part of the cache.
