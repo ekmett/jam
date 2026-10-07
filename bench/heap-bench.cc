@@ -17,7 +17,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include "etc/page-size.h"
+#include "../etc/page-size.h"
 
 import jam;
 import native;
