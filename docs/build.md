@@ -68,10 +68,9 @@ python3 tools/prepare_jdk.py
 ```
 
 The [manifest](../config/source-pins.json) records the source revisions and
-archive hashes. Preparation applies the
-[Windows hosting extension](../patches/jam-host-windows.patch) to the pinned
-Jam checkout and leaves `upstream/native` unchanged. It extracts OpenJDK into
-`upstream/jdk25` and applies the [HotSpot patch](../patches/hotspot-jam.patch).
+archive hashes. Jam and native are used directly from their pinned revisions.
+Preparation extracts OpenJDK into `upstream/jdk25` and applies the
+[HotSpot patch](../patches/hotspot-jam.patch).
 
 The JDK preparation script refuses to replace an existing source directory.
 Run it once in a fresh checkout. Repeated builds use the prepared sources.
@@ -153,7 +152,7 @@ python3 tools/check_patches.py
 overrides that choice. Without overrides it uses the host platform's fastdebug
 JDK image. These checks exercise the public API, Java reference behavior,
 barriers and generation transitions. Generated logs stay local and are ignored
-by Git. `check_patches.py` checks the Jam extension against its pin and
+by Git. `check_patches.py` verifies that Jam matches its unmodified pin and
 reconstructs the HotSpot sources from the patch.
 
 ## Packaging

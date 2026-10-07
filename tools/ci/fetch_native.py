@@ -6,7 +6,6 @@
 import json
 from pathlib import Path
 import subprocess
-import sys
 
 root = Path(__file__).resolve().parents[2]
 pins = json.loads((root / "config/source-pins.json").read_text())
@@ -24,7 +23,6 @@ for name in ("jam", "native"):
                         pin["commit"]], check=True)
     head = subprocess.check_output(["git", "-C", str(destination), "rev-parse", "HEAD"], text=True).strip()
     dirty = subprocess.check_output(["git", "-C", str(destination), "status", "--porcelain"], text=True)
-    if head != pin["commit"] or name != 'jam' and dirty:
+    if head != pin["commit"] or dirty:
         raise SystemExit(f"Preserving changed upstream/{name}; expected the clean manifest revision.")
     print(f"Verified {name} at {head}")
-subprocess.run([sys.executable, str(root / 'tools/prepare_jam.py')], check=True)

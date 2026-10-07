@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 import subprocess
 import urllib.request
-from prepare_jam import prepare as prepare_jam
 
 
 def main():
@@ -30,9 +29,9 @@ def main():
         subprocess.run(["git", "-C", str(jam), "fetch", "--depth", "1", "origin", pin["commit"]], check=True)
         subprocess.run(["git", "-C", str(jam), "checkout", "--detach", pin["commit"]], check=True)
     head = subprocess.check_output(["git", "-C", str(jam), "rev-parse", "HEAD"], text=True).strip()
-    if head != pin["commit"]:
-        raise SystemExit("Existing upstream/jam differs from the pin; preserve it and select another checkout.")
-    prepare_jam()
+    dirty = subprocess.check_output(["git", "-C", str(jam), "status", "--porcelain"])
+    if head != pin["commit"] or dirty:
+        raise SystemExit("Preserving changed upstream/jam; expected the clean manifest revision.")
 
     if options.full or options.graal:
         native = upstream / 'native'

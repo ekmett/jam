@@ -1,7 +1,7 @@
 {
   "jam": {
     "repo": "ekmett/jam",
-    "commit": "dd42e70520be8cfd69d414e8ce135e177c853067"
+    "commit": "dcc3cf0a2cc63f82fc01295d1fae1a238e09a4b4"
   },
   "jdk25": {
     "repo": "openjdk/jdk",
