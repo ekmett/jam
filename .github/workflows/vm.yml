@@ -176,6 +176,16 @@ jobs:
           source "$JAM_CI_TOOLS/env.sh"
           mv build/jam-jdk "$RUNNER_TEMP/jam-jdk"
           python3 tools/check_package.py --java-home "$RUNNER_TEMP/jam-jdk"
+      - name: Archive checked JDK
+        run: python3 tools/ci/archive_jdk.py --java-home "$RUNNER_TEMP/jam-jdk" --output "$RUNNER_TEMP/jam-jdk-ci.tar.gz"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: jam-jdk-${{ matrix.platform }}
+          path: ${{ runner.temp }}/jam-jdk-ci.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
 
   graal_macos:
     name: Build GraalVM (${{ matrix.platform }})
@@ -228,7 +238,7 @@ jobs:
           path: ${{ runner.temp }}/jam-graal-ci.tar.gz
           if-no-files-found: error
           compression-level: 0
-          retention-days: 3
+          retention-days: 14
           overwrite: true
 
   graal_linux:
@@ -376,6 +386,18 @@ jobs:
           Move-Item build/jam-jdk "$env:RUNNER_TEMP/jam-jdk"
           python tools/check_package.py --java-home "$env:RUNNER_TEMP/jam-jdk"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Archive checked JDK
+        run: |
+          python tools/ci/archive_jdk.py --java-home "$env:RUNNER_TEMP/jam-jdk" --output "$env:RUNNER_TEMP/jam-jdk-ci.tar.gz"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: jam-jdk-windows
+          path: ${{ runner.temp }}/jam-jdk-ci.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
 
   graal_windows:
     name: Build GraalVM (windows)
@@ -428,7 +450,7 @@ jobs:
           path: ${{ runner.temp }}/jam-graal-ci.tar.gz
           if-no-files-found: error
           compression-level: 0
-          retention-days: 3
+          retention-days: 14
           overwrite: true
 
   consumers_windows:

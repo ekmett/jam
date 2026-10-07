@@ -2,7 +2,9 @@
 
 Use the patched JDK 25 or GraalVM 25.3.4.1 on macOS 26 arm64, Linux x86_64 or
 Windows x86_64. The Linux build has been exercised on Ubuntu 22.04 with glibc 2.35;
-the Windows build on Windows 11 with Visual Studio 2022. Select Jam with
+the Windows build on Windows 11 with Visual Studio 2022. The distributed CI
+archives have their own [platform requirements](distribution.md), including
+glibc 2.38 for the initial Linux package. Select Jam with
 `-XX:+UnlockExperimentalVMOptions -XX:+UseJamGC` and set equal initial and
 maximum heap sizes. The [build guide](build.md) gives the toolchain and commands.
 Native executables use `native-image --gc=jam` from the patched GraalVM; see

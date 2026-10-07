@@ -1,5 +1,8 @@
 # Build and run
 
+For an existing runtime, use the [prebuilt packages](distribution.md). The
+commands below build from source.
+
 jam-vm builds two things: a native jam backend and a patched JDK. The backend
 uses C++26 modules. The JDK uses its normal C++14 toolchain and calls the
 backend through [a C header](https://github.com/ekmett/jam/blob/main/vm/src/adapter/jam_vm.h).

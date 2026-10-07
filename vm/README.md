@@ -12,7 +12,8 @@ through Truffle/Graal, with its closures in the host heap.
 
 ## Using the collector
 
-First, [build the patched JDK](../docs/vm/build.md). Then select Jam with that JVM:
+First, [download a runtime](../docs/vm/distribution.md) or
+[build the patched JDK](../docs/vm/build.md). Then select Jam with that JVM:
 
 ```sh
 java -Xshare:off -Xms256m -Xmx256m \
@@ -63,6 +64,7 @@ low-level claims, native loading and the thc handoff.
 
 ## [Documentation](https://ekmett.github.io/jam/)
 
+* [Prebuilt runtimes](../docs/vm/distribution.md)
 * [Build and run](../docs/vm/build.md)
 * [Native Image](../docs/vm/native-image.md)
 * [Integrating thc](../docs/vm/thc-integration.md)
