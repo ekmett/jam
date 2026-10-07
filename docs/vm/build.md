@@ -10,7 +10,8 @@ Build on macOS 26 arm64, Linux x86_64 or Windows 11 x86_64. See
 ## CMake targets
 
 The root build produces the C++ library by default. Enable the runtime adapter
-with `-DJAM_BUILD_VM=ON`. Consumers link `jam::jam` or `jam::vm`; the names below
+with `-DJAM_BUILD_VM=ON`. The adapter requires the default TLS heap context;
+`JAM_CONTEXT_X28` is incompatible with the runtimes, which reserve that register. Consumers link `jam::jam` or `jam::vm`; the names below
 are build targets, passed to `cmake --build`.
 
 | Target | Builds |
@@ -118,7 +119,8 @@ Run it once in a fresh checkout. Repeated builds use the prepared sources.
 
 ## Build the backend and JVM
 
-Set `JAM_BOOT_JDK` before the native build so it also builds the JNI test bridge.
+Set `JAM_BOOT_JDK` before building HotSpot. Runtime checks build their JNI fixtures
+against the JDK being tested.
 
 ```sh
 bash tools/build_native.sh
@@ -162,7 +164,6 @@ Starting from a fresh checkout, with the tools above configured:
 python3 tools/fetch_sources.py --graal
 python3 tools/prepare_jdk.py --graal
 python3 tools/prepare_graal.py
-export JAM_HOTSPOT_SOURCE="$PWD/upstream/labsjdk25"
 bash tools/build_native.sh
 bash tools/build_hotspot.sh --graal
 bash tools/build_graal.sh
@@ -274,7 +275,6 @@ For GraalVM, start in a fresh checkout:
 python tools/fetch_sources.py --graal
 python tools/prepare_jdk.py --graal
 python tools/prepare_graal.py
-$env:JAM_HOTSPOT_SOURCE = "$PWD/upstream/labsjdk25"
 ./tools/build_native.ps1
 ./tools/build_hotspot.ps1 -Graal
 python tools/build_graal.py
@@ -291,3 +291,11 @@ discover Jam through JNI, JVMTI or `-agentpath`. Once the adapter is present,
 an ABI-compatible backend change can rebuild just the library. Changes to VM
 registration, barriers or the host contract require a HotSpot rebuild. Module
 BMI files are build inputs; they are not runtime dependencies.
+
+
+## CI
+
+Core and adapter checks run on pull requests. Full HotSpot, GraalVM and
+SubstrateVM builds run on `main`, manual dispatch, or a pull request carrying
+the `runtime-validation` label. They use the same runtime targets above, with
+separate Graal consumers sharing one built distribution per platform.

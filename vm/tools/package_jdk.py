@@ -149,7 +149,7 @@ def rewrite_elf(path, stage, java_home, library_dir, libraries, runtime):
                 resolved = Path(rpath).resolve()
                 if resolved.is_relative_to(java_home):
                     desired_paths.append('$ORIGIN/' + os.path.relpath(stage / resolved.relative_to(java_home), path.parent))
-                elif any(resolved.is_relative_to(base) for base in (ROOT, runtime)):
+                elif any(resolved.is_relative_to(base) for base in (ROOT, NATIVE_BUILD, runtime)):
                     continue
                 else:
                     raise SystemExit(f'External runtime path in {path.relative_to(stage)}: {rpath}')
@@ -390,7 +390,7 @@ def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_li
                     target = stage / resolved.relative_to(java_home)
                     replacement = '@loader_path/' + os.path.relpath(target, path.parent)
                     changes += ['-rpath', rpath, replacement]
-                elif any(resolved.is_relative_to(base) for base in (ROOT, runtime)):
+                elif any(resolved.is_relative_to(base) for base in (ROOT, NATIVE_BUILD, runtime)):
                     changes += ['-delete_rpath', rpath]
                 else:
                     raise SystemExit(f'External runtime path in {path.relative_to(stage)}: {rpath}')

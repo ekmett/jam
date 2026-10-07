@@ -5,10 +5,12 @@ name: Managed runtimes
 
 on:
   push:
+    branches: [main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -125,7 +127,7 @@ jobs:
 
   hotspot:
     name: HotSpot integration (${{ matrix.platform }})
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
     strategy:
       fail-fast: false
       matrix:
@@ -155,43 +157,29 @@ jobs:
           restore-keys: ${{ matrix.cache }}-native-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install pinned build dependencies
         run: bash tools/ci/setup_${{ matrix.platform }}.sh hotspot
-      - name: Prepare pinned JDK sources
-        run: |
-          python3 tools/fetch_sources.py --full
-          python3 tools/prepare_jdk.py
-      - name: Build native collector and test JNI bridge
+      - name: Build native collector
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           bash tools/build_native.sh
       - name: Build Jam JDK
         run: |
           source "$JAM_CI_TOOLS/env.sh"
-          if [[ $RUNNER_OS == Linux ]]; then
-            bash tools/build_hotspot.sh --with-native-debug-symbols=none
-          else
-            bash tools/build_hotspot.sh
-          fi
+          "$JAM_CMAKE" --build build-jam --target jam-jdk
       - name: Run VM, collector identity and guest regressions
         run: |
           source "$JAM_CI_TOOLS/env.sh"
-          export JAM_JAVA="$(python3 tools/platform_paths.py)/bin/java"
-          export JAM_JAVAC="$(dirname "$JAM_JAVA")/javac"
           export JAM_STOCK_JAVA="$JAM_BOOT_JDK/bin/java"
-          bash tools/check_vm.sh
-          python3 tools/check_gc_registration.py
-          python3 tools/check_bridge.py
-      - name: Package and relocate the JDK
+          "$JAM_CMAKE" -S .. -B build-jam -DJAM_VM_TEST_RUNTIMES=jdk
+          "$(dirname "$JAM_CMAKE")/ctest" --test-dir build-jam -L '^jdk$' --output-on-failure
+      - name: Relocate the JDK
         run: |
           source "$JAM_CI_TOOLS/env.sh"
-          python3 tools/package_jdk.py \
-            --java-home "$(python3 tools/platform_paths.py)" \
-            --output build/jam-jdk
           mv build/jam-jdk "$RUNNER_TEMP/jam-jdk"
           python3 tools/check_package.py --java-home "$RUNNER_TEMP/jam-jdk"
 
   graal_macos:
     name: Build GraalVM (${{ matrix.platform }})
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
     strategy:
       fail-fast: false
       matrix:
@@ -219,27 +207,15 @@ jobs:
             ${{ matrix.cache }}-native-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install pinned build dependencies
         run: bash tools/ci/setup_${{ matrix.platform }}.sh graal
-      - name: Prepare pinned LabsJDK and Graal sources
-        run: |
-          python3 tools/fetch_sources.py --graal
-          python3 tools/prepare_jdk.py --graal
-          python3 tools/prepare_graal.py
-          python3 tools/check_patches.py --graal
-      - name: Build native collector and LabsJDK
+      - name: Build native collector
         run: |
           source "$JAM_CI_TOOLS/env.sh"
-          export JAM_HOTSPOT_SOURCE="$PWD/upstream/labsjdk25"
           bash tools/build_native.sh
-          if [[ $RUNNER_OS == Linux ]]; then
-            bash tools/build_hotspot.sh --graal --with-native-debug-symbols=none
-          else
-            bash tools/build_hotspot.sh --graal
-          fi
       - name: Build and package GraalVM
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           df -h . "$RUNNER_TEMP"
-          bash tools/build_graal.sh
+          "$JAM_CMAKE" --build build-jam --target jam-graalvm
       - name: Check compiler barriers and derived pointers
         run: |
           source "$JAM_CI_TOOLS/env.sh"
@@ -257,7 +233,7 @@ jobs:
 
   graal_linux:
     name: Build GraalVM (${{ matrix.platform }})
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
     strategy:
       fail-fast: false
       matrix:
@@ -302,7 +278,6 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/jam-graal-ci"
           tar -xzf "$RUNNER_TEMP/jam-graal-download/jam-graal-ci.tar.gz" -C "$RUNNER_TEMP/jam-graal-ci"
-          cp -R "$RUNNER_TEMP/jam-graal-ci/build-jam" .
           cp -R "$RUNNER_TEMP/jam-graal-ci/upstream" .
           echo "JAM_CI_JAVA_HOME=$RUNNER_TEMP/jam-graal-ci/graalvm" >> "$GITHUB_ENV"
           rm "$RUNNER_TEMP/jam-graal-download/jam-graal-ci.tar.gz"
@@ -358,7 +333,7 @@ jobs:
 
   hotspot_windows:
     name: HotSpot integration (windows)
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
     runs-on: windows-2022
     timeout-minutes: 120
     defaults:
@@ -380,49 +355,31 @@ jobs:
       - name: Install pinned build dependencies
         timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 hotspot
-      - name: Prepare pinned JDK sources
-        run: |
-          . "$env:JAM_CI_TOOLS/env.ps1"
-          python tools/fetch_sources.py --full
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python tools/prepare_jdk.py
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build native collector and Jam JDK
         run: |
           . "$env:JAM_CI_TOOLS/env.ps1"
           ./tools/build_native.ps1
-          ./tools/build_hotspot.ps1
+          & $env:JAM_CMAKE --build build-jam --target jam-jdk
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Run VM, collector identity and guest regressions
         run: |
           . "$env:JAM_CI_TOOLS/env.ps1"
-          $env:Path = "$PWD/build-jam;$env:Path"
-          $jdk = python tools/platform_paths.py
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $env:JAM_JAVA = "$jdk/bin/java.exe"
-          $env:JAM_JAVAC = "$jdk/bin/javac.exe"
           $env:JAM_STOCK_JAVA = "$env:JAM_BOOT_JDK/bin/java.exe"
-          python tools/check_vm.py
+          & $env:JAM_CMAKE -S .. -B build-jam -DJAM_VM_TEST_RUNTIMES=jdk
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python tools/check_gc_registration.py
+          $ctest = Join-Path (Split-Path $env:JAM_CMAKE -Parent) 'ctest.exe'
+          & $ctest --test-dir build-jam -L '^jdk$' --output-on-failure
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python tools/check_bridge.py
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Package and relocate the JDK
+      - name: Relocate the JDK
         run: |
           . "$env:JAM_CI_TOOLS/env.ps1"
-          $jdk = python tools/platform_paths.py
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python tools/package_jdk.py --java-home $jdk --output build/jam-jdk `
-            --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Build-Tools-License.docx" `
-            --runtime-license "$env:JAM_CI_TOOLS/Microsoft-Redistribution.md"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Move-Item build/jam-jdk "$env:RUNNER_TEMP/jam-jdk"
           python tools/check_package.py --java-home "$env:RUNNER_TEMP/jam-jdk"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
   graal_windows:
     name: Build GraalVM (windows)
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:
@@ -446,27 +403,14 @@ jobs:
       - name: Install pinned build dependencies
         timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 graal
-      - name: Prepare pinned LabsJDK and Graal sources
+      - name: Build native collector
         run: |
           . "$env:JAM_CI_TOOLS/env.ps1"
-          python tools/fetch_sources.py --graal
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python tools/prepare_jdk.py --graal
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python tools/prepare_graal.py
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python tools/check_patches.py --graal
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Build native collector and LabsJDK
-        run: |
-          . "$env:JAM_CI_TOOLS/env.ps1"
-          $env:JAM_HOTSPOT_SOURCE = "$PWD/upstream/labsjdk25"
           ./tools/build_native.ps1
-          ./tools/build_hotspot.ps1 -Graal
       - name: Build and package GraalVM
         run: |
           . "$env:JAM_CI_TOOLS/env.ps1"
-          python tools/build_graal.py
+          & $env:JAM_CMAKE --build build-jam --target jam-graalvm
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Check compiler barriers and derived pointers
         run: |
@@ -516,7 +460,6 @@ jobs:
           New-Item -ItemType Directory "$env:RUNNER_TEMP/jam-graal-ci" | Out-Null
           & "$env:SystemRoot/System32/tar.exe" -xzf "$env:RUNNER_TEMP/jam-graal-download/jam-graal-ci.tar.gz" -C "$env:RUNNER_TEMP/jam-graal-ci"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          Copy-Item -Recurse "$env:RUNNER_TEMP/jam-graal-ci/build-jam" .
           Copy-Item -Recurse "$env:RUNNER_TEMP/jam-graal-ci/upstream" .
           "JAM_CI_JAVA_HOME=$env:RUNNER_TEMP/jam-graal-ci/graalvm" >> $env:GITHUB_ENV
           Remove-Item "$env:RUNNER_TEMP/jam-graal-download/jam-graal-ci.tar.gz"

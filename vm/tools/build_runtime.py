@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 from build_graal import packaging_arguments
-from platform_paths import ROOT, jdk_home
+from platform_paths import ROOT, NATIVE_BUILD, jdk_home
 
 
 def run(script, *arguments):
@@ -29,6 +29,8 @@ def main():
     options = parser.parse_args()
     graal = options.runtime == 'graalvm'
     package_args = packaging_arguments(options)
+    if platform.system() == 'Windows':
+        os.environ['PATH'] = str(NATIVE_BUILD) + os.pathsep + os.environ.get('PATH', '')
     run('fetch_sources.py', '--graal' if graal else '--full')
     source = ROOT / 'upstream' / ('labsjdk25' if graal else 'jdk25')
     if not source.exists():
@@ -41,7 +43,8 @@ def main():
                         *(['-Graal'] if graal else [])], check=True)
     else:
         subprocess.run(['bash', str(ROOT / 'tools/build_hotspot.sh'),
-                        *(['--graal'] if graal else [])], check=True)
+                        *(['--graal'] if graal else []),
+                        *(['--with-native-debug-symbols=none'] if platform.system() == 'Linux' else [])], check=True)
     output = ROOT / 'build' / ('graalvm' if graal else 'jam-jdk')
     output.parent.mkdir(parents=True, exist_ok=True)
     # Keep the last working package until its replacement passes packaging checks.

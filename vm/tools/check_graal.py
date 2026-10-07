@@ -25,6 +25,7 @@ evidence = root / 'evidence'
 evidence.mkdir(exist_ok=True)
 native = classes / 'native'
 build_jni_test(home, native)
+build_jni_test(home, native, collector=True)
 subprocess.run([str(home / 'bin/javac'), '-cp', str(jar), '-d', str(classes),
                 *map(str, sorted((root / 'tests/java').glob('*.java'))),
                 str(root / 'tests/bridge/WeakBridgeSmoke.java'),

@@ -34,23 +34,9 @@ if(JAM_BUILD_TESTS)
   set_tests_properties(jam-vm-test jam-generational-test PROPERTIES LABELS vm)
 endif()
 
-set(JAM_VM_JAVA_HOME "" CACHE PATH "JDK providing JNI headers for the guest smoke bridge")
-set(JAM_VM_HOTSPOT_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/upstream/jdk25" CACHE PATH "Prepared HotSpot source providing the Jam VM exports")
-if(JAM_VM_JAVA_HOME)
-  add_library(jam_jni SHARED tests/jam_jni.c tests/critical_jni.c)
-  set_target_properties(jam_jni PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
-  target_include_directories(jam_jni PRIVATE
-    "${JAM_VM_JAVA_HOME}/include"
-    "${JAM_VM_JAVA_HOME}/include/$<IF:$<PLATFORM_ID:Windows>,win32,$<IF:$<PLATFORM_ID:Darwin>,darwin,linux>>"
-    "${JAM_VM_HOTSPOT_SOURCE}/src/hotspot/share/include")
-  if(APPLE)
-    target_link_options(jam_jni PRIVATE -undefined dynamic_lookup)
-  endif()
-endif()
-
 # Runtime tools receive this directory explicitly; standalone wrappers default
 # to vm/build-jam. Keep DLLs next to the C ABI tests on Windows.
-foreach(target jam-vm jam-vm-test jam-generational-test jam_jni)
+foreach(target jam-vm jam-vm-test jam-generational-test)
   if(TARGET ${target})
     set_target_properties(${target} PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY "$<1:${PROJECT_BINARY_DIR}>"

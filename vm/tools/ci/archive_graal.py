@@ -7,48 +7,18 @@ import argparse
 import os
 from pathlib import Path
 import platform
-import shutil
-import subprocess
 import sys
 import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
-from package_jdk import load_commands, SYSTEM
-from pe_runtime import check_pe_paths
-from platform_paths import java_tool, NATIVE_BUILD
+from platform_paths import java_tool
 
 JARS = {
     'truffle': ('truffle-api', 'truffle-runtime', 'truffle-compiler'),
     'sdk': ('polyglot', 'collections', 'jniutils', 'nativebridge', 'nativeimage', 'word'),
 }
-
-
-def portable_jni(source, destination, java_home):
-    """Drop unused build search paths from the C-only test library's copy."""
-    shutil.copy2(source, destination)
-    destination.chmod(destination.stat().st_mode | 0o200)
-    if platform.system() == 'Windows':
-        # The fixture is loaded by this packaged JVM, whose bin directory owns
-        # its MSVC runtime. It must not borrow a CRT from the build toolchain.
-        check_pe_paths(destination, java_home)
-        return
-    _, dependencies, rpaths = load_commands(destination)
-    if platform.system() == 'Darwin':
-        if any(not path.startswith(SYSTEM) for path in dependencies):
-            raise SystemExit('The JNI test library has a non-system dependency.')
-        if rpaths:
-            subprocess.run(['install_name_tool', *[argument for path in sorted(rpaths)
-                            for argument in ('-delete_rpath', path)], str(destination)], check=True)
-            subprocess.run(['codesign', '--force', '--sign', '-',
-                            '--preserve-metadata=identifier,entitlements,flags,runtime',
-                            str(destination)], check=True)
-    else:
-        if dependencies - {'libc.so.6', 'libpthread.so.0', 'libdl.so.2', 'librt.so.1'}:
-            raise SystemExit('The JNI test library has a non-system dependency.')
-        if rpaths:
-            subprocess.run(['patchelf', '--remove-rpath', str(destination)], check=True)
 
 
 def metadata(member):
@@ -79,17 +49,11 @@ def main():
             raise SystemExit(f'Broken or external runtime symlink: {path.relative_to(home)}')
     jars = [Path('upstream/graal25') / suite / 'mxbuild/dists' / (name + '.jar')
             for suite, names in JARS.items() for name in names]
-    jni = Path('build-jam') / ('jam_jni.dll' if platform.system() == 'Windows' else
-                             'libjam_jni.dylib' if platform.system() == 'Darwin' else 'libjam_jni.so')
     for relative in jars:
         if not (ROOT / relative).is_file():
             raise SystemExit(f'Missing CI consumer input: {relative}')
-    if not (NATIVE_BUILD / jni.name).is_file():
-        raise SystemExit(f'Missing CI consumer input: {NATIVE_BUILD / jni.name}')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='jam-ci-archive-', dir=output.parent) as temporary:
-        copy = Path(temporary) / jni.name
-        portable_jni(NATIVE_BUILD / jni.name, copy, home)
         archive_path = Path(temporary) / 'runtime.tar.gz'
         with tarfile.open(archive_path, 'w:gz', compresslevel=1) as archive:
             # Preserve the distribution's symlinks, executable modes and signed
@@ -97,9 +61,8 @@ def main():
             archive.add(home, arcname='graalvm', filter=metadata)
             for relative in jars:
                 archive.add((ROOT / relative).resolve(), arcname=str(relative), filter=metadata)
-            archive.add(copy, arcname=str(jni), filter=metadata)
         archive_path.rename(output)
-    print(f'Archived packaged GraalVM, {len(jars)} jars and the JNI test library: {output}')
+    print(f'Archived packaged GraalVM, {len(jars)} jars: {output}')
 
 
 if __name__ == '__main__':

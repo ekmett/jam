@@ -14,6 +14,10 @@ option(JAM_BUILD_VM "Build the managed-runtime adapter and runtime targets" OFF)
 option(JAM_BUILD_DOCS "Build Doxygen documentation" OFF)
 option(JAM_CONTEXT_X28 "Reserve AArch64 x28 for the implicit heap instead of TLS" OFF)
 
+if(JAM_BUILD_VM AND JAM_CONTEXT_X28)
+  message(FATAL_ERROR "The VM adapter requires TLS: HotSpot and SubstrateVM reserve x28")
+endif()
+
 if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Darwin|Linux|Windows)$")
   message(FATAL_ERROR "jam requires macOS, Linux or Windows virtual-memory aliases")
 endif()

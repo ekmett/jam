@@ -24,6 +24,7 @@ subprocess.run([sys.executable, str(root / 'tools/build_bridge.py'), '--java-hom
 jar = root / 'build/bridge/jam-vm.jar'
 native = classes / 'native'
 build_jni_test(javac.parent.parent, native)
+build_jni_test(javac.parent.parent, native, collector=True)
 subprocess.run([str(javac), '-cp', str(jar), '-d', str(classes),
                 *map(str, sorted((root / 'tests/java').glob('*.java'))),
                 str(root / 'tests/bridge/JNIWeakSmoke.java')], check=True)

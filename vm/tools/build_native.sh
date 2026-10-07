@@ -9,8 +9,7 @@ ninja_bin=${JAM_NINJA:-$root/.toolchains/build-tools/bin/ninja}
 compiler=${JAM_CXX:-$root/.toolchains/llvm23/bin/clang++}
 library=${JAM_LIBCXX_PREFIX:-/opt/homebrew/opt/llvm@22}
 args=(-S "$root/.." -B build-jam -DJAM_BUILD_VM=ON -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja_bin"
-      "-DCMAKE_CXX_COMPILER=$compiler" -DCMAKE_BUILD_TYPE=Release
-      "-DJAM_VM_HOTSPOT_SOURCE=${JAM_HOTSPOT_SOURCE:-$root/upstream/jdk25}")
+      "-DCMAKE_CXX_COMPILER=$compiler" -DCMAKE_BUILD_TYPE=Release)
 if [[ $(uname) == Darwin ]]; then
   args+=("-DCMAKE_OSX_SYSROOT=$(xcrun --show-sdk-path)"
          "-DCMAKE_CXX_FLAGS=-nostdinc++ -isystem $library/include/c++/v1"
@@ -31,7 +30,6 @@ elif [[ -n ${JAM_LIBCXX_PREFIX:-} ]]; then
          "-DCMAKE_EXE_LINKER_FLAGS=-L$runtime -Wl,-rpath,$runtime -Wl,--disable-new-dtags"
          "-DCMAKE_SHARED_LINKER_FLAGS=-L$runtime -Wl,-rpath,$runtime -Wl,--disable-new-dtags")
 fi
-if [[ -n ${JAM_BOOT_JDK:-} ]]; then args+=("-DJAM_VM_JAVA_HOME=$JAM_BOOT_JDK"); fi
 "$cmake_bin" "${args[@]}"
 "$cmake_bin" --build build-jam -j "${JAM_JOBS:-8}"
 "$(dirname "$cmake_bin")/ctest" --test-dir build-jam --output-on-failure
