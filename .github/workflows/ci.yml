@@ -55,6 +55,7 @@ jobs:
           path: ${{ runner.temp }}/jam-vm-toolchain
           key: windows-2022-x86_64-native-${{ hashFiles('tools/ci/setup_windows.ps1') }}
       - name: Install pinned build dependencies
+        timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 native
       - name: Fetch native sources
         run: |
@@ -383,6 +384,7 @@ jobs:
           key: windows-2022-x86_64-hotspot-${{ hashFiles('tools/ci/setup_windows.ps1') }}
           restore-keys: windows-2022-x86_64-native-${{ hashFiles('tools/ci/setup_windows.ps1') }}
       - name: Install pinned build dependencies
+        timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 hotspot
       - name: Prepare pinned JDK sources
         run: |
@@ -447,6 +449,7 @@ jobs:
             windows-2022-x86_64-hotspot-${{ hashFiles('tools/ci/setup_windows.ps1') }}
             windows-2022-x86_64-native-${{ hashFiles('tools/ci/setup_windows.ps1') }}
       - name: Install pinned build dependencies
+        timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 graal
       - name: Prepare pinned LabsJDK and Graal sources
         run: |
@@ -531,6 +534,7 @@ jobs:
             windows-2022-x86_64-hotspot-${{ hashFiles('tools/ci/setup_windows.ps1') }}
             windows-2022-x86_64-native-${{ hashFiles('tools/ci/setup_windows.ps1') }}
       - name: Install runtime check dependencies
+        timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 graal
       - name: Run compiled heap and weak-pointer regressions
         if: matrix.suite == 'GraalVM runtime'
