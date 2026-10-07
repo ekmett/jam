@@ -6,12 +6,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
-#if !defined(_WIN32)
-#include <sys/mman.h>
-#include <sys/wait.h>
-#include <sys/resource.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <cerrno>
 #include <csignal>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 import jam;
 
@@ -153,12 +158,61 @@ void rejects_cpp_weak_roots() {
   check(::waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
         "host rejects ordinary weak root registrations");
 }
+#endif
+void inaccessible(std::byte * address) {
+#if defined(_WIN32)
+  MEMORY_BASIC_INFORMATION region{};
+  check(::VirtualQuery(address, &region, sizeof(region)) != 0, "query canonical reservation");
+  check(region.State == MEM_RESERVE, "guard and unpublished pages remain reserved and inaccessible");
+#else
+  auto const child = ::fork();
+  check(child != -1, "start guard probe");
+  if (child == 0) {
+    rlimit const limit{0, 0};
+    static_cast<void>(::setrlimit(RLIMIT_CORE, &limit));
+    auto const value = *reinterpret_cast<volatile unsigned char *>(address);
+    static_cast<void>(value);
+    ::_exit(0);
+  }
+  int status = 0;
+  pid_t finished;
+  do { finished = ::waitpid(child, &status, 0); } while (finished == -1 && errno == EINTR);
+  check(finished == child && WIFSIGNALED(status) &&
+    (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS),
+    "guard and unpublished pages remain inaccessible");
+#endif
+}
 void publication() {
-  auto * target = static_cast<std::byte *>(::mmap(nullptr, JAM_PAGE_BYTES * 9, PROT_NONE,
+  constexpr auto page = JAM_PAGE_BYTES;
+  // The young window ends exactly at the reservation's end: its initial
+  // publication must still split the placeholder prefix.
+  constexpr auto bytes = page * 22;
+#if defined(_WIN32)
+  auto * base = static_cast<std::byte *>(::VirtualAlloc2(nullptr, nullptr, bytes,
+    MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0));
+  check(base != nullptr, "reserve canonical placeholders");
+  // A host-owned mapping separates the two windows. Jam must leave it intact.
+  check(::VirtualFree(base, page * 11, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER), "split sentinel prefix");
+  check(::VirtualFree(base + page * 11, page, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER), "split sentinel suffix");
+  auto const sentinel = ::CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, page, nullptr);
+  check(sentinel != nullptr, "create unrelated backing");
+  check(::MapViewOfFile3(sentinel, ::GetCurrentProcess(), base + page * 11, 0, page,
+    MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0) == base + page * 11, "map unrelated backing");
+#else
+  auto * base = static_cast<std::byte *>(::mmap(nullptr, bytes, PROT_NONE,
     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-  check(target != MAP_FAILED, "reserve canonical view");
+  check(base != MAP_FAILED, "reserve canonical views");
+  check(!::mprotect(base + page * 11, page, PROT_READ | PROT_WRITE), "commit unrelated page");
+#endif
+  auto * const old_target = base + page;
+  auto * const target = base + page * 13;
+  auto * const unrelated = reinterpret_cast<std::uint64_t *>(base + page * 11);
+  *unrelated = 123456;
   {
     fixture f(1);
+    static_cast<void>(f.make(generation::old, 999));
+    auto old = f.make(generation::old, 123);
+    f.host.publish(generation::old, old_target, page_words, page_words * 9);
     for (unsigned i = 0; i != 24; ++i) {
       f.host.publish(generation::young, target, page_words, page_words * 9);
       static_cast<void>(f.make(generation::young, 999));
@@ -167,20 +221,41 @@ void publication() {
       check(published->id == 42, "private writes visible in canonical alias");
       published->id = 84;
       check(f.at(p).id == 84, "canonical writes visible in private view");
-      f.host.begin(true); f.trace(p); check(f.host.prepare(), "published minor");
-      p = f.host.forward(p); f.host.finish();
+      bool const minor = i % 4 != 3;
+      f.host.begin(minor); f.trace(p); f.trace(old);
+      check(f.host.prepare(), "published collection");
+      p = f.host.forward(p); old = f.host.forward(old); f.host.finish();
       f.host.publish(generation::young, target, page_words, page_words * 9);
+      if (!minor) f.host.publish(generation::old, old_target, page_words, page_words * 9);
       published = reinterpret_cast<node *>(target + ((p & ~young_bit) - page_words) * 8);
       check(published->id == 84, "republished alias follows rotated backing");
+      check(reinterpret_cast<node *>(old_target + (old - page_words) * 8)->id == 123,
+        "old publication survives young replacement and follows major rotation");
+      check(*unrelated == 123456, "publication preserves unrelated host mappings");
     }
+    f.host.unpublish(target, page_words * 9);
+    f.host.publish(generation::young, target, page_words, page_words * 9);
+    check(reinterpret_cast<node *>(target)->id == 84, "an unpublished window can be published again");
+    f.host.unpublish(target, page_words * 9);
+    f.host.unpublish(old_target, page_words * 9);
   }
-  check(!::munmap(target, JAM_PAGE_BYTES * 9), "host releases reservation after heap destruction");
-}
+  // Workers have stopped before POSIX guard probes fork.
+  for (auto index : {0, 1, 9, 10, 12, 13, 21}) inaccessible(base + index * page);
+  check(*unrelated == 123456, "unpublication preserves unrelated host mappings");
+#if defined(_WIN32)
+  check(::UnmapViewOfFile2(::GetCurrentProcess(), unrelated, MEM_PRESERVE_PLACEHOLDER), "restore unrelated placeholder");
+  check(::CloseHandle(sentinel), "release unrelated backing");
+  check(::VirtualFree(base, bytes, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS), "coalesce host reservation");
+  check(::VirtualFree(base, 0, MEM_RELEASE), "host releases reservation after heap destruction");
+#else
+  check(!::munmap(base, bytes), "host releases reservation after heap destruction");
 #endif
+}
 int main() {
   cycles(1); cycles(4); retry_and_subdivision(8); retry_and_subdivision(64); external_targets();
+  publication();
 #if !defined(_WIN32)
-  publication(); rejects_cpp_weak_roots();
+  rejects_cpp_weak_roots();
 #endif
   std::puts("host phases, promotion retry, tracing and publication passed");
 }

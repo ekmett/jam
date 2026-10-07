@@ -81,11 +81,31 @@ Jam's private views. Publication aliases the backing pages; it does not copy
 objects. Republish after movement while mutators are stopped. For the simple
 `base + offset * 8` decoder, place the young window 16 GiB above the old window.
 
-Publication is supported on macOS and Linux. Windows hosted publication is
-explicitly unsupported: replacing live views needs placeholder management that
-this API does not yet supply. Ordinary Windows heaps are unaffected.
+On Windows, the initial target must lie in a single placeholder reserved with
+`VirtualAlloc2` and `MEM_RESERVE_PLACEHOLDER`. Jam splits that placeholder at the
+window and backing-view boundaries, then maps its existing sections with
+`MapViewOfFile3`. Page-aligned offsets suffice; placeholder replacement does not
+require allocation-granularity alignment. A window may be republished only at
+the same address and size, from the same generation. Published windows must be
+disjoint. Do not alter their mappings or protection outside this API.
 
-The host owns and releases its reservation. Jam never releases it, and no
-published alias may be accessed after the heap dies. The reservation itself may
-be released afterward. `storage.old()` and `storage.young()` expose used cells,
-capacity and ring origins; `storage.compactor_name()` reports the selected kernel.
+Remove an alias while mutators are stopped and no collection is active:
+
+```cpp
+host.unpublish(target, count_cells);
+```
+
+The address and count identify one complete published window. Unpublication
+restores inaccessible reserved memory without releasing the address range. On
+Windows it restores one placeholder covering exactly that window, which can be
+published again or coalesced with adjacent placeholders by the host. Guards and
+unrelated mappings outside the window are untouched. Changing a Windows
+window's size or generation requires unpublishing it first.
+
+The host owns and releases its reservation. On Windows, unpublish every window
+before destroying the capability or heap; the reservation must remain valid
+through those calls and may be released after heap destruction. On macOS and
+Linux, aliases may instead remain until the reservation is released, but must
+never be accessed after the heap dies. `storage.old()` and `storage.young()`
+expose used cells, capacity and ring origins; `storage.compactor_name()` reports
+the selected kernel.

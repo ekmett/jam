@@ -156,8 +156,15 @@ class heap_mapping {
                     std::size_t offset = 0) noexcept {
     MEMORY_BASIC_INFORMATION region{};
     if (!::VirtualQuery(target, &region, sizeof(region))) system_failure("query heap placeholder");
+    // VirtualQuery starts at the queried page, which can be inside a placeholder.
+    // Query its allocation base before deciding whether either end needs splitting.
+    if (region.State == MEM_RESERVE && region.BaseAddress != region.AllocationBase &&
+        !::VirtualQuery(region.AllocationBase, &region, sizeof(region)))
+      system_failure("query whole heap placeholder");
     auto const begin = static_cast<std::byte *>(region.BaseAddress);
     auto const prefix = static_cast<std::size_t>(target - begin);
+    if (region.State != MEM_RESERVE || prefix > region.RegionSize || count > region.RegionSize - prefix)
+      heap_failure("heap alias requires a containing placeholder");
     if (prefix && !::VirtualFree(begin, prefix, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
       system_failure("split heap placeholder prefix");
     if (count < region.RegionSize - prefix &&
@@ -323,12 +330,8 @@ public:
   }
   /// \brief Publish a logical arc into a caller-owned, page-aligned reservation.
   /// \pre Mutators are stopped. Target does not overlap either private ring view.
-  /// The caller releases the target reservation; no access after this mapping dies.
+  /// On Windows, target is an unmapped placeholder containing the whole arc.
   void publish(std::size_t start, std::byte * target, std::size_t count) const noexcept {
-#if defined(_WIN32)
-    static_cast<void>(start); static_cast<void>(target); static_cast<void>(count);
-    heap_failure("host publication is not supported on Windows");
-#else
     if (start >= capacity || start % page_size() || count % page_size() ||
         count > capacity || reinterpret_cast<std::uintptr_t>(target) % page_size())
       heap_failure("invalid published heap arc");
@@ -337,11 +340,42 @@ public:
         [](span const & s, std::size_t value) noexcept { return s.end <= value; });
       assert(where != spans.end() && where->begin <= start);
       auto const part = std::min(count, where->end - start);
+#if defined(_WIN32)
+      alias(*where, target, part, start - where->begin);
+#else
       alias(address + start, target, part);
+#endif
       start = (start + part) % capacity;
       target += part;
       count -= part;
     }
+  }
+  /// \brief Restore an exact published window to inaccessible reserved memory.
+  /// \pre The window consists entirely of unmodified views published by this API.
+  static void unpublish(std::byte * target, std::size_t count) noexcept {
+    if (!count || count % page_size() || reinterpret_cast<std::uintptr_t>(target) % page_size())
+      heap_failure("invalid unpublished heap window");
+#if defined(_WIN32)
+    auto * cursor = target;
+    auto remaining = count;
+    std::size_t views = 0;
+    while (remaining) {
+      MEMORY_BASIC_INFORMATION region{};
+      if (!::VirtualQuery(cursor, &region, sizeof(region))) system_failure("query published heap view");
+      if (region.AllocationBase != cursor || region.BaseAddress != cursor || region.Type != MEM_MAPPED ||
+          region.State != MEM_COMMIT || !region.RegionSize || region.RegionSize > remaining)
+        heap_failure("published heap window was modified by its host");
+      if (!::UnmapViewOfFile2(::GetCurrentProcess(), cursor, MEM_PRESERVE_PLACEHOLDER))
+        system_failure("restore published heap placeholder");
+      cursor += region.RegionSize;
+      remaining -= region.RegionSize;
+      ++views;
+    }
+    if (views > 1 && !::VirtualFree(target, count, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
+      system_failure("coalesce published heap placeholders");
+#else
+    if (::mmap(target, count, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED)
+      system_failure("restore published heap reservation");
 #endif
   }
   /// \brief Exchange mappings without moving payload bytes.
@@ -1847,6 +1881,14 @@ public:
     phase state = phase::idle;
     std::size_t old_words = 0, young_words = 0;
     bool promoting = false;
+#if defined(_WIN32)
+    struct publication {
+      detail::heap_mapping const * source;
+      std::byte * target;
+      std::size_t bytes;
+    };
+    mutable std::vector<publication> publications;
+#endif
   public:
     /// \brief Select the arena for raw allocation or publication.
     enum class generation { old, young };
@@ -1867,12 +1909,18 @@ public:
     host(host const &) = delete;
     host & operator=(host const &) = delete;
     /// \brief Release the capability after finishing its last collection.
+    /// \pre On Windows, all published windows have been explicitly unpublished.
     ~host() noexcept {
       if (state != phase::idle) detail::heap_failure("unfinished host collection");
+#if defined(_WIN32)
+      if (!publications.empty()) detail::heap_failure("host destroyed with published Windows views");
+#endif
     }
     /// \brief Publish one generation at a stable VM-owned address.
     /// \pre Fixed capacity, no shrink, stopped mutators; skip/count are page multiples.
     /// target corresponds to cell skip, not cell zero. The host owns the reservation.
+    /// On Windows, supply a containing placeholder or the exact window previously
+    /// published from this generation. Do not alter its views outside this API.
     void publish(generation which, void * target, std::size_t skip, std::size_t count) const noexcept {
       if (state != phase::idle) detail::heap_failure("publish during host collection");
       auto const & g = which == generation::young ? owner.nursery : owner.arena;
@@ -1880,8 +1928,52 @@ public:
       if (config.capacity != config.maximum || config.shrink_shift ||
           skip > g.capacity() || count > g.capacity() - skip)
         detail::heap_failure("published heap requires a fixed generation");
+#if defined(_WIN32)
+      auto const address = reinterpret_cast<std::uintptr_t>(target);
+      auto const bytes = count * 8;
+      if (address % detail::heap_mapping::page_size() || skip % g.page_words() ||
+          count % g.page_words() || bytes > std::numeric_limits<std::uintptr_t>::max() - address)
+        detail::heap_failure("invalid published heap window");
+      if (!bytes) return;
+      for (auto const * space : {&owner.arena, &owner.nursery}) {
+        auto const begin = reinterpret_cast<std::uintptr_t>(space->storage.data());
+        if (address < begin + space->storage.bytes() * 2 && begin < address + bytes)
+          detail::heap_failure("published heap window overlaps a private view");
+      }
+      bool found = false;
+      for (auto const & window : publications) {
+        auto const begin = reinterpret_cast<std::uintptr_t>(window.target);
+        if (address < begin + window.bytes && begin < address + bytes) {
+          if (window.target != target || window.bytes != bytes || window.source != &g.storage)
+            detail::heap_failure("published heap windows must be disjoint or identical");
+          detail::heap_mapping::unpublish(window.target, window.bytes);
+          found = true;
+          break;
+        }
+      }
+      if (!found) publications.push_back({&g.storage, static_cast<std::byte *>(target), bytes});
+#endif
       g.storage.publish(((g.origin + skip) % g.capacity()) * 8,
         static_cast<std::byte *>(target), count * 8);
+    }
+    /// \brief Remove a canonical alias without releasing the host's reservation.
+    /// \pre Idle phase, stopped mutators; target/count identify an exact published
+    /// window and count is in eight-byte cells. The reservation survives this call.
+    /// \post The window is inaccessible; on Windows it is one placeholder.
+    void unpublish(void * target, std::size_t count) const noexcept {
+      if (state != phase::idle) detail::heap_failure("unpublish during host collection");
+      if (count > std::numeric_limits<std::size_t>::max() / 8)
+        detail::heap_failure("unpublished heap window is too large");
+#if defined(_WIN32)
+      auto const where = std::find_if(publications.begin(), publications.end(), [&](auto const & window) noexcept {
+        return window.target == target && window.bytes == count * 8;
+      });
+      if (where == publications.end()) detail::heap_failure("unpublish requires an exact published window");
+      detail::heap_mapping::unpublish(where->target, where->bytes);
+      publications.erase(where);
+#else
+      detail::heap_mapping::unpublish(static_cast<std::byte *>(target), count * 8);
+#endif
     }
     /// \brief Allocate raw cells in either generation, preserving the tag bit.
     /// A host may subdivide the extent; scanner claims determine record boundaries.
