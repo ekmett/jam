@@ -12,5 +12,6 @@ parts you might want to customize.
 - [Generations and sizing](generations.md): minor collection, promotion, barriers and units.
 - [Pointer vectors](simd.md): SIMD storage, masks and gathers.
 - [Inside the collector](collector.md): marking, work donation, compaction and mappings.
+- [Single-base addressing](single-base.md): accepted design and remaining integration work.
 - [Hosting a runtime](hosting.md): external roots, collection phases and stable aliases.
 - [Building](building.md): toolchains, CMake consumers, benchmarks and Doxygen.
