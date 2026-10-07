@@ -3,16 +3,18 @@
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-export JAVA_HOME=${JAM_GRAAL_BASE_JDK:-$root/upstream/labsjdk25/build/macosx-aarch64-server-fastdebug/images/graal-builder-jdk}
+export JAVA_HOME=${JAM_GRAAL_BASE_JDK:-$(python3 "$root/tools/platform_paths.py" --graal)}
 export MX_CACHE_DIR=${MX_CACHE_DIR:-$root/.toolchains/mx-cache}
 mx="$root/upstream/mx-graal25/mx"
 python3 "$root/tools/prepare_graal.py" --check
 cd "$root/upstream/graal25/vm"
 "$mx" --max-cpus "${JAM_JOBS:-3}" --env ce build --build-logs=silent
 graal_home=$("$mx" --env ce graalvm-home)
+jvm_library=libjvm.so
+if [[ $(uname -s) == Darwin ]]; then jvm_library=libjvm.dylib; fi
 # mx tracks the base module image, but a HotSpot-only rebuild can leave it
 # unchanged. Refresh the final JDK and module archive when libjvm changed.
-if ! cmp -s "$JAVA_HOME/lib/server/libjvm.dylib" "$graal_home/lib/server/libjvm.dylib"; then
+if ! cmp -s "$JAVA_HOME/lib/server/$jvm_library" "$graal_home/lib/server/$jvm_library"; then
   "$mx" --max-cpus "${JAM_JOBS:-3}" --env ce build \
     --only graalvm-jimage,java.base.jmod_modifier,GRAALVM_COMMUNITY_JAVA25 -f --build-logs=silent
 fi
@@ -22,7 +24,7 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/jam-graal-package.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 tar -xf "$archive" -C "$scratch"
 image="$scratch/$(basename "$graal_home")"
-if ! cmp -s "$JAVA_HOME/lib/server/libjvm.dylib" "$image/lib/server/libjvm.dylib"; then
+if ! cmp -s "$JAVA_HOME/lib/server/$jvm_library" "$image/lib/server/$jvm_library"; then
   echo "GraalVM archive contains an outdated HotSpot library" >&2
   exit 1
 fi

@@ -6,10 +6,12 @@
 import argparse
 import os
 from pathlib import Path
-import re
+import platform
+import shlex
 import shutil
 import subprocess
-from package_jdk import load_commands, SYSTEM
+from package_jdk import (check_elf_paths, check_loaded_libraries, load_commands,
+                         loader_environment, runtime_libraries, SYSTEM)
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -30,13 +32,13 @@ image_options = [home / 'bin/native-image', '--gc=jam', '-ETMPDIR',
                  '--parallelism=' + os.environ.get('JAM_JOBS', '3')]
 
 
-def run(label, command, timeout=300, expected=None, trace_libraries=False):
-    runtime_environment = dict(environment, DYLD_PRINT_LIBRARIES='1') if trace_libraries else environment
+def run(label, command, timeout=300, expected=None, trace_libraries=False, reject=False):
+    runtime_environment = loader_environment(environment) if trace_libraries else environment
     result = subprocess.run(list(map(str, command)), cwd=root, env=runtime_environment,
                             text=True, capture_output=True, timeout=timeout)
     output = result.stdout + result.stderr
     (evidence / f'substrate-{label}.log').write_text(output + f'\nexit={result.returncode}\n')
-    if result.returncode or expected is not None and expected not in output:
+    if (result.returncode == 0 if reject else result.returncode != 0) or expected is not None and expected not in output:
         raise SystemExit(f'{label} failed (exit {result.returncode}):\n{output[-8000:]}')
     return output
 
@@ -44,9 +46,11 @@ def run(label, command, timeout=300, expected=None, trace_libraries=False):
 run('javac', [home / 'bin/javac', '--add-modules', 'org.graalvm.nativeimage',
                '-cp', jar, '-d', classes, *sorted((root / 'tests/substrate').glob('*.java')),
                root / 'tests/bridge/WeakBridgeSmoke.java'])
-run('pin-compile', ['xcrun', 'clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+compiler = ['xcrun', 'clang'] if platform.system() == 'Darwin' else shlex.split(os.environ.get('CC', 'cc'))
+archiver = ['xcrun', 'ar'] if platform.system() == 'Darwin' else shlex.split(os.environ.get('AR', 'ar'))
+run('pin-compile', [*compiler, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
                     '-c', root / 'tests/substrate/pin_writer.c', '-o', work / 'pin_writer.o'])
-run('pin-archive', ['xcrun', 'ar', 'rcs', work / 'libjam_pin_test.a', work / 'pin_writer.o'])
+run('pin-archive', [*archiver, 'rcs', work / 'libjam_pin_test.a', work / 'pin_writer.o'])
 executable = work / 'substrate-smoke'
 run('image-build', [*image_options,
                     '--initialize-at-build-time=IsolateSmoke$EntryPoints',
@@ -59,7 +63,7 @@ run('image-build', [*image_options,
 def relocate(executable):
     # The executable and its sibling runtime directory are the deployment unit.
     bundle = executable.with_name(executable.name + '.jam')
-    for library in runtime_libraries:
+    for library in runtime_names:
         if not (bundle / library).is_file():
             raise SystemExit(f'Missing native-image runtime: {library}')
     relocated = work / 'relocated'
@@ -67,7 +71,10 @@ def relocate(executable):
     shutil.copy2(executable, relocated / executable.name)
     shutil.copytree(bundle, relocated / bundle.name, dirs_exist_ok=True)
     result = relocated / executable.name
-    for binary in (result, *(relocated / bundle.name / name for name in runtime_libraries)):
+    for binary in (result, *(relocated / bundle.name / name for name in runtime_names)):
+        if platform.system() == 'Linux':
+            check_elf_paths(binary, relocated)
+            continue
         identity, dependencies, rpaths = load_commands(binary)
         for path in (identity, *dependencies, *rpaths):
             if path and path.startswith('/') and not path.startswith(SYSTEM):
@@ -75,24 +82,13 @@ def relocate(executable):
     return result
 
 
-runtime_libraries = ('libjam_vm.dylib', 'libc++.1.dylib', 'libc++abi.1.dylib', 'libunwind.1.dylib')
+runtime_names = runtime_libraries(home / 'lib/jam')
 
 
 def run_executable(label, executable, arguments, expected):
     output = run(label, [executable, *arguments], expected=expected, trace_libraries=True)
     bundle = executable.with_name(executable.name + '.jam')
-    loaded = set()
-    for line in output.splitlines():
-        match = re.fullmatch(r'dyld\[[^]]+\]: (?:<[^>]+> )?(.+)', line)
-        if match:
-            path = Path(match[1].strip())
-            # System frameworks can also load Apple's C++ runtime.
-            if path.name in runtime_libraries and not str(path).startswith(SYSTEM):
-                if path.resolve() != (bundle / path.name).resolve():
-                    raise SystemExit(f'{label} loaded an external runtime: {path}')
-                loaded.add(path.name)
-    if loaded != set(runtime_libraries):
-        raise SystemExit(f'{label} did not report its complete relocated runtime: {loaded}')
+    check_loaded_libraries(output, bundle, runtime_names)
 
 
 executable = relocate(executable)
@@ -131,9 +127,18 @@ run('truffle-image-build', [*image_options, '--macro:truffle-svm',
                            '--enable-native-access=ALL-UNNAMED', '-cp', classpath,
                            'TruffleSmoke', executable], timeout=1800,
     expected='Garbage collector: Jam')
+amd64 = platform.machine().lower() in ('x86_64', 'amd64')
 run_executable('truffle', relocate(executable), ['-Xmx512m', '-Xmn64m',
                  '-Dpolyglot.engine.BackgroundCompilation=false',
-                 '-Dpolyglot.engine.CompilationFailureAction=Throw'],
+                 '-Dpolyglot.engine.CompilationFailureAction=Throw',
+                 *(['check-masking'] if amd64 else [])],
     'Jam Native Image compiled Truffle consumer passed')
 print('Native Image compiled Truffle: passed')
+if amd64:
+    run('masking-build-rejection', [*image_options, '-R:+MemoryMaskingAndFencing',
+                                   '-cp', classpath, 'TruffleSmoke', work / 'unsupported-masking'],
+        expected='The option is not supported when using Jam', reject=True)
+    run('masking-runtime-rejection', [work / 'relocated/truffle-smoke', '-XX:+MemoryMaskingAndFencing'],
+        expected='MemoryMaskingAndFencing is not supported when using Jam', reject=True)
+    print('Unsupported memory masking: rejected at build time and runtime')
 print('Relocated Jam executables passed.')

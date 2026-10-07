@@ -18,7 +18,8 @@ lifetime of an isolate.
 Keep `application` and its generated `application.jam/` directory together.
 That directory contains the collector and its C++ runtime. You can move the
 pair out of the build checkout; the executable does not need a JVM installation
-at runtime. The current target is macOS arm64.
+at runtime. Build and run on macOS arm64 or Linux x86_64; the executable and
+its libraries belong to the platform on which they were built.
 
 ## Weak associations
 
@@ -86,5 +87,6 @@ domain. These are virtual address ranges, not eager physical allocations.
 Collection stops Java mutators. Pinning can defer a requested major collection.
 Layered images and dynamic class loading are not supported. The shared weak
 registry's [metadata limits](status.md#guest-api) also apply to native images.
+The experimental AMD64 `MemoryMaskingAndFencing` option is not supported.
 Native Image does not run legacy `Object.finalize` methods. Use the runnable
 finalizers registered through `Weak` for guest finalization.

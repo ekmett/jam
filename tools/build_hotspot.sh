@@ -8,12 +8,15 @@ configure_flags=("--with-boot-jdk=$JAM_BOOT_JDK" --with-boot-jdk-jvmargs=-Xshare
 case "${1:-}" in
   '') source_dir="$root/upstream/jdk25"; target=images ;;
   --graal)
+    shift
     source_dir="$root/upstream/labsjdk25"
     target=graal-builder-image
     version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["labsjdk25"]["version"])' "$root/config/source-pins.json")
     configure_flags+=("--with-version-string=$version" --with-build-user=jam-vm --with-vendor-name='Jam VM') ;;
-  *) echo 'Usage: build_hotspot.sh [--graal]' >&2; exit 1 ;;
+  --with-*|--enable-*|--disable-*) source_dir="$root/upstream/jdk25"; target=images ;;
+  *) echo 'Usage: build_hotspot.sh [--graal] [configure options...]' >&2; exit 1 ;;
 esac
+configure_flags+=("$@")
 cd "$source_dir"
 export AUTOCONF=${JAM_AUTOCONF:-$root/.toolchains/autoconf-install/bin/autoconf}
 export M4=${JAM_M4:-$root/.toolchains/gnu/bin/m4}

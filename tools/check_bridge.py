@@ -7,9 +7,10 @@
 import os
 from pathlib import Path
 import subprocess
+from platform_paths import jdk_home
 
 root = Path(__file__).resolve().parents[1]
-vm = Path(os.environ.get('JAM_JAVA', root / 'upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk/bin/java')).resolve()
+vm = Path(os.environ.get('JAM_JAVA', jdk_home() / 'bin/java')).resolve()
 classes = root / 'build-bridge-test'
 subprocess.run(['python3', str(root / 'tools/build_bridge.py'), '--java-home', str(vm.parent.parent)], check=True)
 subprocess.run([str(vm.parent / 'javac'), '-cp', str(root / 'build/bridge/jam-vm.jar'),

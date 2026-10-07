@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Edward Kmett
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
 #include <dlfcn.h>
 #include <jni.h>
 #include "jam_vm_Weak.h"

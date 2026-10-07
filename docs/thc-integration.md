@@ -50,7 +50,7 @@ For module-path use, enable native access for `jam.vm` instead. Load the API
 from a shared host class loader: the JVM associates a loaded native library
 with its loader. The JAR and shim are a pair for the pinned Jam-enabled JDK,
 not an independently versioned VM extension protocol. The current native
-build supports Darwin and Linux; the current runtime target is macOS 26 arm64.
+build supports macOS 26 arm64 and Linux x86_64.
 
 ## Register and dereference
 

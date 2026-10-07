@@ -29,12 +29,25 @@ concurrency:
 
 env:
   JAM_JOBS: '3'
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
 
 jobs:
   native:
-    name: Native and guest bridge
-    runs-on: macos-26
+    name: Native and guest bridge (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-26
+            cache: macos-26-arm64-xcode26.6
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+          - platform: linux
+            runner: ubuntu-24.04
+            cache: ubuntu-24.04-x86_64
+            developer_dir: ''
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
@@ -45,9 +58,9 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: macos-26-arm64-xcode26.6-native-${{ hashFiles('tools/ci/setup_macos.sh') }}
+          key: ${{ matrix.cache }}-native-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install pinned build dependencies
-        run: bash tools/ci/setup_macos.sh native
+        run: bash tools/ci/setup_${{ matrix.platform }}.sh native
       - name: Fetch native sources
         run: python3 tools/ci/fetch_native.py
       - name: Build and test native collector
@@ -66,10 +79,23 @@ jobs:
             -cp build-bridge-test:build/bridge/jam-vm.jar WeakBridgeSmoke unavailable
 
   hotspot:
-    name: HotSpot integration
-    needs: native
+    name: HotSpot integration (${{ matrix.platform }})
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-26
+            cache: macos-26-arm64-xcode26.6
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+          - platform: linux
+            runner: ubuntu-24.04
+            cache: ubuntu-24.04-x86_64
+            developer_dir: ''
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7.0.1
@@ -80,10 +106,10 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: macos-26-arm64-xcode26.6-hotspot-${{ hashFiles('tools/ci/setup_macos.sh') }}
-          restore-keys: macos-26-arm64-xcode26.6-native-${{ hashFiles('tools/ci/setup_macos.sh') }}
+          key: ${{ matrix.cache }}-hotspot-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+          restore-keys: ${{ matrix.cache }}-native-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install pinned build dependencies
-        run: bash tools/ci/setup_macos.sh hotspot
+        run: bash tools/ci/setup_${{ matrix.platform }}.sh hotspot
       - name: Prepare pinned JDK sources
         run: |
           python3 tools/fetch_sources.py --full
@@ -95,11 +121,15 @@ jobs:
       - name: Build Jam JDK
         run: |
           source "$JAM_CI_TOOLS/env.sh"
-          bash tools/build_hotspot.sh
+          if [[ $RUNNER_OS == Linux ]]; then
+            bash tools/build_hotspot.sh --with-native-debug-symbols=none
+          else
+            bash tools/build_hotspot.sh
+          fi
       - name: Run VM, collector identity and guest regressions
         run: |
           source "$JAM_CI_TOOLS/env.sh"
-          export JAM_JAVA="$PWD/upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk/bin/java"
+          export JAM_JAVA="$(python3 tools/platform_paths.py)/bin/java"
           export JAM_JAVAC="$(dirname "$JAM_JAVA")/javac"
           export JAM_STOCK_JAVA="$JAM_BOOT_JDK/bin/java"
           bash tools/check_vm.sh
@@ -109,18 +139,29 @@ jobs:
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           python3 tools/package_jdk.py \
-            --java-home upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk \
+            --java-home "$(python3 tools/platform_paths.py)" \
             --output build/jam-jdk
           mv build/jam-jdk "$RUNNER_TEMP/jam-jdk"
           python3 tools/check_package.py --java-home "$RUNNER_TEMP/jam-jdk"
 
-  graal:
-    name: GraalVM integration
-    needs: native
+  graal_macos:
+    name: Build GraalVM (${{ matrix.platform }})
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-26
+            cache: macos-26-arm64-xcode26.6
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+            image_heap: 6g
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+      JAM_NATIVE_IMAGE_HEAP: ${{ matrix.image_heap }}
     timeout-minutes: 180
-    steps:
+    steps: &graal_build_steps
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
@@ -129,12 +170,12 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: macos-26-arm64-xcode26.6-graal-${{ hashFiles('tools/ci/setup_macos.sh') }}
+          key: ${{ matrix.cache }}-graal-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
           restore-keys: |
-            macos-26-arm64-xcode26.6-hotspot-${{ hashFiles('tools/ci/setup_macos.sh') }}
-            macos-26-arm64-xcode26.6-native-${{ hashFiles('tools/ci/setup_macos.sh') }}
+            ${{ matrix.cache }}-hotspot-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+            ${{ matrix.cache }}-native-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install pinned build dependencies
-        run: bash tools/ci/setup_macos.sh graal
+        run: bash tools/ci/setup_${{ matrix.platform }}.sh graal
       - name: Prepare pinned LabsJDK and Graal sources
         run: |
           python3 tools/fetch_sources.py --graal
@@ -146,22 +187,130 @@ jobs:
           source "$JAM_CI_TOOLS/env.sh"
           export JAM_HOTSPOT_SOURCE="$PWD/upstream/labsjdk25"
           bash tools/build_native.sh
-          bash tools/build_hotspot.sh --graal
+          if [[ $RUNNER_OS == Linux ]]; then
+            bash tools/build_hotspot.sh --graal --with-native-debug-symbols=none
+          else
+            bash tools/build_hotspot.sh --graal
+          fi
       - name: Build and package GraalVM
         run: |
           source "$JAM_CI_TOOLS/env.sh"
+          df -h . "$RUNNER_TEMP"
           bash tools/build_graal.sh
       - name: Check compiler barriers and derived pointers
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           bash tools/check_graal_compiler.sh
+      - name: Archive runtime and consumer dependencies
+        run: python3 tools/ci/archive_graal.py --output "$RUNNER_TEMP/jam-graal-ci.tar.gz"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: jam-graal-${{ matrix.platform }}
+          path: ${{ runner.temp }}/jam-graal-ci.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+          overwrite: true
+
+  graal_linux:
+    name: Build GraalVM (${{ matrix.platform }})
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+            cache: ubuntu-24.04-x86_64
+            developer_dir: ''
+            image_heap: 4g
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+      JAM_NATIVE_IMAGE_HEAP: ${{ matrix.image_heap }}
+    timeout-minutes: 180
+    steps: *graal_build_steps
+
+  consumers_macos:
+    name: ${{ matrix.suite }} (${{ matrix.platform }})
+    needs: graal_macos
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [GraalVM runtime, SubstrateVM]
+        include:
+          - platform: macos
+            runner: macos-26
+            cache: macos-26-arm64-xcode26.6
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+            image_heap: 6g
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+      JAM_NATIVE_IMAGE_HEAP: ${{ matrix.image_heap }}
+    timeout-minutes: 75
+    steps: &graal_consumer_steps
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: jam-graal-${{ matrix.platform }}
+          path: ${{ runner.temp }}/jam-graal-download
+      - name: Restore runtime and consumer dependencies
+        run: |
+          mkdir "$RUNNER_TEMP/jam-graal-ci"
+          tar -xzf "$RUNNER_TEMP/jam-graal-download/jam-graal-ci.tar.gz" -C "$RUNNER_TEMP/jam-graal-ci"
+          cp -R "$RUNNER_TEMP/jam-graal-ci/build-jam" .
+          cp -R "$RUNNER_TEMP/jam-graal-ci/upstream" .
+          echo "JAM_CI_JAVA_HOME=$RUNNER_TEMP/jam-graal-ci/graalvm" >> "$GITHUB_ENV"
+          rm "$RUNNER_TEMP/jam-graal-download/jam-graal-ci.tar.gz"
+      - name: Select dependency directory
+        if: matrix.suite == 'GraalVM runtime'
+        run: echo "JAM_CI_TOOLS=$RUNNER_TEMP/jam-vm-toolchain" >> "$GITHUB_ENV"
+      - uses: actions/cache@v6.1.0
+        if: matrix.suite == 'GraalVM runtime'
+        with:
+          path: ${{ runner.temp }}/jam-vm-toolchain
+          key: ${{ matrix.cache }}-graal-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+          restore-keys: |
+            ${{ matrix.cache }}-hotspot-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+            ${{ matrix.cache }}-native-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+      - name: Install matching stock compiler
+        if: matrix.suite == 'GraalVM runtime'
+        run: bash tools/ci/setup_${{ matrix.platform }}.sh graal
       - name: Run compiled heap and weak-pointer regressions
+        if: matrix.suite == 'GraalVM runtime'
         run: |
           source "$JAM_CI_TOOLS/env.sh"
-          python3 tools/check_graal.py --unsupported-libgraal "$JAM_STOCK_GRAAL_HOME/lib"
-      - name: Build and run Jam native executables
-        run: python3 tools/check_substrate.py
-      - name: Relocate GraalVM and check the guest API
+          python3 tools/check_graal.py --java-home "$JAM_CI_JAVA_HOME" \
+            --unsupported-libgraal "$JAM_STOCK_GRAAL_HOME/lib"
+          python3 tools/check_package.py --java-home "$JAM_CI_JAVA_HOME"
+      - name: Install Native Image build dependencies
+        if: matrix.suite == 'SubstrateVM' && runner.os == 'Linux'
         run: |
-          mv build/graalvm "$RUNNER_TEMP/jam-graalvm"
-          python3 tools/check_package.py --java-home "$RUNNER_TEMP/jam-graalvm"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential zlib1g-dev binutils
+      - name: Build and run Jam native executables
+        if: matrix.suite == 'SubstrateVM'
+        run: python3 tools/check_substrate.py --java-home "$JAM_CI_JAVA_HOME"
+
+  consumers_linux:
+    name: ${{ matrix.suite }} (${{ matrix.platform }})
+    needs: graal_linux
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [GraalVM runtime, SubstrateVM]
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+            cache: ubuntu-24.04-x86_64
+            developer_dir: ''
+            image_heap: 4g
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+      JAM_NATIVE_IMAGE_HEAP: ${{ matrix.image_heap }}
+    timeout-minutes: 75
+    steps: *graal_consumer_steps

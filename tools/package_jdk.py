@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Edward Kmett
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-"""Bundle Jam and its guest API into a relocatable macOS JDK image."""
+"""Bundle Jam and its guest API into a relocatable macOS or Linux JDK image."""
 
 import argparse
 import os
@@ -14,6 +14,157 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM = ('/usr/lib/', '/System/Library/')
+DARWIN_RUNTIME = ('libjam_vm.dylib', 'libc++.1.dylib', 'libc++abi.1.dylib', 'libunwind.1.dylib')
+CPP_RUNTIME = re.compile(r'lib(?:c\+\+|c\+\+abi|unwind|stdc\+\+)\.so(?:\..+)?$')
+
+
+def elf(path):
+    with path.open('rb') as source:
+        return source.read(4) == b'\x7fELF'
+
+
+def elf_commands(path):
+    result = subprocess.check_output(['readelf', '--dynamic', '--wide', str(path)], text=True)
+    identity, dependencies, rpaths = None, set(), set()
+    for kind, value in re.findall(r'\((SONAME|NEEDED|RUNPATH|RPATH)\).*?\[(.*?)\]', result):
+        if kind == 'SONAME':
+            identity = value
+        elif kind == 'NEEDED':
+            dependencies.add(value)
+        else:
+            rpaths.update(value.split(':'))
+    return identity, dependencies, rpaths
+
+
+def runtime_libraries(directory):
+    manifest = directory / 'runtime-libraries.txt'
+    if manifest.is_file():
+        names = tuple(manifest.read_text().splitlines())
+        collector = 'libjam_vm.dylib' if platform.system() == 'Darwin' else 'libjam_vm.so'
+        if collector not in names or len(set(names)) != len(names) or any(
+                not re.fullmatch(r'lib[A-Za-z0-9_+.-]+', name) for name in names):
+            raise SystemExit(f'Invalid Jam runtime manifest: {manifest}')
+        return names
+    if platform.system() == 'Darwin':
+        return DARWIN_RUNTIME
+    raise SystemExit(f'Missing Jam runtime manifest: {manifest}')
+
+
+def loader_environment(environment):
+    result = dict(environment)
+    # An installed toolchain must not mask a broken deployment search path.
+    for name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT', 'LD_DEBUG_OUTPUT',
+                 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES'):
+        result.pop(name, None)
+    result['DYLD_PRINT_LIBRARIES' if platform.system() == 'Darwin' else 'LD_DEBUG'] = (
+        '1' if platform.system() == 'Darwin' else 'libs')
+    return result
+
+
+def check_loaded_libraries(output, directory, names):
+    loaded = set()
+    pattern = (r'dyld\[[^]]+\]: (?:<[^>]+> )?(.+)' if platform.system() == 'Darwin'
+               else r'\s*\d+:\s+calling init:\s+(.+)')
+    for line in output.splitlines():
+        match = re.fullmatch(pattern, line)
+        if not match:
+            continue
+        path = Path(match[1].strip())
+        # Apple system frameworks can independently load the system C++ runtime.
+        if platform.system() == 'Darwin' and str(path).startswith(SYSTEM):
+            continue
+        if path.name in names:
+            if path.resolve() != (directory / path.name).resolve():
+                raise SystemExit(f'Loaded an external Jam runtime: {path}')
+            loaded.add(path.name)
+    if loaded != set(names):
+        raise SystemExit(f'Loader did not report the complete Jam runtime: {set(names) - loaded}')
+
+
+def linux_runtime_libraries(native_library, runtime):
+    """Follow only C++ runtime dependencies; glibc and OS libraries stay on the host."""
+    libraries = {}
+    pending = [native_library]
+    with native_library.open('rb') as source:
+        header = source.read(20)
+    while pending:
+        for dependency in sorted(elf_commands(pending.pop())[1]):
+            name = Path(dependency).name
+            if name in libraries or not CPP_RUNTIME.fullmatch(name):
+                continue
+            candidates = set()
+            for candidate in runtime.rglob(name):
+                if candidate.is_file():
+                    with candidate.open('rb') as source:
+                        other = source.read(20)
+                    # ELF class, byte order and machine must match the collector.
+                    if other[:6] == header[:6] and other[18:20] == header[18:20]:
+                        candidates.add(candidate.resolve())
+            if len(candidates) != 1:
+                raise SystemExit(f'Expected one {name} matching {native_library.name} under {runtime}; found {len(candidates)}')
+            libraries[name] = candidates.pop()
+            pending.append(libraries[name])
+    return libraries
+
+
+def rewrite_elf(path, stage, java_home, library_dir, libraries, runtime):
+    identity, dependencies, rpaths = elf_commands(path)
+    private = path.parent == library_dir
+    changes = []
+    if private and identity != path.name:
+        changes += ['--set-soname', path.name]
+    desired_paths = []
+    for dependency in sorted(dependencies):
+        name = Path(dependency).name
+        replacement = dependency
+        if name in libraries:
+            replacement = name
+            desired_paths.append('$ORIGIN/' + os.path.relpath(library_dir, path.parent))
+        elif dependency.startswith('/'):
+            if Path(dependency).is_relative_to(java_home):
+                replacement = '$ORIGIN/' + os.path.relpath(stage / Path(dependency).relative_to(java_home), path.parent)
+            else:
+                raise SystemExit(f'External dependency in {path.relative_to(stage)}: {dependency}')
+        elif '/' in dependency and not dependency.startswith(('$ORIGIN/', '${ORIGIN}/')):
+            raise SystemExit(f'Relative dependency in {path.relative_to(stage)}: {dependency}')
+        if replacement != dependency:
+            changes += ['--replace-needed', dependency, replacement]
+    if private:
+        desired_paths = ['$ORIGIN']
+    else:
+        for rpath in sorted(rpaths):
+            if rpath.startswith('/'):
+                resolved = Path(rpath).resolve()
+                if resolved.is_relative_to(java_home):
+                    desired_paths.append('$ORIGIN/' + os.path.relpath(stage / resolved.relative_to(java_home), path.parent))
+                elif any(resolved.is_relative_to(base) for base in (ROOT, runtime)):
+                    continue
+                else:
+                    raise SystemExit(f'External runtime path in {path.relative_to(stage)}: {rpath}')
+            elif rpath in ('$ORIGIN', '${ORIGIN}') or rpath.startswith(('$ORIGIN/', '${ORIGIN}/')):
+                desired_paths.append(rpath)
+            else:
+                raise SystemExit(f'Unanchored runtime path in {path.relative_to(stage)}: {rpath}')
+    desired_paths = list(dict.fromkeys(desired_paths))
+    if set(desired_paths) != rpaths:
+        changes += ['--set-rpath', ':'.join(desired_paths)] if desired_paths else ['--remove-rpath']
+    if changes:
+        path.chmod(path.stat().st_mode | 0o200)
+        subprocess.run(['patchelf', *changes, str(path)], check=True)
+
+
+def check_elf_paths(path, root):
+    identity, dependencies, rpaths = elf_commands(path)
+    if identity and '/' in identity:
+        raise SystemExit(f'Nonportable ELF identity in {path}: {identity}')
+    for value in dependencies | rpaths:
+        if value in ('$ORIGIN', '${ORIGIN}') or value.startswith(('$ORIGIN/', '${ORIGIN}/')):
+            suffix = value.removeprefix('${ORIGIN}').removeprefix('$ORIGIN')
+            target = (path.parent / suffix.lstrip('/')).resolve()
+            if not target.is_relative_to(root) or not target.exists():
+                raise SystemExit(f'Broken or external ELF loader path in {path}: {value}')
+        elif '/' in value or value in rpaths:
+            raise SystemExit(f'Nonportable ELF loader path in {path}: {value}')
 
 
 def macho(path):
@@ -27,6 +178,8 @@ def macho(path):
 
 
 def load_commands(path):
+    if elf(path):
+        return elf_commands(path)
     result = subprocess.check_output(['otool', '-l', str(path)], text=True)
     identity, dependencies, rpaths = None, set(), set()
     for block in result.split('Load command ')[1:]:
@@ -46,8 +199,13 @@ def load_commands(path):
 
 
 def package(java_home, output, runtime):
-    if platform.system() != 'Darwin':
-        raise SystemExit('JDK packaging is currently supported on macOS.')
+    system = platform.system()
+    if system not in ('Darwin', 'Linux'):
+        raise SystemExit('JDK packaging supports macOS and Linux.')
+    if system == 'Linux':
+        for tool in ('readelf', 'patchelf'):
+            if shutil.which(tool) is None:
+                raise SystemExit(f'Linux packaging requires {tool} on PATH.')
     java_home, output, runtime = java_home.resolve(), output.resolve(), runtime.resolve()
     if output.exists():
         raise SystemExit(f'Preserving existing output: {output}')
@@ -61,7 +219,15 @@ def package(java_home, output, runtime):
         'libc++.1.dylib': runtime / 'lib/c++/libc++.1.dylib',
         'libc++abi.1.dylib': runtime / 'lib/c++/libc++abi.1.dylib',
         'libunwind.1.dylib': runtime / 'lib/unwind/libunwind.1.dylib',
+    } if system == 'Darwin' else {
+        'libjam_vm.so': ROOT / 'build-jam/libjam_vm.so',
+        'libjam_bridge.so': ROOT / 'build/bridge/lib/libjam_bridge.so',
     }
+    if system == 'Linux':
+        if not libraries['libjam_vm.so'].is_file():
+            raise SystemExit(f'Missing package input: {libraries["libjam_vm.so"]}')
+        libraries.update(linux_runtime_libraries(libraries['libjam_vm.so'], runtime))
+    native_runtime = [name for name in libraries if not name.startswith('libjam_bridge.')]
     licenses = {
         'LICENSE.md': ROOT / 'LICENSE.md',
         'NOTICE.md': ROOT / 'NOTICE.md',
@@ -84,6 +250,7 @@ def package(java_home, output, runtime):
         legal_dir.mkdir(parents=True)
         for name, source in libraries.items():
             shutil.copy2(source, library_dir / name)
+        (library_dir / 'runtime-libraries.txt').write_text('\n'.join(native_runtime) + '\n')
         for source in jars:
             shutil.copy2(source, library_dir / source.name)
         (library_dir / 'include').mkdir()
@@ -102,10 +269,16 @@ def package(java_home, output, runtime):
                     path.symlink_to(os.path.relpath(stage / target.relative_to(java_home), path.parent))
                 if not path.resolve().is_relative_to(stage) or not path.exists():
                     raise SystemExit(f'Broken or external symlink in JDK: {path.relative_to(stage)}')
-            elif path.is_file() and macho(path):
+            elif system == 'Linux' and path.suffix == '.debuginfo':
+                # OpenJDK's detached symbols retain ELF headers but no loader data.
+                continue
+            elif path.is_file() and (macho(path) if system == 'Darwin' else elf(path)):
                 binaries.append(path)
 
         for path in binaries:
+            if system == 'Linux':
+                rewrite_elf(path, stage, java_home, library_dir, libraries, runtime)
+                continue
             identity, dependencies, rpaths = load_commands(path)
             changes = []
             if identity and (path.parent == library_dir or identity.startswith('/')):
@@ -161,6 +334,9 @@ def package(java_home, output, runtime):
 
         # Check every native image after rewriting, including native-image and libgraal.
         for path in binaries:
+            if system == 'Linux':
+                check_elf_paths(path, stage)
+                continue
             identity, dependencies, rpaths = load_commands(path)
             for value in [identity, *dependencies, *rpaths]:
                 if value and value.startswith('/') and not value.startswith(SYSTEM):
@@ -179,6 +355,9 @@ if __name__ == '__main__':
     parser.add_argument('--java-home', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--runtime-prefix', type=Path,
-                        default=os.environ.get('JAM_LIBCXX_PREFIX', '/opt/homebrew/opt/llvm@22'))
+                        default=os.environ.get('JAM_LIBCXX_PREFIX', '/opt/homebrew/opt/llvm@22') if platform.system() == 'Darwin'
+                        else os.environ.get('JAM_LIBCXX_PREFIX'))
     options = parser.parse_args()
+    if options.runtime_prefix is None:
+        parser.error('set JAM_LIBCXX_PREFIX or pass --runtime-prefix for the private C++ runtime')
     package(options.java_home, options.output, options.runtime_prefix)

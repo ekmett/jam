@@ -4,7 +4,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-vm=${JAM_JAVA:-$root/upstream/jdk25/build/macosx-aarch64-server-fastdebug/jdk/bin/java}
+vm=${JAM_JAVA:-$(python3 "$root/tools/platform_paths.py")/bin/java}
 javac=${JAM_JAVAC:-$(dirname "$vm")/javac}
 prefix=${JAM_EVIDENCE_PREFIX:-jam}
 mkdir -p build-java-tests evidence

@@ -18,6 +18,19 @@ if [[ $(uname) == Darwin ]]; then
          "-DCMAKE_EXE_LINKER_FLAGS=-L$library/lib/c++ -Wl,-rpath,$library/lib/c++"
          "-DCMAKE_SHARED_LINKER_FLAGS=-L$library/lib/c++ -Wl,-rpath,$library/lib/c++"
          "-DJAM_VM_RUNTIME=$library/lib/c++")
+elif [[ -n ${JAM_LIBCXX_PREFIX:-} ]]; then
+  triple=$("$compiler" -print-target-triple)
+  runtime="$library/lib/$triple"
+  if [[ ! -f $runtime/libc++.so ]]; then runtime="$library/lib"; fi
+  if [[ ! -f $runtime/libc++.so ]]; then
+    echo "Cannot find libc++.so under $library" >&2
+    exit 1
+  fi
+  # The build tree may use an external libc++; packaging gives each DSO its
+  # own relative RUNPATH. RPATH here also resolves libc++'s indirect libraries.
+  args+=("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -isystem $library/include/$triple/c++/v1 -isystem $library/include/c++/v1"
+         "-DCMAKE_EXE_LINKER_FLAGS=-L$runtime -Wl,-rpath,$runtime -Wl,--disable-new-dtags"
+         "-DCMAKE_SHARED_LINKER_FLAGS=-L$runtime -Wl,-rpath,$runtime -Wl,--disable-new-dtags")
 fi
 if [[ -n ${JAM_BOOT_JDK:-} ]]; then args+=("-DJAM_VM_JAVA_HOME=$JAM_BOOT_JDK"); fi
 "$cmake_bin" "${args[@]}"

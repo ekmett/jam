@@ -5,9 +5,10 @@
 import os
 from pathlib import Path
 import subprocess
+from platform_paths import jdk_home
 
 root = Path(__file__).resolve().parents[1]
-vm = Path(os.environ.get('JAM_JAVA', root / 'upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk/bin/java'))
+vm = Path(os.environ.get('JAM_JAVA', jdk_home() / 'bin/java'))
 common = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-Xlog:gc',
           '--enable-native-access=ALL-UNNAMED',
           '-Djava.library.path=' + os.pathsep.join(str(root / p) for p in ('build/bridge/lib', 'build-jam')),

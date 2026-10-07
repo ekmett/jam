@@ -4,26 +4,38 @@ jam-vm builds two things: a native jam backend and a patched JDK. The backend
 uses C++26 modules. The JDK uses its normal C++14 toolchain and calls the
 backend through [a C header](../adapter/jam_vm.h).
 
-Start with macOS 26 arm64. Other platform paths still need validation; see
+Build on macOS 26 arm64 or Linux x86_64. See
 [supported configurations](status.md) for the current limits.
 
 ## Tools
 
 Install Git, Python 3, `patch`, and the normal OpenJDK platform build tools.
-On macOS that includes Xcode and its SDK. The tested versions are:
+On macOS that includes Xcode and its SDK. On Debian or Ubuntu, install the
+compiler and development headers with:
+
+```sh
+sudo apt-get install build-essential autoconf m4 zip unzip \
+  libx11-dev libxext-dev libxrender-dev libxrandr-dev libxtst-dev libxt-dev \
+  libcups2-dev libfontconfig1-dev libasound2-dev libfreetype-dev libnuma-dev \
+  patchelf binutils
+```
+
+The tested toolchains use:
 
 | Tool | Version or requirement |
 | --- | --- |
 | C++ compiler for jam | LLVM 23.1.2 |
 | C++ library on Darwin | libc++ 22.1.8, both headers and runtime, from Homebrew `llvm@22` |
+| C++ library on Linux | libc++ 23.1.2 from the LLVM distribution |
 | CMake | 4.4.3 |
-| Ninja | 1.13 |
+| Ninja | 1.12 or newer |
 | Autoconf | 2.72 |
-| GNU M4 / Make | 1.4.20 / 4.4.1 |
+| GNU M4 / Make | 1.4.20 / 4.3 or newer |
 | Boot JDK | JDK 24 or 25; the recorded build uses GraalVM Community 25.3.4.1 |
-| HotSpot compiler | Apple Clang 21, compiling as C++14 |
+| HotSpot compiler | Apple Clang 21 or GCC 11, compiling as C++14 |
 
 The Darwin build pairs LLVM 23's compiler with libc++ 22's headers and runtime.
+Linux uses the compiler and libc++ from the same LLVM 23 distribution.
 Keep the selected headers and runtime together.
 
 The scripts default to tools under `.toolchains/`; they do not install those
@@ -40,9 +52,10 @@ export JAM_BOOT_JDK=/absolute/path/to/jdk-25
 ```
 
 On macOS, use a JDK bundle's `Contents/Home` directory. `JAM_LIBCXX_PREFIX`
-defaults to `/opt/homebrew/opt/llvm@22`. `JAM_JOBS` defaults to eight for the JDK
-and native backend, and three for GraalVM. The native
-test runner expects `ctest` next to the selected `cmake` binary.
+defaults to `/opt/homebrew/opt/llvm@22` there. On Linux, set it to the LLVM
+distribution directory containing `include/c++/v1` and the C++ runtime under
+`lib/`. `JAM_JOBS` defaults to eight for the JDK and native backend, and three
+for GraalVM. The native test runner expects `ctest` next to the selected `cmake` binary.
 
 ## Prepare the sources
 
@@ -75,12 +88,10 @@ configures and builds a fastdebug JDK with `jamgc`, `epsilongc` and `serialgc`.
 Jam uses Serial's block-offset-table utility, so the Serial build feature is
 required even when Jam is the selected collector.
 
-On the tested host, the complete image is under
-`upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk/`. Use that
-image's `bin/java`:
+Use the completed image's `bin/java`; the path helper selects the host platform:
 
 ```sh
-export JAM_JAVA="$PWD/upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk/bin/java"
+export JAM_JAVA="$(python3 tools/platform_paths.py)/bin/java"
 "$JAM_JAVA" -Xshare:off -Xms256m -Xmx256m \
   -XX:+UnlockExperimentalVMOptions -XX:+UseJamGC -Xlog:gc \
   -jar application.jar
@@ -137,8 +148,8 @@ python3 tools/check_patches.py
 ```
 
 `check_vm.sh` uses `JAM_JAVA` when set, with `javac` next to it; `JAM_JAVAC`
-overrides that choice. Without overrides it uses the exploded macOS arm64
-fastdebug build. These checks exercise the public API, Java reference behavior,
+overrides that choice. Without overrides it uses the host platform's fastdebug
+JDK image. These checks exercise the public API, Java reference behavior,
 barriers and generation transitions. Generated logs stay local and are ignored
 by Git. `check_patches.py` checks the unmodified Jam pin and reconstructs the
 HotSpot sources from the patch.
@@ -148,15 +159,20 @@ HotSpot sources from the patch.
 The GraalVM build already packages its runtime. To package the plain JDK:
 
 ```sh
-jdk="$PWD/upstream/jdk25/build/macosx-aarch64-server-fastdebug/images/jdk"
+jdk="$(python3 tools/platform_paths.py)"
 python3 tools/build_bridge.py --java-home "$jdk"
 python3 tools/package_jdk.py --java-home "$jdk" --output build/jam-jdk
 ```
 
 The output is a JDK home that can be moved out of the checkout. `lib/jam/`
 contains the backend, JNI bridge, Java API and C++ runtime libraries. The
-packager rewrites native library paths and signs the modified binaries for
-local use. It preserves upstream licenses under `legal/`.
+packager rewrites native library paths relative to the installation; on macOS
+it also signs the modified binaries for local use. It preserves upstream
+licenses under `legal/`. The runtime prefix must contain `LICENSE.TXT` covering
+its bundled C++ libraries. Linux packages keep glibc and other OS libraries as
+system dependencies, so deploy on a compatible architecture and glibc version.
+The [Linux toolchain script](../tools/ci/setup_linux.sh) fetches the runtime
+licenses from the matching LLVM source revision.
 
 For the weak API, put `lib/jam/jam-vm.jar` on the application's class path and
 `lib/jam` on `java.library.path`. See [integrating thc](thc-integration.md) for

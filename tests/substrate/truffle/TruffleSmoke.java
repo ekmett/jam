@@ -14,6 +14,7 @@ import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
 import jam.vm.Weak;
 import org.graalvm.nativeimage.ImageInfo;
+import org.graalvm.nativeimage.RuntimeOptions;
 
 /** Captured guest objects and generalized weak associations in runtime-compiled native code. */
 public final class TruffleSmoke {
@@ -204,6 +205,16 @@ public final class TruffleSmoke {
 
     public static void main(String[] args) {
         check(ImageInfo.inImageRuntimeCode(), "run this probe as a native executable");
+        if (args.length > 0 && args[0].equals("check-masking")) {
+            try {
+                RuntimeOptions.set("MemoryMaskingAndFencing", true);
+                throw new AssertionError("Jam must reject enabling memory masking after startup");
+            } catch (IllegalArgumentException expected) {
+                check(expected.getMessage().contains("not supported when using Jam"), "unsupported mitigation is diagnosed");
+            }
+            check(Boolean.FALSE.equals(RuntimeOptions.get("MemoryMaskingAndFencing")), "rejected update preserves the disabled option");
+            RuntimeOptions.set("MemoryMaskingAndFencing", false);
+        }
         Weak.checkAvailable();
         GuestRoot root = new GuestRoot(0);
         check(root.getCallTarget() instanceof OptimizedCallTarget, "optimized Truffle runtime is available");

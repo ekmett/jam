@@ -205,6 +205,67 @@ index 31fab1c0..d330492d 100644
                  "com.oracle.svm.jdwp.resident",
              ],
              "distDependencies": [
+diff --git a/substratevm/src/com.oracle.svm.core.graal.amd64/src/com/oracle/svm/core/graal/amd64/AMD64MemoryMaskingAndFencing.java b/substratevm/src/com.oracle.svm.core.graal.amd64/src/com/oracle/svm/core/graal/amd64/AMD64MemoryMaskingAndFencing.java
+index 694e3335..641e2dc6 100644
+--- a/substratevm/src/com.oracle.svm.core.graal.amd64/src/com/oracle/svm/core/graal/amd64/AMD64MemoryMaskingAndFencing.java
++++ b/substratevm/src/com.oracle.svm.core.graal.amd64/src/com/oracle/svm/core/graal/amd64/AMD64MemoryMaskingAndFencing.java
+@@ -45,6 +45,7 @@ import com.oracle.svm.core.util.UserError;
+ import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+ import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+ import com.oracle.svm.shared.singletons.traits.SingletonTraits;
++import com.oracle.svm.shared.util.SubstrateUtil;
+ import com.oracle.svm.shared.util.VMError;
+ 
+ import jdk.graal.compiler.core.common.CompressEncoding;
+@@ -105,7 +106,16 @@ public class AMD64MemoryMaskingAndFencing {
+     public static class Options {
+         @Option(help = "AMD64 only spectre mitigation for runtime compiled code (masking or fencing before accesses).", type = OptionType.Expert, stability = OptionStability.EXPERIMENTAL) //
+         public static final RuntimeOptionKey<Boolean> MemoryMaskingAndFencing = new RuntimeOptionKey<>(false, Options::validateOptionAtBuildTime,
+-                        RelevantForCompilationIsolates);
++                        RelevantForCompilationIsolates) {
++            @Override
++            public void setRawCachedValue(Object value) {
++                // RuntimeOptions.set can update an option after startup validation has run.
++                if (!SubstrateUtil.HOSTED && SubstrateOptions.useJamGC() && Boolean.TRUE.equals(value)) {
++                    throw new IllegalArgumentException("Option " + getName() + " is not supported when using Jam");
++                }
++                super.setRawCachedValue(value);
++            }
++        };
+ 
+         @Platforms(Platform.HOSTED_ONLY.class)
+         private static void validateOptionAtBuildTime(RuntimeOptionKey<Boolean> optionKey) {
+@@ -121,6 +131,8 @@ public class AMD64MemoryMaskingAndFencing {
+             if (optionKey.getValue()) {
+                 if (SubstrateOptions.useG1GC()) {
+                     throw UserError.invalidOptionValue(optionKey, optionKey.getValue(), "The option is not supported when using G1");
++                } else if (SubstrateOptions.useJamGC()) {
++                    throw UserError.invalidOptionValue(optionKey, optionKey.getValue(), "The option is not supported when using Jam");
+                 }
+             }
+         }
+@@ -131,6 +143,8 @@ public class AMD64MemoryMaskingAndFencing {
+                 if (runtimeOptionKey.getValue()) {
+                     if (SubstrateOptions.useG1GC()) {
+                         throw new IllegalArgumentException("Option " + runtimeOptionKey.getName() + " is not supported when using G1");
++                    } else if (SubstrateOptions.useJamGC()) {
++                        throw new IllegalArgumentException("Option " + runtimeOptionKey.getName() + " is not supported when using Jam");
+                     } else if (!Platform.includedIn(Platform.AMD64.class)) {
+                         throw new IllegalArgumentException("Option " + runtimeOptionKey.getName() + " is only available on AMD64");
+                     }
+@@ -167,6 +181,12 @@ class AMD64MemoryMaskingAndFencingFeature implements InternalFeature {
+             return;
+         }
+ 
++        if (SubstrateOptions.useJamGC()) {
++            // The masking phase requires the serial collector's address-range provider.
++            // Jam keeps ordinary address lowering and rejects enabling the mitigation.
++            return;
++        }
++
+         // The isolate heap should be a contiguous memory region
+         VMError.guarantee(ImageSingletons.lookup(CommittedMemoryProvider.class) instanceof AddressRangeCommittedMemoryProvider);
+ 
 diff --git a/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamAllocationSnippets.java b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamAllocationSnippets.java
 new file mode 100644
 index 00000000..1811837a
@@ -2747,10 +2808,10 @@ index 00000000..4412594c
 +}
 diff --git a/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamRuntimeBundleFeature.java b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamRuntimeBundleFeature.java
 new file mode 100644
-index 00000000..302aea43
+index 00000000..c947d3e2
 --- /dev/null
 +++ b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamRuntimeBundleFeature.java
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,70 @@
 +// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 +// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 +package com.oracle.svm.core.jam;
@@ -2759,6 +2820,7 @@ index 00000000..302aea43
 +import java.nio.file.Files;
 +import java.nio.file.Path;
 +import java.nio.file.StandardCopyOption;
++import java.util.List;
 +import org.graalvm.nativeimage.Platform;
 +import com.oracle.svm.core.SubstrateOptions;
 +import com.oracle.svm.core.feature.InternalFeature;
@@ -2769,34 +2831,46 @@ index 00000000..302aea43
 +/** Ship the native collector with its executable, independent of the build JDK's location. */
 +@AutomaticallyRegisteredFeature
 +final class JamRuntimeBundleFeature implements InternalFeature {
-+    private static final String[] LIBRARIES = {"libjam_vm.dylib", "libc++.1.dylib", "libc++abi.1.dylib", "libunwind.1.dylib"};
++    private List<String> libraries;
 +    private String directory;
 +
 +    @Override public boolean isInConfiguration(IsInConfigurationAccess access) { return SubstrateOptions.useJamGC(); }
 +
 +    @Override public void beforeImageWrite(BeforeImageWriteAccess access) {
-+        UserError.guarantee(Platform.includedIn(Platform.DARWIN.class), "Jam Native Image runtime packaging currently requires macOS");
++        boolean darwin = Platform.includedIn(Platform.DARWIN.class);
++        UserError.guarantee(darwin || Platform.includedIn(Platform.LINUX.class), "Jam Native Image runtime packaging requires macOS or Linux");
 +        BeforeImageWriteAccessImpl hosted = (BeforeImageWriteAccessImpl) access;
 +        directory = hosted.getOutputFilename() + ".jam";
 +        Path libraryDirectory = JamNative.Directives.libraryDirectory();
-+        for (String library : LIBRARIES) {
++        Path manifest = libraryDirectory.resolve("runtime-libraries.txt");
++        try {
++            libraries = Files.isRegularFile(manifest) ? Files.readAllLines(manifest) :
++                            darwin ? List.of("libjam_vm.dylib", "libc++.1.dylib", "libc++abi.1.dylib", "libunwind.1.dylib") : List.of();
++        } catch (IOException error) {
++            throw UserError.abort("Unable to read packaged Jam runtime manifest %s: %s", manifest, error.getMessage());
++        }
++        UserError.guarantee(!libraries.isEmpty() && libraries.stream().distinct().count() == libraries.size() &&
++                        libraries.contains(darwin ? "libjam_vm.dylib" : "libjam_vm.so"), "Missing or invalid Jam runtime manifest: %s", manifest);
++        for (String library : libraries) {
++            UserError.guarantee(library.matches("lib[A-Za-z0-9_+.-]+"), "Invalid Jam runtime library name: %s", library);
 +            UserError.guarantee(Files.isRegularFile(libraryDirectory.resolve(library)), "Missing packaged Jam runtime: %s", libraryDirectory.resolve(library));
 +        }
 +        hosted.registerLinkerInvocationTransformer(linker -> {
-+            linker.addRPath("@loader_path/" + directory);
++            linker.addRPath((darwin ? "@loader_path/" : "$ORIGIN/") + directory);
 +            return linker;
 +        });
 +    }
 +
 +    @Override public void afterImageWrite(AfterImageWriteAccess access) {
 +        Path output = access.getImagePath().resolveSibling(directory);
-+        Path libraries = JamNative.Directives.libraryDirectory();
++        Path libraryDirectory = JamNative.Directives.libraryDirectory();
 +        Path legal = Path.of(System.getProperty("java.home"), "legal", "jam-vm");
 +        try {
 +            Files.createDirectories(output);
-+            for (String library : LIBRARIES) {
-+                Files.copy(libraries.resolve(library), output.resolve(library), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
++            for (String library : libraries) {
++                Files.copy(libraryDirectory.resolve(library), output.resolve(library), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
 +            }
++            Files.write(output.resolve("runtime-libraries.txt"), libraries);
 +            Files.createDirectories(output.resolve("legal"));
 +            try (var files = Files.list(legal)) {
 +                for (Path file : files.toList()) {
