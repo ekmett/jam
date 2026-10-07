@@ -81,7 +81,8 @@ callbacks; call `finalize()` beforehand when that cleanup matters.
 `weak<V>` is an external handle with shared registration state. Keep it outside
 the moving heap. Copies observe the same expiration; `lock()` returns a rooted
 value while the registration is active, and an empty root after it expires.
-Dereferencing that root requires the owning heap current. A null registered value
+Locking, explicitly finalizing, and using the returned root require the owning
+heap current. A null registered value
 also produces an empty root. Neither `lock()` nor `expired()` performs collection.
 A finalized registration stays expired even when its key is resurrected.
 

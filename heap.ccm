@@ -403,6 +403,7 @@ export class heap;
 export template<class T> class root;
 export template<class T> class ptr;
 export template<class T> class weak_ptr;
+export template<class T> class weak_root;
 export template<class T> class weak;
 
 /// \brief A visitor for jam's compressed, alignment-preserving heap.
@@ -885,7 +886,6 @@ private:
   using trace_function = void (*)(visitor &, offset);
   struct trace_job { offset at; trace_function trace; };
   struct weak_entry {
-    heap * owner;
     trace_job key, value, finalizer;
     void (*invoke)(heap &, weak_entry &) noexcept;
     bool active = true;
@@ -896,82 +896,50 @@ private:
   };
 
 public:
-  /** \brief An external intrusive root, rewritten by each moving collection.
+  /** \brief A four-byte handle to a collector-updated external root slot.
    * \ingroup jam_heap
-   * Copies attach independent hooks; moves transfer the hook without allocating.
-   * The owning heap must outlive every attached root_handle, including attached null pointers.
-   * Root construction, assignment and destruction require a quiescent collector.
+   * Copies share a registration; moves leave the source detached and null.
+   * Operations on registered handles require the owning heap current and a
+   * quiescent collector. The heap must outlive all its registered handles.
    */
   class root_handle {
     friend class heap;
-    heap * owner = nullptr;
-    mutable root_handle * previous = nullptr;
-    mutable root_handle * next = nullptr;
-    mutable offset position = null;
-    trace_function trace = nullptr;
-
-    void detach() noexcept {
-      if (!owner) return;
-      owner->require_mutator();
-      if (previous) previous->next = next;
-      else owner->roots_head = next;
-      if (next) next->previous = previous;
-      owner = nullptr;
-      previous = next = nullptr;
-      position = null;
-      trace = nullptr;
+    std::uint32_t slot = 0;
+    native_inline void retain() noexcept {
+      if (slot) heap::current()->retain_root(slot);
     }
-    void attach(heap * arena, offset at, trace_function fn) noexcept {
-      if (!arena) return;
-      arena->require_mutator();
-      owner = arena;
-      position = at;
-      trace = fn;
-      next = owner->roots_head;
-      if (next) next->previous = this;
-      owner->roots_head = this;
+    native_inline void detach() noexcept {
+      if (slot) heap::current()->release_root(std::exchange(slot, 0));
     }
-    void take(root_handle & other) noexcept {
-      if (!other.owner) return;
-      other.owner->require_mutator();
-      owner = std::exchange(other.owner, nullptr);
-      position = std::exchange(other.position, null);
-      trace = std::exchange(other.trace, nullptr);
-      previous = std::exchange(other.previous, nullptr);
-      next = std::exchange(other.next, nullptr);
-      if (previous) previous->next = this;
-      else owner->roots_head = this;
-      if (next) next->previous = this;
-    }
-    root_handle(heap & arena, offset at, trace_function fn = nullptr) noexcept {
-      attach(&arena, at, fn);
-    }
-
+    native_inline root_handle(heap & arena, offset at, trace_function fn = nullptr) noexcept
+        : slot(arena.add_root(at, fn)) {}
   public:
-    /// \brief Construct a null root_handle with no heap attachment.
+    /// \brief Construct a detached null handle.
     root_handle() noexcept = default;
-    /// \brief Register a second root with the same owner and offset.
-    root_handle(root_handle const & other) noexcept { attach(other.owner, other.position, other.trace); }
-    /// \brief Transfer registration, leaving the source detached and null.
-    root_handle(root_handle && other) noexcept { take(other); }
-    /// \brief Replace registration, including transfer between heaps.
-    root_handle & operator=(root_handle const & other) noexcept {
-      if (this != &other) { detach(); attach(other.owner, other.position, other.trace); }
+    /// \brief Share a registration in the current heap.
+    native_inline root_handle(root_handle const & other) noexcept : slot(other.slot) { retain(); }
+    /// \brief Transfer a registration, leaving the source detached.
+    native_inline root_handle(root_handle && other) noexcept : slot(std::exchange(other.slot, 0)) {}
+    /// \brief Replace this handle with a shared registration in the same heap.
+    native_inline root_handle & operator=(root_handle const & other) noexcept {
+      if (this != &other) { detach(); slot = other.slot; retain(); }
       return *this;
     }
-    /// \brief Transfer registration, detaching the previous root.
-    root_handle & operator=(root_handle && other) noexcept {
-      if (this != &other) { detach(); take(other); }
+    /// \brief Transfer a registration in the same heap.
+    native_inline root_handle & operator=(root_handle && other) noexcept {
+      if (this != &other) { detach(); slot = std::exchange(other.slot, 0); }
       return *this;
     }
-    /// \brief Unregister this root without touching its heap record.
-    ~root_handle() noexcept { detach(); }
-    /// \brief Read the current offset; the returned value expires on collection.
-    [[nodiscard]] offset get() const noexcept { return position; }
-    /// \brief Read the current offset, as with get().
-    [[nodiscard]] offset operator*() const noexcept { return position; }
-    /// \brief Whether this root currently names a record.
-    explicit operator bool() const noexcept { return position != null; }
+    /// \brief Release this reference; the last release recycles the slot.
+    native_inline ~root_handle() noexcept { detach(); }
+    /// \brief Resolve the slot through the current heap; returned offsets expire on collection.
+    [[nodiscard]] native_inline offset get() const noexcept {
+      return slot ? heap::current()->root_slots[slot - 1].position : null;
+    }
+    /// \brief Read the current target offset.
+    [[nodiscard]] native_inline offset operator*() const noexcept { return get(); }
+    /// \brief Whether this handle currently names a record.
+    [[nodiscard]] native_inline explicit operator bool() const noexcept { return get() != null; }
   };
 
   /** \brief One marker's claim and edge-discovery interface.
@@ -1684,7 +1652,48 @@ private:
   generation nursery;
   heap_options const policy;
   std::size_t minors_left;
-  root_handle * roots_head = nullptr;
+  struct root_slot {
+    offset position;
+    std::uint32_t copies, previous, next;
+    trace_function trace;
+  };
+  static_assert(sizeof(root_slot) == 24);
+  std::vector<root_slot> root_slots;
+  std::uint32_t roots_head = 0, free_root = 0;
+  native_inline std::uint32_t add_root(offset at, trace_function trace) noexcept {
+    assert(heap::current() == this);
+    require_mutator();
+    if (!at) return 0;
+    auto slot = free_root;
+    if (slot) free_root = root_slots[slot - 1].next;
+    else {
+      if (root_slots.size() == std::numeric_limits<std::uint32_t>::max())
+        detail::heap_failure("root slot capacity overflow");
+      root_slots.push_back({});
+      slot = static_cast<std::uint32_t>(root_slots.size());
+    }
+    root_slots[slot - 1] = {at, 1, 0, roots_head, trace};
+    if (roots_head) root_slots[roots_head - 1].previous = slot;
+    roots_head = slot;
+    return slot;
+  }
+  native_inline void retain_root(std::uint32_t slot) noexcept {
+    require_mutator();
+    auto & count = root_slots[slot - 1].copies;
+    if (count == std::numeric_limits<std::uint32_t>::max())
+      detail::heap_failure("root reference count overflow");
+    ++count;
+  }
+  native_inline void release_root(std::uint32_t slot) noexcept {
+    require_mutator();
+    auto & entry = root_slots[slot - 1];
+    if (--entry.copies) return;
+    if (entry.previous) root_slots[entry.previous - 1].next = entry.next;
+    else roots_head = entry.next;
+    if (entry.next) root_slots[entry.next - 1].previous = entry.previous;
+    entry = {0, 0, 0, free_root, nullptr};
+    free_root = slot;
+  }
   std::vector<std::shared_ptr<weak_entry>> weak_entries;
   std::deque<std::shared_ptr<weak_entry>> pending_finalizers;
   weak_entry * running_finalizer = nullptr;
@@ -1766,7 +1775,6 @@ private:
       entry->invoke(*this, *entry);
     }
     running_finalizer = entry->previous_running;
-    entry->owner = nullptr;
   }
   void drain_finalizers() noexcept {
     if (running_finalizer) return;
@@ -1803,7 +1811,10 @@ private:
     nursery.move_to(target, tables);
     nursery.zero_gaps(target, minor && !promote ? 0 : old_end);
     for (auto & root : roots) root = forward(root, minor);
-    for (auto * root = roots_head; root; root = root->next) root->position = forward(root->position, minor);
+    for (auto slot = roots_head; slot; slot = root_slots[slot - 1].next) {
+      auto & entry = root_slots[slot - 1];
+      entry.position = forward(entry.position, minor);
+    }
     if (minor) for (auto entry = remembered.begin(); entry != remembered.end();) {
       auto const slot = entry->first;
       auto * address = reinterpret_cast<std::byte *>(arena.data()) + std::size_t(slot) * sizeof(offset);
@@ -2046,22 +2057,31 @@ public:
   /// \brief Release the arena; every attached root must already be destroyed.
   ~heap() noexcept {
     if (roots_head || running_finalizer) detail::heap_failure("heap destroyed with attached roots or callbacks");
-    for (auto const & entry : weak_entries) { entry->active = false; entry->owner = nullptr; }
+    for (auto const & entry : weak_entries) entry->active = false;
   }
-  /// \brief Register a record or null as an intrusive public root.
-  /// \pre A nonnull offset names an allocated record understood by the tracer.
-  [[nodiscard]] root_handle root(offset at) noexcept {
+  /// \brief Register a record or null in the current heap.
+  /// \pre This heap is current; a nonnull offset names an allocated record understood by the tracer.
+  [[nodiscard]] native_inline root_handle root(offset at) noexcept {
     assert(at == null || (at & offset_mask) < containing(at).cursor);
     return root_handle{*this, at};
   }
   /// \brief Register a typed external root with its type-specific tracing callback.
   /// \ingroup jam_heap
-  /// \pre The reference is null or names a complete T in this heap.
+  /// \pre This heap is current; the reference is null or names a complete T in this heap.
   template<class T>
-  [[nodiscard]] jam::root<T> root(ptr<T> const & at) noexcept requires traceable<T> {
+  [[nodiscard]] native_inline jam::root<T> root(ptr<T> const & at) noexcept requires traceable<T> {
     require_record<T>();
     assert(!at || at.local_offset() < containing(at.get()).cursor);
     return jam::root<T>{root_handle{*this, at.get(), &heap::template trace_record<T>}};
+  }
+  /// \brief Register an external weak slot, forwarded but never used to seed marking.
+  /// \ingroup jam_heap
+  /// \pre This heap is current; the pointer is null or names a complete T in it; the heap outlives the root.
+  template<class T>
+  [[nodiscard]] native_inline jam::weak_root<T> weak_root(ptr<T> const & at) noexcept requires traceable<T> {
+    require_record<T>();
+    assert(!at || at.local_offset() < containing(at.get()).cursor);
+    return jam::weak_root<T>{root_handle{*this, at.get(), &weak_slot}};
   }
   /// \brief Associate a weak key and value with a managed finalizer and stateless runner.
   /// \pre Nonnull pointers belong to this heap; finalizer state is byte-relocatable; runner is nonnull.
@@ -2165,8 +2185,11 @@ private:
     for (auto & item : nursery.metadata) item.pointers = 0;
     if (!minor) for (auto & item : arena.metadata) item.pointers = 0;
     std::vector<trace_job> initial;
-    for (auto hook = roots_head; hook; hook = hook->next)
-      if (hook->position != null && (!minor || (hook->position & young_bit))) initial.push_back({hook->position, hook->trace});
+    for (auto slot = roots_head; slot; slot = root_slots[slot - 1].next) {
+      auto const & entry = root_slots[slot - 1];
+      if (entry.trace != &weak_slot && entry.position != null && (!minor || (entry.position & young_bit)))
+        initial.push_back({entry.position, entry.trace});
+    }
     if (minor) for (auto const & [slot, callback] : remembered) {
       offset value;
       std::memcpy(&value, reinterpret_cast<std::byte const *>(arena.data()) + std::size_t(slot) * sizeof(offset), sizeof(value));
@@ -2298,8 +2321,8 @@ inline heap_scope::heap_scope(heap & arena) noexcept : previous(heap::current())
 
 /// \brief A copyable external root, updated during collection.
 /// \ingroup jam_heap
-/// The owning heap must outlive the root. Copy and destruction use that owner,
-/// even if another heap is bound. Dereference requires the owning heap current.
+/// Four-byte slot index; no heap or registration address is stored.
+/// The heap must outlive the root and be current for operations and destruction.
 export template<class T>
 class root : private heap::root_handle {
   using base = heap::root_handle;
@@ -2327,6 +2350,47 @@ public:
   [[nodiscard]] native_inline explicit operator bool() const noexcept { return base::get() != heap::null; }
 };
 
+/// \brief An external weak slot, updated or cleared by collection without retaining its target.
+/// \ingroup jam_heap
+/// Keep it outside the managed heap. The heap must outlive even an expired attached root.
+/// Copies share a registration; moves leave the source detached and expired.
+/// Four-byte slot index; operations and destruction require the owning heap current.
+/// Operations require a quiescent collector. Old targets remain live during minor collection.
+export template<class T>
+class weak_root : private heap::root_handle {
+  using base = heap::root_handle;
+  friend class heap;
+  native_inline explicit weak_root(base value) noexcept : base(std::move(value)) {}
+public:
+  /// \brief Construct a detached, expired weak root.
+  weak_root() noexcept = default;
+  /// \brief Register a pointer with the current heap, which must outlive this root.
+  native_inline weak_root(ptr<T> const & value) noexcept requires traceable<T>
+      : weak_root(heap::current()->weak_root(value)) {}
+  /// \brief Observe a strong root in the current heap without retaining its target.
+  native_inline weak_root(root<T> const & value) noexcept requires traceable<T>
+      : weak_root(value.get()) {}
+  /// \brief Register a derived pointer through its base allocation-tracing hook.
+  template<class U> requires (!std::same_as<T, U>) && std::convertible_to<ptr<U>, ptr<T>>
+  native_inline weak_root(ptr<U> const & value) noexcept : weak_root(ptr<T>{value}) {}
+  /// \brief Whether this slot is null; does not initiate collection.
+  [[nodiscard]] native_inline bool expired() const noexcept { return base::get() == heap::null; }
+  /// \brief Retain the current target, or return an empty root if expired.
+  /// Requires the owning heap current; the strong root remains valid across collection.
+  [[nodiscard]] native_inline root<T> lock() const noexcept requires traceable<T> {
+    if (expired()) return {};
+    return heap::current()->root(ptr<T>{base::get()});
+  }
+  /// \brief Unregister the slot and leave it detached and expired.
+  native_inline void reset() noexcept { base::operator=(base{}); }
+  /// \brief Exchange slots in the same heap without allocating or retaining either target.
+  native_inline void swap(weak_root & other) noexcept {
+    std::swap(static_cast<base &>(*this), static_cast<base &>(other));
+  }
+  /// \brief Exchange two external weak roots.
+  friend native_inline void swap(weak_root & a, weak_root & b) noexcept { a.swap(b); }
+};
+
 /// \brief An external conditional weak-value handle; registration survives dropped handles.
 /// \ingroup jam_heap
 /// Keep this handle outside the managed heap. Copies share one registration.
@@ -2341,17 +2405,17 @@ public:
   /// \brief Whether the registration has retired or its heap has been destroyed.
   [[nodiscard]] bool expired() const noexcept { return !entry || !entry->active; }
   /// \brief Retain the current value, or return an empty root for a retired registration.
-  /// Dereferencing the root requires the owning heap current.
-  [[nodiscard]] root<V> lock() const noexcept {
+  /// Locking and using the returned root require the owning heap current.
+  [[nodiscard]] native_inline root<V> lock() const noexcept {
     if (expired()) return {};
-    return entry->owner->root(ptr<V>{entry->value.at});
+    return heap::current()->root(ptr<V>{entry->value.at});
   }
   /// \brief Retire the registration and run its callback now, at most once.
-  /// Also drains any finalizers scheduled by nested collection once the callback returns.
-  void finalize() const noexcept {
+  /// Requires the owning heap current. Also drains finalizers scheduled by nested collection.
+  native_inline void finalize() const noexcept {
     // A callback may destroy the very handle used to invoke it.
     auto keep = entry;
-    if (keep && keep->active) keep->owner->finalize(keep);
+    if (keep && keep->active) heap::current()->finalize(keep);
   }
 };
 
@@ -2361,7 +2425,6 @@ jam::weak<V> heap::mk_weak(ptr<K> const & key, ptr<V> const & value,
   require_mutator();
   if (!runner) detail::heap_failure("mk_weak requires a runner");
   auto entry = std::make_shared<finalizer_entry<F>>();
-  entry->owner = this;
   entry->key = {key.get(), &trace_record<K>};
   entry->value = {value.get(), &trace_record<V>};
   entry->finalizer = {finalizer.get(), &trace_record<F>};

@@ -19,12 +19,24 @@ collect();
 assert(copy.get() == answer.get());
 ```
 
-Root deduction and ptr/root conversions are implicit. `heap.root(ptr)` registers
-with an explicit heap. Copying a root registers another hook; moving it transfers
-the hook without allocation. Roots remember their heap for registration and
-destruction, even if the current scope changes. Dereferencing still requires the
-owning heap to be current. Keep roots outside the moving heap: their links use
-their addresses. The untyped handle is `heap::root_handle`.
+Root deduction and ptr/root conversions are implicit. Both `root<T>` and
+`weak_root<T>` are four-byte indices into the current heap's registration table.
+They store neither a heap pointer nor a registration address. Copies share a
+registration; moving transfers the index and empties the source. The last release
+recycles the slot. Growing or moving the table does not change existing indices.
+The untyped strong handle is `heap::root_handle`.
+
+`heap.root(ptr)` and `heap.weak_root(ptr)` register with that heap, which must be
+current. Every operation on a registered handle, including copying, locking,
+resetting and destruction, requires the owning `heap_scope`. A handle may sit
+unused while another heap is bound, then be used after re-entering its heap.
+Using it under the wrong heap is undefined behavior; there is no stored owner ID.
+Keep these handles outside the managed heap. Use `ptr` and `weak_ptr` for fields.
+
+Creating, copying and releasing roots modifies registration state during ordinary
+execution. GC updates the registrations' target offsets. Both kinds of access
+must be serialized: stopping mutators during GC alone does not make concurrent
+root creation or destruction safe. Registration reference counts are non-atomic.
 
 A `heap_scope` binds an existing heap to the current thread and restores the
 previous binding on exit. Scopes can nest, switch heaps and re-enter them. They
@@ -83,6 +95,49 @@ synchronize with concurrent collection.
 Weak fields compose through manifests, arrays, tuples and variants. Copy, move,
 ADL `swap`, `unsafe_assign` and array `assign` maintain the same slot discipline
 as strong pointers; remembered weak slots never become marking roots.
+
+## Weak roots
+
+Use `weak_root<T>` to observe an object from outside the heap without keeping it
+alive. Unlike a stack copy of `weak_ptr<T>`, its slot is updated across collection:
+
+```cpp
+heap h;
+heap_scope scope{h};
+root answer = mk<unsigned>(42u);
+weak_root watch = answer; // Also accepts ptr<T>; CTAD supplies T.
+collect_major();
+assert(*watch.lock() == 42);
+
+auto locked = watch.lock();
+answer = {};
+collect_major();
+assert(*locked == 42); // A successful lock is a strong root.
+locked = {};
+collect_major();
+assert(watch.expired() && !watch.lock());
+```
+
+`lock()` resolves through `heap::current()` and returns a strong `root<T>`, or an
+empty root if the target has gone. `expired()` checks the slot; neither operation
+collects or synchronizes with GC. A minor leaves old targets alone. Dead young
+targets clear during a minor; old targets wait for a major. Clearing follows exact
+liveness, not alignment padding retained by compaction.
+
+Copies share a weak registration, without making it strong. Move leaves the
+source empty. `reset()` releases the handle, and member/ADL `swap` exchanges two
+handles from the same heap. Even an expired registered handle must be reset or
+destroyed under its heap scope before the heap dies. Default and moved-from
+handles are detached and need no heap.
+
+A plain weak root has no finalizer. If another mechanism retains its target—for
+example, a queued finalizer retaining its key—it remains lockable. The
+[generalized `weak<V>` association](finalizers.md) has different semantics: it
+expires when its registration retires, even if its key is resurrected.
+
+Hosted runtimes own their weak-reference policy. Java uses `WeakReference<T>`;
+JNI uses weak global references and acquires a strong local/global before use.
+Those use the [hosted collection phases](hosting.md), not C++ weak roots.
 
 ## Byte relocation
 

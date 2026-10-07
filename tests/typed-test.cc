@@ -215,6 +215,7 @@ void mixed_graph() noexcept {
   static_assert(sizeof(R) == sizeof(std::uint32_t));
   static_assert(std::is_standard_layout_v<R> && !std::is_trivially_copyable_v<R>);
   H heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
+  jam::heap_scope binding{heap};
   static_cast<void>(heap.allocate(23));
   auto const data = heap.template mk<payload>(payload{1, 7});
   auto const a = heap.template mk<N>(N{{}, data, 101});
@@ -258,6 +259,7 @@ void mixed_graph() noexcept {
 
 void parallel_typed_discovery() noexcept {
   jam::heap heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
+  jam::heap_scope binding{heap};
   aligned_branch::expected_heap = &heap;
   static_cast<void>(heap.allocate(31));
   auto const data = heap.mk<std::uint32_t>(77u);
@@ -283,6 +285,7 @@ void composite_graph() noexcept {
   using A = std::array<E, 2>;
   using V = tagged;
   jam::heap heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 3}};
+  jam::heap_scope binding{heap};
   static_cast<void>(heap.allocate(17));
   auto const first = heap.template mk<payload>(payload{71, 11});
   auto const second = heap.template mk<payload>(payload{83, 13});
@@ -382,6 +385,7 @@ void deep_cooperative_graph() noexcept {
   constexpr unsigned count = 2048;
   for (auto workers : {1u, 4u}) {
     jam::heap heap{{.old = {.capacity = jam::units::pages{32}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{32}, .reserve = jam::units::pages{2}}, .workers = workers}};
+    jam::heap_scope binding{heap};
     std::vector<jam::ptr<walking_node>> nodes;
     for (unsigned i = 0; i != count * 3; ++i) {
       static_cast<void>(heap.allocate(1)); // Every pointer must change on compaction.
@@ -467,6 +471,7 @@ void cooperative_tree() noexcept {
   constexpr unsigned count = 8191;
   for (auto workers : {1u, 4u}) {
     jam::heap heap{{.old = {.capacity = jam::units::pages{16}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{16}, .reserve = jam::units::pages{2}}, .workers = workers}};
+    jam::heap_scope binding{heap};
     std::vector<jam::ptr<tree_node>> nodes(count + 1);
     for (unsigned i = 1; i <= count; ++i) {
       static_cast<void>(heap.allocate(1));
@@ -512,6 +517,7 @@ static_assert(sizeof(patterned_node) == 24);
 void cooperative_claims() noexcept {
   for (bool pattern : {false, true}) {
     jam::heap heap{{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
+    jam::heap_scope binding{heap};
     static_cast<void>(heap.allocate(30));
     // The six-slot pattern straddles a metadata word on the first collection.
     auto const a = heap.mk<patterned_node>();
@@ -561,6 +567,7 @@ void cooperative_claims() noexcept {
   }
 
   jam::heap heap{{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}}};
+  jam::heap_scope binding{heap};
   static_cast<void>(heap.allocate(11));
   auto const tail = heap.mk<self_link>();
   auto root = heap.root(heap.mk<self_link>(tail).get());
@@ -583,6 +590,7 @@ void cooperative_claims() noexcept {
 void manifest_graph() noexcept {
   for (auto workers : {1u, 4u}) {
     jam::heap heap{{.old = {.capacity = jam::units::pages{1024}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{1024}, .reserve = jam::units::pages{2}}, .workers = workers}};
+    jam::heap_scope binding{heap};
     constexpr unsigned length = 100000;
     jam::ptr<manifest_node> at;
     for (unsigned i = 0; i != length; ++i) {
@@ -658,6 +666,7 @@ struct alignas(64) manifest_record {
 void nested_manifest_graph() noexcept {
   for (auto workers : {1u, 4u}) {
     jam::heap heap{{.old = {.capacity = jam::units::pages{32}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{32}, .reserve = jam::units::pages{2}}, .workers = workers}};
+    jam::heap_scope binding{heap};
     static_cast<void>(heap.allocate(13));
     auto const a = heap.mk<payload>(71u, 83u);
     auto const b = heap.mk<payload>(97u, 101u);
@@ -710,6 +719,7 @@ void native_storage() {
   T const expected = std::bit_cast<T>(lanes);
   for (unsigned workers : {1u, 4u}) {
     jam::heap heap{{.old = {.capacity = jam::units::pages{128}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{128}, .reserve = jam::units::pages{2}}, .workers = workers}};
+    jam::heap_scope binding{heap};
     for (unsigned i = 0; i != 97; ++i) static_cast<void>(heap.mk<std::uint64_t>(i));
     auto direct = heap.root(heap.mk<T>(expected));
     auto outer = heap.root(heap.mk<native_record<T>>(direct.get(), expected));

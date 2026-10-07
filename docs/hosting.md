@@ -31,7 +31,7 @@ claims, rather than allocation calls, determine individual object boundaries.
 
 There must be exactly one host capability for the heap, and it must die first.
 It cannot be copied or moved. Do not mix hosted collection with ordinary Jam
-roots, weak registrations, remembered slots or collection calls. The host owns
+strong or weak roots, weak registrations, remembered slots or collection calls. The host owns
 mutator synchronization, allocation serialization, barriers and GC scheduling.
 
 ## A collection

@@ -25,6 +25,7 @@ using heap_type = jam::heap;
 using offset = heap_type::offset;
 using root_handle = heap_type::root_handle;
 
+static_assert(sizeof(root_handle) == 4);
 static_assert(std::is_nothrow_default_constructible_v<root_handle>);
 static_assert(std::is_nothrow_copy_constructible_v<root_handle>);
 static_assert(std::is_nothrow_move_constructible_v<root_handle>);
@@ -53,6 +54,7 @@ void trace_leaf(heap_type::visitor & visitor, offset start) noexcept {
 
 void cycles_and_shared_children() noexcept {
   heap_type heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
+  jam::heap_scope binding{heap};
   static_cast<void>(heap.allocate(13));
   auto const a = leaf(heap, 1);
   static_cast<void>(heap.allocate(7));
@@ -98,6 +100,7 @@ void cycles_and_shared_children() noexcept {
 
 void copied_and_moved_roots_survive_vector_relocation() noexcept {
   heap_type heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
+  jam::heap_scope binding{heap};
   static_cast<void>(heap.allocate(11));
   auto a = heap.root(leaf(heap, 101));
   auto b = a;
@@ -114,57 +117,44 @@ void copied_and_moved_roots_survive_vector_relocation() noexcept {
   for (unsigned round = 0; round != 3; ++round) {
     heap.collect_major(trace_leaf);
     check(heap.used() == 4 && a.get() == 1 && b.get() == 1,
-          "copied intrusive hooks all follow their shared record");
+          "copied registrations all follow their shared record");
     for (auto const & root : roots)
-      check(root.get() == a.get(), "vector relocation relinks every moved root hook");
+      check(root.get() == a.get(), "vector relocation preserves every moved slot index");
     for (auto const & root : copies)
-      check(root.get() == a.get(), "copied vectors register independent root hooks");
+      check(root.get() == a.get(), "copied vectors share live registrations");
     check(heap[a.get() + 2] == 101, "root relocation preserves the shared payload");
     static_cast<void>(heap.allocate(19 + round));
   }
 }
 
-void assignment_changes_the_root_owner() noexcept {
-  heap_type first{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}}};
-  heap_type second{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}}};
-  static_cast<void>(first.allocate(5));
-  static_cast<void>(second.allocate(17));
-  auto assigned = first.root(leaf(first, 111));
-  auto source = second.root(leaf(second, 222));
-  assigned = source;
-  first.collect_major(trace_leaf);
-  second.collect_major(trace_leaf);
-  check(first.used() == 1, "cross-heap copy assignment unregisters the previous owner's hook");
-  check(second.used() == 4 && assigned.get() == source.get()
-        && second[assigned.get() + 2] == 222,
-        "cross-heap copy assignment registers with the new owner");
-  auto replacement = first.root(leaf(first, 333));
-  assigned = std::move(replacement);
-  check(replacement.get() == heap_type::null, "cross-heap move assignment empties its source");
-  source = root_handle{};
-  first.collect_major(trace_leaf);
-  second.collect_major(trace_leaf);
-  check(first.used() == 4 && first[assigned.get() + 2] == 333,
-        "cross-heap move assignment transfers the new root hook");
-  check(second.used() == 1, "the old owner's record dies after its last root_handle is reset");
-  auto attached_null = second.root(heap_type::null);
-  auto copied_null = attached_null;
-  assigned = copied_null;
-  check(assigned.get() == heap_type::null, "copying an attached null root_handle changes owners safely");
-  first.collect_major(trace_leaf);
-  second.collect_major(trace_leaf);
-  check(first.used() == 1 && second.used() == 1, "null hooks never keep a record alive");
-  root_handle empty;
-  copied_null = empty;
-  attached_null = std::move(empty);
-  assigned = root_handle{};
-  check(empty.get() == heap_type::null && copied_null.get() == heap_type::null
-        && attached_null.get() == heap_type::null && assigned.get() == heap_type::null,
-        "default pointers copy and move without acquiring an arena record");
+void registration_growth_and_reuse() noexcept {
+  heap_type heap;
+  jam::heap_scope binding{heap};
+  auto first = heap.root(leaf(heap, 111));
+  auto second = heap.root(leaf(heap, 222));
+  auto copy = first;
+  std::vector<root_handle> slots;
+  for (unsigned i = 0; i != 4096; ++i) slots.push_back(heap.root(first.get()));
+  for (unsigned i = 0; i != slots.size(); i += 2) slots[i] = {};
+  for (unsigned i = 0; i != slots.size(); i += 2) slots[i] = heap.root(second.get());
+  first = second;
+  auto & self = first;
+  first = self;
+  first = std::move(self);
+  heap.collect_major(trace_leaf);
+  check(heap[copy.get() + 2] == 111 && heap[first.get() + 2] == 222,
+        "assignment releases one reference while copies retain their target");
+  for (unsigned i = 0; i != slots.size(); ++i)
+    check(heap[slots[i].get() + 2] == (i % 2 ? 111u : 222u),
+          "table growth and recycled slots preserve existing handles");
+  slots.clear(); copy = {}; first = {}; second = {};
+  heap.collect_major(trace_leaf);
+  check(heap.used() == 1, "last releases unlink all active registrations");
 }
 
 void dropped_roots_reclaim_records() noexcept {
   heap_type heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 3}};
+  jam::heap_scope binding{heap};
   static_cast<void>(heap.allocate(23));
   auto kept = heap.root(leaf(heap, 444));
   {
@@ -186,6 +176,7 @@ void dropped_roots_reclaim_records() noexcept {
 
 void empty_collections_ignore_null_roots() noexcept {
   heap_type heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 4}};
+  jam::heap_scope binding{heap};
   root_handle empty;
   auto attached = heap.root(heap_type::null);
   auto copy = attached;
@@ -206,6 +197,7 @@ void mixed_alignment_traces_preserve_records() noexcept {
   using aligned_heap = jam::heap;
   using aligned_offset = aligned_heap::offset;
   aligned_heap heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{1}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{1}}, .workers = 4}};
+  jam::heap_scope binding{heap};
   static_cast<void>(heap.allocate(1));
   std::array<aligned_offset, 3> records{heap.allocate(1, 16), 0, 0};
   static_cast<void>(heap.allocate(3));
@@ -248,6 +240,7 @@ void mixed_alignment_traces_preserve_records() noexcept {
 
 void a_single_root_discovers_parallel_branches() noexcept {
   heap_type heap{jam::heap_options{.old = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .young = {.capacity = jam::units::pages{8}, .reserve = jam::units::pages{2}}, .workers = 2}};
+  jam::heap_scope binding{heap};
   static_cast<void>(heap.allocate(9));
   auto const parent = leaf(heap, 0);
   auto const left = leaf(heap, 1);
@@ -290,11 +283,11 @@ void a_single_root_discovers_parallel_branches() noexcept {
 int main() noexcept {
   cycles_and_shared_children();
   copied_and_moved_roots_survive_vector_relocation();
-  assignment_changes_the_root_owner();
+  registration_growth_and_reuse();
   dropped_roots_reclaim_records();
   empty_collections_ignore_null_roots();
   mixed_alignment_traces_preserve_records();
   a_single_root_discovers_parallel_branches();
-  std::puts("7 intrusive root checks passed");
+  std::puts("7 root slot checks passed");
   return 0;
 }

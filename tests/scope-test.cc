@@ -48,7 +48,7 @@ void nested_scopes() {
       jam::heap_scope nested{second};
       check(jam::heap::current() == &second);
       b = jam::mk<node>(nullptr, std::uint64_t{200});
-      auto copy = a; // Registration uses the root's owner, not the current heap.
+      auto copy = b; // Registration is resolved in the current heap.
       copy = {};
       jam::collect_major();
       check(b->value == 200);
@@ -64,16 +64,18 @@ void nested_scopes() {
     jam::heap_scope reenter{second};
     check(b->value == 200);
     b->value = 201;
-    a = {}; // Unregister from first even though second is current.
+
   }
   {
     jam::heap_scope reenter{first};
+    a = {};
     jam::collect_major();
     check(first.used() == 1);
   }
   {
     jam::heap_scope reenter{second};
     check(b->value == 201);
+    b = {};
   }
 }
 
@@ -82,7 +84,7 @@ void const_root() {
   heap_scope scope{heap};
   static_cast<void>(mk<node>());
   root<node> const root = mk<node>(nullptr, std::uint64_t{23});
-  auto copy = root; // Linking another root also updates the const root's hook.
+  auto copy = root; // Copies share the registration; const handles keep their index.
   auto const before = root.get().get();
   collect_major();
   check(root.get().get() < before && root->value == 23);

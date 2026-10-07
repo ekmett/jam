@@ -8,6 +8,10 @@
 #include <thread>
 #if !defined(_WIN32)
 #include <sys/mman.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#include <csignal>
 #endif
 import jam;
 
@@ -133,6 +137,22 @@ void external_targets() {
   check(f.at(owner).left == live && !f.at(owner).right, "weak field clears during relocation");
 }
 #if !defined(_WIN32)
+void rejects_cpp_weak_roots() {
+  auto const child = ::fork();
+  check(child >= 0, "fork host exclusion check");
+  if (!child) {
+    ::rlimit const no_core{0, 0};
+    static_cast<void>(::setrlimit(RLIMIT_CORE, &no_core));
+    fixture f(1);
+    jam::heap_scope binding{f.storage};
+    auto weak = f.storage.weak_root(jam::ptr<unsigned>{f.host.allocate(generation::young, 1)});
+    f.host.begin(false);
+    ::_exit(0);
+  }
+  int status = 0;
+  check(::waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
+        "host rejects ordinary weak root registrations");
+}
 void publication() {
   auto * target = static_cast<std::byte *>(::mmap(nullptr, JAM_PAGE_BYTES * 9, PROT_NONE,
     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
@@ -160,7 +180,7 @@ void publication() {
 int main() {
   cycles(1); cycles(4); retry_and_subdivision(8); retry_and_subdivision(64); external_targets();
 #if !defined(_WIN32)
-  publication();
+  publication(); rejects_cpp_weak_roots();
 #endif
   std::puts("host phases, promotion retry, tracing and publication passed");
 }

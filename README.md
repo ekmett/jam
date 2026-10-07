@@ -53,8 +53,9 @@ Manifests compose through embedded records and arrays. You can store SIMD
 pointer vectors too, or supply a trace hook when the layout depends on a tag.
 The [tracing guide](docs/tracing.md) and [pointer vector examples](docs/simd.md)
 pick up from there. A `weak_ptr<T>` follows movement without keeping its target
-alive. [Weak associations and finalizers](docs/finalizers.md) let a live key keep
-a value alive and schedule a managed cleanup action when the key dies.
+alive. A [`weak_root<T>`](docs/lifetimes.md#weak-roots) does the same from outside
+the heap and stays valid across collection.
+[Weak associations and finalizers](docs/finalizers.md) let a live key keep a value alive and schedule a managed cleanup action when the key dies.
 
 There are a few things you have to get right:
 
@@ -63,9 +64,9 @@ There are a few things you have to get right:
 - Keep roots outside the heap and pointers inside it. The local `a` and `b` above
   are stale after `collect()`; get fresh pointers from `answer`. Raw pointers and
   references into the heap can also expire when allocation grows it.
-- Use the owning `heap_scope` when working with a pointer. Mixing heaps is
-  undefined behavior. Collection can use several workers, but you must stop
-  mutating the heap before collecting.
+- Use the owning `heap_scope` when working with pointers or roots, including
+  when destroying roots. Mixing heaps is undefined behavior. Collection can use
+  several workers, but you must stop mutating the heap before collecting.
 - Objects move as bytes. Jam does not call their move constructors or run their
   destructors when reclaiming them. Self-links through `ptr` work; raw
   self-pointers don't. Cleanup needs an explicit finalizer action, not a C++
