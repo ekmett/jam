@@ -7,6 +7,7 @@ if ((Get-ItemPropertyValue 'HKLM:/SYSTEM/CurrentControlSet/Control/FileSystem' -
     throw 'Enable Win32 long paths before building; see docs/build.md#windows.'
 }
 if (!$env:JAM_CI_TOOLS) { throw 'Set JAM_CI_TOOLS to the dependency installation directory' }
+if (!$env:JAM_PYTHON) { $env:JAM_PYTHON = (Get-Command python).Source }
 $prefix = [IO.Path]::GetFullPath($env:JAM_CI_TOOLS)
 New-Item -ItemType Directory -Force $prefix | Out-Null
 $tar = "$env:SystemRoot/System32/tar.exe"
@@ -27,10 +28,10 @@ function Get-Archive($Name, $Digest, $Url, $Algorithm = 'SHA256') {
 
 $llvm = "$prefix/clang+llvm-23.1.2-x86_64-pc-windows-msvc"
 if (!(Test-Path "$prefix/llvm-ready")) {
-    # The system tar cannot decode the large-window Zstandard release archive.
+    # Use Python's XZ reader consistently across Windows releases.
     $archive = Get-Archive llvm23.tar.xz '8fb91cdc44fcbbdcf6b3ffd0a1f9859abd14a3c3aae4423c2b6d4a4f90bf0095' 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/clang%2Bllvm-23.1.2-x86_64-pc-windows-msvc.tar.xz'
     Write-Host 'Extracting LLVM'
-    & $tar -xf $archive -C $prefix
+    & $env:JAM_PYTHON -m tarfile -e $archive $prefix
     if ($LASTEXITCODE) { throw 'LLVM extraction failed' }
     New-Item -ItemType File "$prefix/llvm-ready" | Out-Null
 }
