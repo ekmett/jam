@@ -4,6 +4,8 @@ The guest API is `jam.vm.Weak`. It exposes the collector hooks through a Java
 JAR and a small JNI library. A finalizer is a JVM `Runnable`. It may enter
 whatever guest context it needs; jam-vm has no context IDs or routing table.
 As long as some caller pumps the queue, callbacks from every producer can run.
+In [Native Image](native-image.md), the same API connects directly to the
+collector and the queue belongs to the current isolate.
 
 The thc owner can lower weak primitives to this API and wrap Haskell finalizers
 in runnables that enter thc. The collector owns reachability, retirement and
@@ -79,8 +81,8 @@ managed closure, the closure itself should supply the nonnull representation.
 
 A guest weak-handle wrapper should contain only the token. Storing its key,
 value or finalizer as ordinary strong fields in the wrapper would change the
-reachability problem. Tokens are JVM-local monotonic IDs, never reused. Do not
-persist them across JVM runs or treat them as security capabilities.
+reachability problem. Tokens are monotonic IDs local to a JVM or native isolate,
+never reused. Do not persist them across runs or treat them as security capabilities.
 Dropping a wrapper does not cancel its finalizer.
 
 ## Pumping finalizers

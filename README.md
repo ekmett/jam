@@ -2,8 +2,9 @@
 
 [![Documentation](https://github.com/ekmett/jam-vm/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/ekmett/jam-vm/actions/workflows/docs.yml)
 
-This project adapts [jam](https://github.com/ekmett/jam) to collect JVM objects,
-with both Java reference processing and GHC-style generalized weak pointers.
+This project adapts [jam](https://github.com/ekmett/jam) to collect Java objects
+on HotSpot and Native Image, with both Java reference processing and GHC-style
+generalized weak pointers.
 The intended consumer is [thc](https://github.com/ekmett/thc): Haskell running
 through Truffle/Graal, with its closures in the host heap.
 
@@ -61,6 +62,7 @@ low-level claims, native loading and the thc handoff.
 ## [Documentation](https://ekmett.github.io/jam-vm/)
 
 * [Build and run](docs/build.md)
+* [Native Image](docs/native-image.md)
 * [Integrating thc](docs/thc-integration.md)
 * [Weak-pointer semantics](docs/weak-pointers.md)
 * [Heap architecture](docs/architecture.md)
@@ -69,8 +71,8 @@ low-level claims, native loading and the thc handoff.
 
 The current target is macOS 26 arm64 on the patched JDK 25 or
 [GraalVM 25.3.4.1](docs/build.md#graalvm), with fixed capacities,
-stop-the-world collection and compressed oops. Native Image needs a separate
-collector adapter.
+stop-the-world collection and compressed oops. Native executables use the
+SubstrateVM adapter, selected with `native-image --gc=jam`.
 
 ## Source and license
 

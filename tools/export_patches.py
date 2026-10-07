@@ -23,6 +23,7 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
         'src/hotspot/share/gc/shared/gc_globals.hpp',
         'src/hotspot/share/gc/shared/collectedHeap.hpp',
         'src/hotspot/share/gc/shared/gcConfig.cpp',
+        'src/hotspot/share/gc/shared/barrierSet.hpp',
         'src/hotspot/share/gc/shared/barrierSetConfig.hpp',
         'src/hotspot/share/gc/shared/barrierSetConfig.inline.hpp',
         'src/hotspot/share/gc/shared/vmStructs_gc.hpp',
@@ -45,6 +46,7 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
         'src/hotspot/share/gc/shared/referenceProcessor.cpp',
         'src/hotspot/share/gc/shared/referenceProcessor.hpp',
         'src/hotspot/share/runtime/vmOperation.hpp',
+        'src/hotspot/share/runtime/thread.cpp',
         'src/jdk.hotspot.agent/share/classes/sun/jvm/hotspot/gc/epsilon/EpsilonHeap.java',
         'src/jdk.hotspot.agent/share/classes/sun/jvm/hotspot/gc/jam/JamHeap.java',
         'src/hotspot/share/include/jvm.h']]

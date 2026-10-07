@@ -169,11 +169,16 @@ scanning currently runs on the registered VM thread; native copy work uses
 jam's worker pool. Parallel VM scanning needs a proper HotSpot
 worker-registration contract first.
 
+Each VM thread owns a descriptor for a `jam::heap_scope`. HotSpot enters that
+scope on the executing OS thread and leaves it on detach. Native Image also
+suspends the scope across native calls, allowing an OS thread to switch
+isolates. Jam's own tracing workers retain their existing heap scopes.
+
 The current encoding requires fixed capacities, ordinary object headers,
 eight-byte alignment, normal pages and nonzero-base shift-three compressed
 oops. Other layouts are separate implementation work, not alternate settings
 of this adapter. See [HotSpot integration](hotspot-integration.md) for validation
-and the [next stages](status.md#next-steps) for Graal and Native Image.
+and [Native Image](native-image.md) for the SubstrateVM layout and pinning rules.
 
 ## Source
 

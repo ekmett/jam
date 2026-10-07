@@ -3,10 +3,14 @@
 
 import jam.vm.Weak;
 import java.lang.ref.Reference;
+import java.lang.ref.WeakReference;
 
 /** Exercise the packaged boundary without the test-only collector JNI library. */
 public final class WeakBridgeSmoke {
     private static int executions;
+    private static Object resurrected;
+    private record Chain(Object root, long first, long second) { }
+    private record Batch(long first, long second, WeakReference<Object> weak) { }
     private record GuestClosure(Object captured) implements Runnable {
         @Override public void run() {
             System.gc();
@@ -26,6 +30,50 @@ public final class WeakBridgeSmoke {
 
     private static long install(Runnable finalizer) {
         return Weak.create(new Object(), new Object(), finalizer);
+    }
+
+    private static Chain chain() {
+        Object first = new Object();
+        Object second = new Object();
+        long tail = Weak.create(second, new byte[4096], null);
+        return new Chain(first, Weak.create(first, second, null), tail);
+    }
+
+    private static Batch batch(int[] count) {
+        Object key = new Object();
+        long first = Weak.create(key, new Object(), () -> {
+            System.gc();
+            resurrected = key;
+            count[0]++;
+        });
+        long second = Weak.create(key, new Object(), () -> count[0]++);
+        return new Batch(first, second, new WeakReference<>(key));
+    }
+
+    private static void generalized() {
+        Chain chain = chain();
+        for (int i = 0; i < 4; i++) {
+            System.gc();
+            check(Weak.deref(chain.first()) != null && Weak.deref(chain.second()) instanceof byte[],
+                  "reverse registration order reaches a fixed point");
+        }
+        Reference.reachabilityFence(chain.root());
+        int[] count = new int[1];
+        Batch batch = batch(count);
+        System.gc();
+        check(Weak.deref(batch.first()) == null && Weak.deref(batch.second()) == null,
+              "all dead associations freeze before tracing new finalizers");
+        check(batch.weak().get() == null, "Java weak clears before generalized finalizer resurrection");
+        check(Weak.pump() == 2 && count[0] == 2 && resurrected != null, "shared-key finalizers survive nested GC");
+        System.gc();
+        check(Weak.deref(batch.first()) == null && Weak.deref(batch.second()) == null && Weak.pump() == 0,
+              "resurrection cannot rearm either association");
+        resurrected = null;
+        long permanent = Weak.create(WeakBridgeSmoke.class, new byte[4096], null);
+        System.gc();
+        check(Weak.deref(permanent) instanceof byte[], "permanent image key retains a moving value");
+        Weak.finalizeNow(permanent);
+        Weak.complete(permanent);
     }
 
     public static void main(String[] args) {
@@ -101,6 +149,7 @@ public final class WeakBridgeSmoke {
         }
         check(Weak.finalizeNow(throwing) == null && Weak.pump() == 0,
               "throwing finalizer is completed without retry");
+        generalized();
         System.out.println("Weak bridge passed: JVM runnables, retirement, pumping and nested GC");
     }
 }

@@ -159,6 +159,8 @@ jobs:
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           python3 tools/check_graal.py --unsupported-libgraal "$JAM_STOCK_GRAAL_HOME/lib"
+      - name: Build and run Jam native executables
+        run: python3 tools/check_substrate.py
       - name: Relocate GraalVM and check the guest API
         run: |
           mv build/graalvm "$RUNNER_TEMP/jam-graalvm"

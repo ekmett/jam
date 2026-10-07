@@ -157,9 +157,9 @@ Graal can keep derived pointers into objects across a safepoint. After movement,
 the collector publishes the new space tops before repairing those pointers, so
 promoted bases are valid members of the heap during repair.
 
-Native Image requires a separate SubstrateVM adapter. Its allocation lowering,
-stack maps, image heap, compressed encoding and pinning rules are different
-host contracts. The [next steps](status.md#next-steps) identify those decisions.
+The [Native Image adapter](native-image.md) supplies SubstrateVM's allocation
+lowering, stack maps, permanent image roots and pinning rules. Both adapters
+use the same Jam backend and compressed reference bits.
 
 ## Working on the backend
 

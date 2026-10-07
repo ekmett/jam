@@ -10,6 +10,10 @@ import thc.jam;
 // This is the entire foreign interface. C++26 types, ownership and exceptions
 // stay behind opaque C handles; HotSpot consumes only jam_vm.h as C++14.
 struct jam_vm { thc::hosted_heap heap; };
+struct jam_vm_thread {
+  thc::hosted_heap::thread_scope scope;
+  explicit jam_vm_thread(thc::hosted_heap & heap) noexcept : scope(heap) {}
+};
 struct jam_vm_visit { thc::hosted_heap::visitor & visitor; };
 namespace {
 auto scanner(jam_vm_scan scan, void * context) noexcept {
@@ -32,6 +36,18 @@ jam_vm * jam_vm_create(void * base, size_t prefix, size_t old_bytes, size_t youn
   return result;
 }
 void jam_vm_destroy(jam_vm * vm) { delete vm; }
+jam_vm_thread * jam_vm_thread_create(jam_vm * vm) {
+  auto * result = new (std::nothrow) jam_vm_thread(vm->heap);
+  if (!result) std::abort();
+  return result;
+}
+void jam_vm_thread_enter(jam_vm_thread * thread) { thread->scope.enter(); }
+void jam_vm_thread_leave(jam_vm_thread * thread) { thread->scope.leave(); }
+void jam_vm_thread_destroy(jam_vm_thread * thread) { delete thread; }
+int jam_vm_thread_current(jam_vm const * vm) { return vm->heap.current(); }
+void jam_vm_add_immortal_range(jam_vm * vm, uint32_t first, uint64_t limit) {
+  vm->heap.add_immortal_range(first, limit);
+}
 uint32_t jam_vm_allocate(jam_vm * vm, size_t words, int young) { return vm->heap.allocate(words, young); }
 size_t jam_vm_used(jam_vm const * vm, int young) { return vm->heap.used(young); }
 size_t jam_vm_origin(jam_vm const * vm, int young) { return vm->heap.origin(young); }

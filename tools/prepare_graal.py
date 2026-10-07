@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Edward Kmett
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-"""Apply the Jam compiler patch to the pinned Graal checkout, preserving other edits."""
+"""Apply the Jam compiler and SubstrateVM patch, preserving other edits."""
 
 import argparse
 import json
@@ -28,7 +28,7 @@ if git('ls-files', '--others', '--exclude-standard'):
 current = git('diff', '--binary', 'HEAD')
 expected = patch.read_bytes()
 if current == expected:
-    print(f'Graal at {pin} has exactly the Jam compiler patch.')
+    print(f'Graal at {pin} has exactly the Jam compiler and SubstrateVM patch.')
 elif current or options.check:
     raise SystemExit('Graal sources do not match the Jam patch; existing changes preserved.')
 else:

@@ -70,7 +70,8 @@ def package(java_home, output, runtime):
         'LLVM-LICENSE.txt': runtime / 'LICENSE.TXT',
     }
     jars = [ROOT / 'build/bridge' / name for name in ('jam-vm.jar', 'jam-vm-sources.jar')]
-    for source in [*libraries.values(), *licenses.values(), *jars]:
+    header = ROOT / 'adapter/jam_vm.h'
+    for source in [*libraries.values(), *licenses.values(), *jars, header]:
         if not source.is_file():
             raise SystemExit(f'Missing package input: {source}')
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +86,8 @@ def package(java_home, output, runtime):
             shutil.copy2(source, library_dir / name)
         for source in jars:
             shutil.copy2(source, library_dir / source.name)
+        (library_dir / 'include').mkdir()
+        shutil.copy2(header, library_dir / 'include/jam_vm.h')
         for name, source in licenses.items():
             shutil.copy2(source, legal_dir / name)
 

@@ -123,9 +123,9 @@ The build uses the pinned `mx` checkout and keeps downloaded build dependencies
 in `.toolchains/mx-cache/`. `JAM_GRAAL_OUTPUT` selects another output directory;
 the packaging step refuses to overwrite an existing installation.
 
-The distribution includes Native Image tooling, but programs produced by
-`native-image` do not yet use Jam. That requires the separate SubstrateVM
-adapter described in [supported configurations](status.md#next-steps).
+The distribution also includes the SubstrateVM adapter. Select it with
+`native-image --gc=jam` when building a native executable. See
+[Native Image](native-image.md) for heap sizing, deployment and the weak API.
 
 ## Development checks
 

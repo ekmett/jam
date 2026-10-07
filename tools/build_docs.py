@@ -22,6 +22,7 @@ REPO = "https://github.com/ekmett/jam-vm"
 PAGES = (
     ("docs/site/index.md", "home.html", "Home"),
     ("docs/build.md", "guides/build.html", "Build and run"),
+    ("docs/native-image.md", "guides/native-image.html", "Native Image"),
     ("docs/thc-integration.md", "guides/thc-integration.html", "Integrating thc"),
     ("docs/weak-pointers.md", "guides/weak-pointers.html", "Weak pointers"),
     ("docs/architecture.md", "guides/architecture.html", "Heap architecture"),

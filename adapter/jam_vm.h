@@ -13,6 +13,7 @@ extern "C" {
 
 typedef struct jam_vm jam_vm;
 typedef struct jam_vm_visit jam_vm_visit;
+typedef struct jam_vm_thread jam_vm_thread;
 typedef void (*jam_vm_scan)(void *, jam_vm_visit *, uint32_t);
 
 /* VM owns a PROT_NONE reservation through base+16GiB+prefix+young_bytes.
@@ -24,6 +25,21 @@ typedef void (*jam_vm_scan)(void *, jam_vm_visit *, uint32_t);
 jam_vm * jam_vm_create(void * base, size_t prefix, size_t old_bytes,
                       size_t young_bytes, size_t reserve_bytes, size_t workers);
 void jam_vm_destroy(jam_vm *);
+/* Each VM thread owns an initially inactive descriptor. The heap outlives it.
+ * Enter/leave construct/destroy Jam's heap_scope on the executing OS thread;
+ * they nest in LIFO order and are idempotent while current/already inactive.
+ * Suspend before switching isolates or publishing a SubstrateVM native state.
+ * Destroy requires inactivity and may run on another thread after handoff. */
+jam_vm_thread * jam_vm_thread_create(jam_vm *);
+void jam_vm_thread_enter(jam_vm_thread *);
+void jam_vm_thread_leave(jam_vm_thread *);
+void jam_vm_thread_destroy(jam_vm_thread *);
+int jam_vm_thread_current(jam_vm const *);
+/* Register a permanent, immovable range of encoded references [first, limit).
+ * Ranges must exclude both managed arenas and null, and outlive this heap.
+ * Their outgoing managed edges are supplied separately as external VM roots.
+ * Registration requires stopped mutators or the VM lock, outside collection. */
+void jam_vm_add_immortal_range(jam_vm *, uint32_t first, uint64_t limit);
 uint32_t jam_vm_allocate(jam_vm *, size_t words, int young); /* zero on insufficient space */
 size_t jam_vm_used(jam_vm const *, int young); /* cells, including guard prefix */
 size_t jam_vm_origin(jam_vm const *, int young); /* private ring origin */

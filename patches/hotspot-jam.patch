@@ -255,7 +255,7 @@
 +#endif // SHARE_GC_JAM_JAMARGUMENTS_HPP
 --- a/src/hotspot/share/gc/jam/jamBarrierSet.cpp
 +++ b/src/hotspot/share/gc/jam/jamBarrierSet.cpp
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,81 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2018, Red Hat, Inc. All rights reserved.
@@ -282,6 +282,7 @@
 + */
 +
 +#include "gc/jam/jamBarrierSet.hpp"
++#include "gc/jam/jamHeap.hpp"
 +#include "gc/jam/jamThreadLocalData.hpp"
 +#include "gc/shared/barrierSet.hpp"
 +#include "gc/shared/cardTableBarrierSetAssembler.hpp"
@@ -301,15 +302,44 @@
 +          BarrierSet::FakeRtti(BarrierSet::JamBarrierSet)) {}
 +
 +void JamBarrierSet::on_thread_create(Thread *thread) {
-+  JamThreadLocalData::create(thread);
++  JamThreadLocalData::create(thread, JamHeap::heap()->jam());
++  // The initial thread is created before the heap; set_barrier_set calls us
++  // later on that same thread. Other Thread objects are created by a parent.
++  if (thread == Thread::current_or_null()) {
++    on_thread_start(thread);
++  }
 +}
 +
 +void JamBarrierSet::on_thread_destroy(Thread *thread) {
++  // Initialization may fail before attach/detach. Normal SMR destruction can
++  // run on a different thread and therefore must only free an inactive context.
++  if (JamThreadLocalData::context_active(thread)) {
++    JamThreadLocalData::leave(thread);
++  }
 +  JamThreadLocalData::destroy(thread);
++}
++
++void JamBarrierSet::on_thread_start(Thread* thread) {
++  JamThreadLocalData::enter(thread);
++  assert(jam_vm_thread_current(JamHeap::heap()->jam()), "Jam heap must be bound on the executing OS thread");
++}
++
++void JamBarrierSet::on_thread_attach(Thread* thread) {
++  CardTableBarrierSet::on_thread_attach(thread);
++  // Threads::add for a Java-created thread executes on its creator. JNI
++  // attachment and NonJavaThread startup execute on the attached thread.
++  if (thread == Thread::current_or_null()) {
++    on_thread_start(thread);
++  }
++}
++
++void JamBarrierSet::on_thread_detach(Thread* thread) {
++  CardTableBarrierSet::on_thread_detach(thread);
++  JamThreadLocalData::leave(thread);
 +}
 --- a/src/hotspot/share/gc/jam/jamBarrierSet.hpp
 +++ b/src/hotspot/share/gc/jam/jamBarrierSet.hpp
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,57 @@
 +/*
 + * Copyright (c) 2017, 2018, Red Hat, Inc. All rights reserved.
 + * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -348,6 +378,9 @@
 +
 +  virtual void on_thread_create(Thread* thread);
 +  virtual void on_thread_destroy(Thread* thread);
++  virtual void on_thread_start(Thread* thread);
++  virtual void on_thread_attach(Thread* thread);
++  virtual void on_thread_detach(Thread* thread);
 +
 +  template <DecoratorSet decorators, typename BarrierSetT = JamBarrierSet>
 +  class AccessBarrier: public CardTableBarrierSet::AccessBarrier<decorators, BarrierSetT> {};
@@ -1711,7 +1744,7 @@
 +#endif // SHARE_GC_JAM_JAMMONITORINGSUPPORT_HPP
 --- a/src/hotspot/share/gc/jam/jamThreadLocalData.hpp
 +++ b/src/hotspot/share/gc/jam/jamThreadLocalData.hpp
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,97 @@
 +/*
 + * Copyright (c) 2018, Red Hat, Inc. All rights reserved.
 + * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -1742,15 +1775,22 @@
 +#include "gc/shared/gc_globals.hpp"
 +#include "runtime/javaThread.hpp"
 +#include "utilities/debug.hpp"
++#include "jam_vm.h"
 +
 +class JamThreadLocalData {
 +private:
 +  size_t _ergo_tlab_size;
 +  int64_t _last_tlab_time;
++  jam_vm_thread* _context;
++  bool _context_active;
 +
-+  JamThreadLocalData() :
++  explicit JamThreadLocalData(jam_vm* heap) :
 +          _ergo_tlab_size(0),
-+          _last_tlab_time(0) {}
++          _last_tlab_time(0),
++          _context(jam_vm_thread_create(heap)),
++          _context_active(false) {
++    guarantee(_context != nullptr, "Unable to allocate Jam thread context");
++  }
 +
 +  static JamThreadLocalData* data(Thread* thread) {
 +    assert(UseJamGC, "Sanity");
@@ -1758,12 +1798,30 @@
 +  }
 +
 +public:
-+  static void create(Thread* thread) {
-+    new (data(thread)) JamThreadLocalData();
++  static void create(Thread* thread, jam_vm* heap) {
++    new (data(thread)) JamThreadLocalData(heap);
 +  }
 +
 +  static void destroy(Thread* thread) {
++    guarantee(!data(thread)->_context_active, "Jam thread context must be inactive before destruction");
++    jam_vm_thread_destroy(data(thread)->_context);
 +    data(thread)->~JamThreadLocalData();
++  }
++
++  static bool context_active(Thread* thread) {
++    return data(thread)->_context_active;
++  }
++
++  static void enter(Thread* thread) {
++    guarantee(thread == Thread::current_or_null(), "Jam context must be entered by its own thread");
++    jam_vm_thread_enter(data(thread)->_context);
++    data(thread)->_context_active = true;
++  }
++
++  static void leave(Thread* thread) {
++    guarantee(thread == Thread::current_or_null(), "Jam context must be left by its own thread");
++    jam_vm_thread_leave(data(thread)->_context);
++    data(thread)->_context_active = false;
 +  }
 +
 +  static size_t ergo_tlab_size(Thread *thread) {
@@ -2044,6 +2102,18 @@
 +                                  declare_constant_with_value)
 +
 +#endif // SHARE_GC_JAM_VMSTRUCTS_JAM_HPP
+--- a/src/hotspot/share/gc/shared/barrierSet.hpp
++++ b/src/hotspot/share/gc/shared/barrierSet.hpp
+@@ -128,6 +128,9 @@
+   virtual void on_slowpath_allocation_exit(JavaThread* thread, oop new_obj) {}
+   virtual void on_thread_create(Thread* thread) {}
+   virtual void on_thread_destroy(Thread* thread) {}
++  // Called by call_run() on the new OS thread before its subclass startup.
++  // The initial thread and threads attached through JNI do not use call_run().
++  virtual void on_thread_start(Thread* thread) {}
+ 
+   // These perform BarrierSet-related initialization/cleanup before the thread
+   // is added to or removed from the corresponding set of threads. The
 --- a/src/hotspot/share/gc/shared/barrierSetConfig.hpp
 +++ b/src/hotspot/share/gc/shared/barrierSetConfig.hpp
 @@ -31,6 +31,7 @@
@@ -2427,6 +2497,16 @@
    declare_constant(CollectedHeap::Z)                                      \
    declare_constant(CollectedHeap::Shenandoah)                             \
                                                                            \
+--- a/src/hotspot/share/runtime/thread.cpp
++++ b/src/hotspot/share/runtime/thread.cpp
+@@ -235,6 +235,7 @@
+     p2i(stack_base()), stack_size()/1024);
+ 
+   // Perform <ChildClass> initialization actions
++  BarrierSet::barrier_set()->on_thread_start(this);
+   DEBUG_ONLY(_run_state = PRE_RUN;)
+   this->pre_run();
+ 
 --- a/src/hotspot/share/runtime/vmOperation.hpp
 +++ b/src/hotspot/share/runtime/vmOperation.hpp
 @@ -51,6 +51,7 @@

@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <atomic>
+#include <thread>
 
 static constexpr uint32_t young_bit = 0x80000000u;
 static void check(bool value, char const * message) {
@@ -35,6 +37,7 @@ struct heap {
   }
   static void scan(void * ctx, jam_vm_visit * v, uint32_t o) {
     auto & h = *static_cast<heap *>(ctx);
+    check(jam_vm_thread_current(h.vm), "tracer binds the owning Jam heap");
     if (!jam_vm_claim(v, o, 3)) return;
     check(h.at(o).header == 0x8000000100000800ull, "opaque JVM header intact");
     uint64_t fields[] = {uint64_t(o) * 2 + 2, uint64_t(o) * 2 + 3};
@@ -139,4 +142,107 @@ static void mixed_weak_batch() {
   jam_vm_weak_complete(h.vm, id);
   check(!jam_vm_weak_finalize(h.vm, id), "completed finalizer cannot run twice");
 }
-int main(int argc, char **) { cycles(1, argc > 1); cycles(4, argc > 1); capacity_and_retry(); mixed_weak_batch(); }
+static void permanent_references() {
+  heap h(4);
+  // Permanent image objects need no accessible backing for collector metadata.
+  // Visiting either as a Jam object would fault, even when used as a weak key.
+  uint32_t image = 0x10000000u;
+  jam_vm_add_immortal_range(h.vm, image, uint64_t(image) + 8);
+  auto value = h.make(true, 17, image, image + 1);
+  auto weak = jam_vm_weak_create(h.vm, image, value, image + 2);
+  auto dead = jam_vm_weak_create(h.vm, h.make(true, 18), image + 3, image + 4);
+  for (unsigned n = 0; n != 6; ++n) {
+    jam_vm_begin(h.vm, n % 2);
+    h.trace(image);
+    h.weak_close();
+    check(jam_vm_marked(h.vm, image), "image key is permanently live");
+    check(jam_vm_marked(h.vm, value), "image key retains managed value");
+    check(jam_vm_prepare(h.vm, 1), "image reference prepare");
+    value = jam_vm_forward(h.vm, value);
+    check(jam_vm_forward(h.vm, image) == image, "image root preserves identity");
+    jam_vm_finish(h.vm);
+    check(h.at(value).left == image && h.at(value).right == image + 1,
+          "SIMD leaves permanent fields intact");
+    check(jam_vm_weak_value(h.vm, weak) == value, "image weak value follows movement");
+  }
+  uint64_t id;
+  check(jam_vm_weak_take(h.vm, &id) == image + 4 && id == dead,
+        "permanent finalizer survives managed key death");
+  jam_vm_weak_complete(h.vm, id);
+  check(jam_vm_weak_finalize(h.vm, weak) == image + 2, "explicit permanent finalizer");
+  jam_vm_weak_complete(h.vm, weak);
+}
+static void concurrent_old_pin() {
+  heap h(4);
+  auto pinned = h.make(false, 0);
+  auto * payload = &h.at(pinned).identity;
+  std::atomic<bool> stop{false};
+  std::atomic<uint64_t> writes{0};
+  std::thread native([&] {
+    uint64_t n = 0;
+    while (!stop.load(std::memory_order_relaxed)) {
+      __atomic_store_n(payload, ++n, __ATOMIC_RELAXED);
+      writes.store(n, std::memory_order_release);
+    }
+  });
+  while (!writes.load(std::memory_order_acquire)) std::this_thread::yield();
+  for (unsigned n = 0; n != 200; ++n) {
+    h.make(true, 999);
+    auto young = h.make(true, n);
+    jam_vm_begin(h.vm, 1);
+    h.trace(young);
+    check(jam_vm_prepare(h.vm, n % 2), "minor with concurrent native writer");
+    jam_vm_finish(h.vm);
+  }
+  stop.store(true, std::memory_order_relaxed);
+  native.join();
+  check(__atomic_load_n(payload, __ATOMIC_RELAXED) == writes.load(std::memory_order_acquire),
+        "old backing retains concurrent native writes across retaining/promoting minors");
+}
+static void thread_scopes() {
+  heap first(2), second(2);
+  auto * a = jam_vm_thread_create(first.vm);
+  auto * b = jam_vm_thread_create(second.vm);
+  auto * reentrant = jam_vm_thread_create(first.vm);
+  check(!jam_vm_thread_current(first.vm) && !jam_vm_thread_current(second.vm), "creation does not bind the creator");
+  jam_vm_thread_enter(a);
+  jam_vm_thread_enter(a);
+  check(jam_vm_thread_current(first.vm), "thread entry binds Jam's actual TLS");
+  jam_vm_thread_enter(b);
+  check(jam_vm_thread_current(second.vm) && !jam_vm_thread_current(first.vm), "nested heap entry");
+  jam_vm_thread_enter(reentrant);
+  check(jam_vm_thread_current(first.vm), "A to B to A heap reentry");
+  jam_vm_thread_leave(reentrant);
+  jam_vm_thread_destroy(reentrant);
+  check(jam_vm_thread_current(second.vm), "reentry restores B");
+  jam_vm_thread_leave(b);
+  jam_vm_thread_leave(b);
+  check(jam_vm_thread_current(first.vm), "leaving B restores A");
+  auto target = second.make(true, 31);
+  jam_vm_begin(second.vm, 0);
+  second.trace(target);
+  check(jam_vm_thread_current(first.vm), "collector callback restores its caller's heap");
+  check(jam_vm_prepare(second.vm, 0), "scope callback collection fits");
+  jam_vm_finish(second.vm);
+  std::atomic<bool> bound{false}, release{false};
+  std::thread worker([&] {
+    jam_vm_thread_enter(b);
+    check(jam_vm_thread_current(second.vm) && !jam_vm_thread_current(first.vm), "target thread has independent TLS");
+    bound.store(true, std::memory_order_release);
+    while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+    jam_vm_thread_leave(b);
+    check(!jam_vm_thread_current(second.vm), "target thread restores empty scope");
+  });
+  while (!bound.load(std::memory_order_acquire)) std::this_thread::yield();
+  check(jam_vm_thread_current(first.vm), "worker binding leaves parent scope intact");
+  release.store(true, std::memory_order_release);
+  worker.join();
+  jam_vm_thread_destroy(b); // Deferred reclamation on a different OS thread.
+  jam_vm_thread_leave(a);
+  jam_vm_thread_destroy(a);
+  check(!jam_vm_thread_current(first.vm), "last scope restores empty TLS");
+}
+int main(int argc, char **) {
+  cycles(1, argc > 1); cycles(4, argc > 1); capacity_and_retry(); mixed_weak_batch();
+  permanent_references(); concurrent_old_pin(); thread_scopes();
+}

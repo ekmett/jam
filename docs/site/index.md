@@ -2,8 +2,9 @@
 
 # jam-vm
 
-This project adapts [jam](https://github.com/ekmett/jam) to collect JVM objects,
-with both Java reference processing and GHC-style generalized weak pointers.
+This project adapts [jam](https://github.com/ekmett/jam) to collect Java objects
+on HotSpot and Native Image, with both Java reference processing and GHC-style
+generalized weak pointers.
 The intended consumer is [thc](https://github.com/ekmett/thc): Haskell running
 through Truffle/Graal, with its closures in the host heap.
 
@@ -20,6 +21,10 @@ java -Xshare:off -Xms256m -Xmx256m \
 Keep `-Xms` and `-Xmx` equal. Ordinary Java code continues to use its existing
 reference classes. Code that needs generalized weak associations can use
 `jam.vm.Weak` from the [Java/JNI API](../thc-integration.md).
+
+For a native executable, build with `native-image --gc=jam`. The
+[Native Image guide](../native-image.md) covers heap sizing, deployment and
+the same weak API without a JVM at runtime.
 
 ## Weak associations
 

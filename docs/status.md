@@ -3,8 +3,10 @@
 Use the patched JDK 25 or GraalVM 25.3.4.1 on macOS 26 arm64. Select Jam with
 `-XX:+UnlockExperimentalVMOptions -XX:+UseJamGC` and set equal initial and
 maximum heap sizes. The [build guide](build.md) gives the toolchain and commands.
+Native executables use `native-image --gc=jam` from the patched GraalVM; see
+[Native Image](native-image.md) for its separate sizing and pinning rules.
 
-## Heap and compiler
+## HotSpot heap and compiler
 
 Jam collects both generations. New objects normally enter young; minor
 collections retain young survivors or promote the whole live nursery when it
@@ -29,8 +31,9 @@ Use [jam.vm.Weak](thc-integration.md) to register weak associations and install
 JVM runnables. Any caller can pump the shared queue. There is no automatic
 finalizer thread or wakeup notification; the caller supplies the pump schedule.
 
-Tokens are JVM-local and never reused. Dead registrations currently retain
-metadata, so native memory use grows with lifetime registrations. Allocation
+Tokens are local to a JVM or Native Image isolate and never reused. Dead
+registrations currently retain metadata, so native memory use grows with
+lifetime registrations. Allocation
 failure while growing that metadata terminates instead of throwing Java
 `OutOfMemoryError`. Keep this in mind for long-running, weak-heavy workloads.
 
@@ -42,10 +45,6 @@ out of its build checkout.
 The thc owner can use the existing Java hooks to
 lower weak primitives and wrap guest finalizers in runnables. GHC C finalizers
 and weak-thread resurrection need additional runtime support.
-
-Native Image requires a separate SubstrateVM adapter. Its allocation lowering,
-stack maps, image heap, compressed encoding and pinning rules must agree with
-jam's representation. Selecting a HotSpot flag does not supply that adapter.
 
 Within the collector, the next work includes reclaiming weak metadata, indexed
 weak processing, selective promotion, adaptive capacities and parallel VM
