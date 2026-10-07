@@ -12,8 +12,11 @@ case "${1:-}" in
     source_dir="$root/upstream/labsjdk25"
     target=graal-builder-image
     pins="$root/config/source-pins.json"
-    case $(uname -s) in CYGWIN*) pins=$(cygpath -m "$pins");; esac
-    version=$("${JAM_PYTHON:-python3}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["labsjdk25"]["version"])' "$pins")
+    python_bin=${JAM_PYTHON:-python3}
+    case $(uname -s) in
+      CYGWIN*) pins=$(cygpath -m "$pins"); python_bin=$(cygpath -u "$python_bin");;
+    esac
+    version=$("$python_bin" -c 'import json,sys; print(json.load(open(sys.argv[1]))["labsjdk25"]["version"])' "$pins")
     version=${version%$'\r'}
     configure_flags+=("--with-version-string=$version" --with-build-user=jam-vm --with-vendor-name='Jam VM') ;;
   --with-*|--enable-*|--disable-*) source_dir="$root/upstream/jdk25"; target=images ;;
