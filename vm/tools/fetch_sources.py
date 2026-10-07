@@ -14,37 +14,14 @@ import urllib.request
 def main():
     args = argparse.ArgumentParser()
     mode = args.add_mutually_exclusive_group()
-    mode.add_argument('--full', action='store_true', help='Also fetch native and the complete pinned JDK archive')
-    mode.add_argument('--graal', action='store_true', help='Fetch native, LabsJDK, Graal and mx for the GraalVM build')
+    mode.add_argument('--full', action='store_true', help='Fetch the complete pinned JDK archive')
+    mode.add_argument('--graal', action='store_true', help='Fetch LabsJDK, Graal and mx for the GraalVM build')
     options = args.parse_args()
     root = Path(__file__).resolve().parents[1]
     pins = json.loads((root / "config/source-pins.json").read_text())
     upstream = root / "upstream"
     upstream.mkdir(exist_ok=True)
-    jam = upstream / "jam"
-    pin = pins["jam"]
-    if not jam.exists():
-        subprocess.run(["git", "clone", "--no-checkout", "--depth", "1",
-                        f"https://github.com/{pin['repo']}.git", str(jam)], check=True)
-        subprocess.run(["git", "-C", str(jam), "fetch", "--depth", "1", "origin", pin["commit"]], check=True)
-        subprocess.run(["git", "-C", str(jam), "checkout", "--detach", pin["commit"]], check=True)
-    head = subprocess.check_output(["git", "-C", str(jam), "rev-parse", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(["git", "-C", str(jam), "status", "--porcelain"])
-    if head != pin["commit"] or dirty:
-        raise SystemExit("Preserving changed upstream/jam; expected the clean manifest revision.")
-
     if options.full or options.graal:
-        native = upstream / 'native'
-        pin = pins['native']
-        if not native.exists():
-            subprocess.run(['git', 'clone', '--no-checkout', '--depth', '1',
-                            f"https://github.com/{pin['repo']}.git", str(native)], check=True)
-            subprocess.run(['git', '-C', str(native), 'fetch', '--depth', '1', 'origin', pin['commit']], check=True)
-            subprocess.run(['git', '-C', str(native), 'checkout', '--detach', pin['commit']], check=True)
-        native_head = subprocess.check_output(['git', '-C', str(native), 'rev-parse', 'HEAD'], text=True).strip()
-        native_dirty = subprocess.check_output(['git', '-C', str(native), 'status', '--porcelain'], text=True)
-        if native_head != pin['commit'] or native_dirty:
-            raise SystemExit('Preserving changed native checkout; it must match the clean pin.')
         label = 'labsjdk25' if options.graal else 'jdk25'
         archive = upstream / (label + '.tar.gz')
         pin = pins[label]
@@ -96,7 +73,7 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         for result in pool.map(fetch, jobs):
             print(result)
-    print(f"Verified jam at {head} and {len(jobs)} source files.")
+    print(f"Verified {len(jobs)} source files.")
 
 
 if __name__ == "__main__":

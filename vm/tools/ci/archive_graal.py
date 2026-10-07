@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from package_jdk import load_commands, SYSTEM
 from pe_runtime import check_pe_paths
-from platform_paths import java_tool
+from platform_paths import java_tool, NATIVE_BUILD
 
 JARS = {
     'truffle': ('truffle-api', 'truffle-runtime', 'truffle-compiler'),
@@ -81,13 +81,15 @@ def main():
             for suite, names in JARS.items() for name in names]
     jni = Path('build-jam') / ('jam_jni.dll' if platform.system() == 'Windows' else
                              'libjam_jni.dylib' if platform.system() == 'Darwin' else 'libjam_jni.so')
-    for relative in (*jars, jni):
+    for relative in jars:
         if not (ROOT / relative).is_file():
             raise SystemExit(f'Missing CI consumer input: {relative}')
+    if not (NATIVE_BUILD / jni.name).is_file():
+        raise SystemExit(f'Missing CI consumer input: {NATIVE_BUILD / jni.name}')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='jam-ci-archive-', dir=output.parent) as temporary:
         copy = Path(temporary) / jni.name
-        portable_jni(ROOT / jni, copy, home)
+        portable_jni(NATIVE_BUILD / jni.name, copy, home)
         archive_path = Path(temporary) / 'runtime.tar.gz'
         with tarfile.open(archive_path, 'w:gz', compresslevel=1) as archive:
             # Preserve the distribution's symlinks, executable modes and signed

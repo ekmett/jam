@@ -11,6 +11,8 @@ The thc owner can lower weak primitives to this API and wrap Haskell finalizers
 in runnables that enter thc. The collector owns reachability, retirement and
 at-most-once claims. The runnable owns entering and executing the guest code.
 
+Run the source-tree commands below from `vm/`.
+
 ## Build the API
 
 Use a JDK 25 installation and the platform C compiler:
@@ -41,8 +43,8 @@ Add the JAR to the host class path and its native directory to the library path:
 "$JAM_JAVA" -Xshare:off -Xms256m -Xmx256m \
   -XX:+UnlockExperimentalVMOptions -XX:+UseJamGC \
   --enable-native-access=ALL-UNNAMED \
-  -Djava.library.path=/absolute/path/to/jam-vm/build/bridge/lib \
-  -cp /absolute/path/to/jam-vm/build/bridge/jam-vm.jar:your-runtime.jar \
+  -Djava.library.path=/absolute/path/to/jam/vm/build/bridge/lib \
+  -cp /absolute/path/to/jam/vm/build/bridge/jam-vm.jar:your-runtime.jar \
   your.runtime.Main
 ```
 

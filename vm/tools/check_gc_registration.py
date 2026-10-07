@@ -4,6 +4,7 @@
 """Check selection, management identity, feature boundaries and original Epsilon."""
 import os
 from pathlib import Path
+from platform_paths import NATIVE_BUILD
 import subprocess
 from platform_paths import jdk_home
 
@@ -11,7 +12,7 @@ root = Path(__file__).resolve().parents[1]
 vm = Path(os.environ.get('JAM_JAVA', jdk_home() / 'bin/java'))
 common = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-Xlog:gc',
           '--enable-native-access=ALL-UNNAMED',
-          '-Djava.library.path=' + os.pathsep.join(str(root / p) for p in ('build/bridge/lib', 'build-jam')),
+          '-Djava.library.path=' + os.pathsep.join(map(str, (root / 'build/bridge/lib', NATIVE_BUILD))),
           '-cp', os.pathsep.join(str(root / p) for p in ('build-java-tests', 'build/bridge/jam-vm.jar'))]
 
 def check(name, flags, args, expected, success=True, absent=()):

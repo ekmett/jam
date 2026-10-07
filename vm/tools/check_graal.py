@@ -6,6 +6,7 @@
 import argparse
 import os
 from pathlib import Path
+from platform_paths import NATIVE_BUILD
 import subprocess
 import xml.etree.ElementTree as ET
 from build_jni_test import build as build_jni_test
@@ -41,7 +42,7 @@ flags = [
     '-Djdk.graal.CompilationFailureAction=ExitVM', '-Djdk.graal.ShowConfiguration=info',
     '-Djdk.graal.DumpPath=' + str(evidence / 'graal-dumps'),
     '--enable-native-access=ALL-UNNAMED',
-    '-Djava.library.path=' + os.pathsep.join(map(str, (home / 'lib/jam', root / 'build-jam', native))),
+    '-Djava.library.path=' + os.pathsep.join(map(str, (home / 'lib/jam', NATIVE_BUILD, native))),
     '-cp', os.pathsep.join((str(classes), str(jar))),
 ]
 cases = [

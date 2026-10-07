@@ -2,10 +2,50 @@
 
 jam-vm builds two things: a native jam backend and a patched JDK. The backend
 uses C++26 modules. The JDK uses its normal C++14 toolchain and calls the
-backend through [a C header](../adapter/jam_vm.h).
+backend through [a C header](https://github.com/ekmett/jam/blob/main/vm/adapter/jam_vm.h).
 
 Build on macOS 26 arm64, Linux x86_64 or Windows 11 x86_64. See
 [supported configurations](status.md) for the current limits.
+
+## CMake targets
+
+The root build produces the C++ library by default. Enable the runtime adapter
+with `-DJAM_BUILD_VM=ON`. Consumers link `jam::jam` or `jam::vm`; the names below
+are build targets, passed to `cmake --build`.
+
+| Target | Builds |
+| --- | --- |
+| `jam` | C++ collector library |
+| `jam-vm` | Shared C ABI adapter |
+| `jam-jdk` | Patched HotSpot JDK and a relocatable package |
+| `jam-graalvm` | Patched LabsJDK, Graal compiler and Native Image distribution |
+| `jam-substratevm` | The same GraalVM distribution, including SubstrateVM |
+
+The runtime targets fetch and prepare pinned sources when requested. They need
+the platform tools below, including a boot JDK. Neither configuring Jam nor
+building the adapter fetches a JDK. Runtime outputs live in `vm/build/jam-jdk`
+and `vm/build/graalvm`; external source trees and tool caches stay under `vm/`.
+Run runtime builds serially: they share prepared sources and bridge outputs.
+
+With those tools configured, from the repository root:
+
+```sh
+cmake -S . -B build -G Ninja -DJAM_BUILD_VM=ON -DCMAKE_CXX_COMPILER=clang++
+cmake --build build --target jam-jdk
+cmake -S . -B build -DJAM_VM_TEST_RUNTIMES=jdk
+ctest --test-dir build -L '^jdk$' --output-on-failure
+```
+
+Use `graalvm` or `substratevm` for the other CTest labels. Register several with
+`-DJAM_VM_TEST_RUNTIMES='jdk;graalvm;substratevm'`. These checks require the built
+runtime; CTest does not fetch or build it. Native checks are always available
+when `JAM_BUILD_TESTS=ON`; `ctest --test-dir build -L '^vm$'` selects the adapter.
+The runtime checks also build their Java/JNI or Native Image test fixtures.
+
+The scripts below remain useful for individual build stages. Run them from
+`vm/`. Their native wrapper configures the same root CMake project, with output
+in `vm/build-jam`. `JAM_NATIVE_BUILD` selects another adapter output directory
+for runtime scripts; CMake's runtime targets set it automatically.
 
 ## Tools
 
@@ -61,16 +101,17 @@ for GraalVM. The native test runner expects `ctest` next to the selected `cmake`
 ## Prepare the sources
 
 ```sh
-git clone https://github.com/ekmett/jam-vm.git
-cd jam-vm
+git clone https://github.com/ekmett/jam.git
+cd jam/vm
 python3 tools/fetch_sources.py --full
 python3 tools/prepare_jdk.py
 ```
 
-The [manifest](../config/source-pins.json) records the source revisions and
-archive hashes. Jam and native are used directly from their pinned revisions.
+The [manifest](https://github.com/ekmett/jam/blob/main/vm/config/source-pins.json) records the source revisions and
+archive hashes. Jam comes from the parent directory; CMake fetches native at
+the single revision pinned in the root build.
 Preparation extracts OpenJDK into `upstream/jdk25` and applies the
-[HotSpot patch](../patches/hotspot-jam.patch).
+[HotSpot patch](https://github.com/ekmett/jam/blob/main/vm/patches/hotspot-jam.patch).
 
 The JDK preparation script refuses to replace an existing source directory.
 Run it once in a fresh checkout. Repeated builds use the prepared sources.
@@ -152,8 +193,7 @@ python3 tools/check_patches.py
 overrides that choice. Without overrides it uses the host platform's fastdebug
 JDK image. These checks exercise the public API, Java reference behavior,
 barriers and generation transitions. Generated logs stay local and are ignored
-by Git. `check_patches.py` verifies that Jam matches its unmodified pin and
-reconstructs the HotSpot sources from the patch.
+by Git. `check_patches.py` reconstructs the HotSpot sources from the patch.
 
 ## Packaging
 
@@ -172,7 +212,7 @@ it also signs the modified binaries for local use. It preserves upstream
 licenses under `legal/`. The runtime prefix must contain `LICENSE.TXT` covering
 its bundled C++ libraries. Linux packages keep glibc and other OS libraries as
 system dependencies, so deploy on a compatible architecture and glibc version.
-The [Linux toolchain script](../tools/ci/setup_linux.sh) fetches the runtime
+The [Linux toolchain script](https://github.com/ekmett/jam/blob/main/vm/tools/ci/setup_linux.sh) fetches the runtime
 licenses from the matching LLVM source revision.
 
 For the weak API, put `lib/jam/jam-vm.jar` on the application's class path and

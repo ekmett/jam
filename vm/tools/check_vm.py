@@ -5,6 +5,7 @@
 
 import os
 from pathlib import Path
+from platform_paths import NATIVE_BUILD
 import subprocess
 import sys
 from platform_paths import jdk_home
@@ -29,7 +30,7 @@ subprocess.run([str(javac), '-cp', str(jar), '-d', str(classes),
 flags = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
          '-XX:JamWorkers=4', '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC', '-Xlog:gc',
          '--enable-native-access=ALL-UNNAMED',
-         '-Djava.library.path=' + os.pathsep.join(map(str, (root / 'build/bridge/lib', root / 'build-jam', native))),
+         '-Djava.library.path=' + os.pathsep.join(map(str, (root / 'build/bridge/lib', NATIVE_BUILD, native))),
          '-cp', os.pathsep.join((str(classes), str(jar)))]
 
 

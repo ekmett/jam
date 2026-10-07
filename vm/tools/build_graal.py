@@ -6,6 +6,7 @@
 import argparse
 import os
 from pathlib import Path
+from platform_paths import NATIVE_BUILD
 import platform
 import shutil
 import subprocess
@@ -40,7 +41,7 @@ def graal_environment(java_home=None):
     if platform.system() == 'Windows':
         # Intermediate mx/jlink images inherit jvm.dll but not Jam's DLL, which
         # is deliberately packaged separately from java.base.jmod.
-        environment['PATH'] = str(ROOT / 'build-jam') + os.pathsep + environment.get('PATH', '')
+        environment['PATH'] = str(NATIVE_BUILD) + os.pathsep + environment.get('PATH', '')
     return environment
 
 

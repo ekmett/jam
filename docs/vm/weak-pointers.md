@@ -140,7 +140,7 @@ Registration tokens are stable native IDs. They are not object addresses and
 do not serve as strong JNI handles to `K`, `V` or `F`. Dropping the token does
 not cancel finalization.
 
-The public [Java API](../bridge/java/jam/vm/Weak.java) exposes the protocol:
+The public [Java API](https://github.com/ekmett/jam/blob/main/vm/bridge/java/jam/vm/Weak.java) exposes the protocol:
 
 | Operation | Effect |
 | --- | --- |

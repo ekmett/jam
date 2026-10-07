@@ -1,34 +1,32 @@
 # SPDX-FileCopyrightText: 2026 Edward Kmett
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
-name: Build and test
+name: Managed runtimes
 
 on:
   push:
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - 'tools/build_docs.py'
-      - 'tools/check_docs.py'
-      - '.github/workflows/docs.yml'
   pull_request:
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - 'tools/build_docs.py'
-      - 'tools/check_docs.py'
-      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: vm-ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   JAM_JOBS: '3'
+
+defaults:
+  run:
+    working-directory: vm
 
 jobs:
   native_windows:
@@ -38,9 +36,11 @@ jobs:
     defaults:
       run:
         shell: pwsh
+        working-directory: vm
     steps:
       - &windows_checkout
         name: Prepare Windows checkout
+        working-directory: .
         run: |
           Set-ItemProperty 'HKLM:/SYSTEM/CurrentControlSet/Control/FileSystem' -Name LongPathsEnabled -Type DWord -Value 1
           git config --global core.autocrlf false
@@ -53,16 +53,11 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: windows-2022-x86_64-native-${{ hashFiles('tools/ci/setup_windows.ps1') }}
+          key: windows-2022-x86_64-native-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
       - name: Install pinned build dependencies
         timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 native
-      - name: Fetch native sources
-        run: |
-          . "$env:JAM_CI_TOOLS/env.ps1"
-          python tools/ci/fetch_native.py
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Build and test native collector
+      - name: Managed runtimes native collector
         run: |
           . "$env:JAM_CI_TOOLS/env.ps1"
           $env:JAM_BOOT_JDK = $null
@@ -71,7 +66,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           ./build-jam/jam-generational-test.exe --require-simd
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Build and test guest bridge on stock Java
+      - name: Managed runtimes guest bridge on stock Java
         run: |
           . "$env:JAM_CI_TOOLS/env.ps1"
           python tools/build_bridge.py
@@ -110,18 +105,16 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: ${{ matrix.cache }}-native-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+          key: ${{ matrix.cache }}-native-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install pinned build dependencies
         run: bash tools/ci/setup_${{ matrix.platform }}.sh native
-      - name: Fetch native sources
-        run: python3 tools/ci/fetch_native.py
-      - name: Build and test native collector
+      - name: Managed runtimes native collector
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           env -u JAM_BOOT_JDK bash tools/build_native.sh
           build-jam/jam-vm-test --require-simd
           build-jam/jam-generational-test --require-simd
-      - name: Build and test guest bridge on stock Java
+      - name: Managed runtimes guest bridge on stock Java
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           python3 tools/build_bridge.py
@@ -158,8 +151,8 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: ${{ matrix.cache }}-hotspot-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
-          restore-keys: ${{ matrix.cache }}-native-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+          key: ${{ matrix.cache }}-hotspot-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
+          restore-keys: ${{ matrix.cache }}-native-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install pinned build dependencies
         run: bash tools/ci/setup_${{ matrix.platform }}.sh hotspot
       - name: Prepare pinned JDK sources
@@ -220,10 +213,10 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: ${{ matrix.cache }}-graal-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+          key: ${{ matrix.cache }}-graal-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
           restore-keys: |
-            ${{ matrix.cache }}-hotspot-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
-            ${{ matrix.cache }}-native-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+            ${{ matrix.cache }}-hotspot-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
+            ${{ matrix.cache }}-native-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install pinned build dependencies
         run: bash tools/ci/setup_${{ matrix.platform }}.sh graal
       - name: Prepare pinned LabsJDK and Graal sources
@@ -320,10 +313,10 @@ jobs:
         if: matrix.suite == 'GraalVM runtime'
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: ${{ matrix.cache }}-graal-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+          key: ${{ matrix.cache }}-graal-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
           restore-keys: |
-            ${{ matrix.cache }}-hotspot-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
-            ${{ matrix.cache }}-native-${{ hashFiles(format('tools/ci/setup_{0}.sh', matrix.platform)) }}
+            ${{ matrix.cache }}-hotspot-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
+            ${{ matrix.cache }}-native-${{ hashFiles(format('vm/tools/ci/setup_{0}.sh', matrix.platform)) }}
       - name: Install matching stock compiler
         if: matrix.suite == 'GraalVM runtime'
         run: bash tools/ci/setup_${{ matrix.platform }}.sh graal
@@ -371,6 +364,7 @@ jobs:
     defaults:
       run:
         shell: pwsh
+        working-directory: vm
     steps:
       - *windows_checkout
       - uses: actions/checkout@v7.0.1
@@ -381,8 +375,8 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: windows-2022-x86_64-hotspot-${{ hashFiles('tools/ci/setup_windows.ps1') }}
-          restore-keys: windows-2022-x86_64-native-${{ hashFiles('tools/ci/setup_windows.ps1') }}
+          key: windows-2022-x86_64-hotspot-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
+          restore-keys: windows-2022-x86_64-native-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
       - name: Install pinned build dependencies
         timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 hotspot
@@ -434,6 +428,7 @@ jobs:
     defaults:
       run:
         shell: pwsh
+        working-directory: vm
     steps:
       - *windows_checkout
       - uses: actions/checkout@v7.0.1
@@ -444,10 +439,10 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: windows-2022-x86_64-graal-${{ hashFiles('tools/ci/setup_windows.ps1') }}
+          key: windows-2022-x86_64-graal-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
           restore-keys: |
-            windows-2022-x86_64-hotspot-${{ hashFiles('tools/ci/setup_windows.ps1') }}
-            windows-2022-x86_64-native-${{ hashFiles('tools/ci/setup_windows.ps1') }}
+            windows-2022-x86_64-hotspot-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
+            windows-2022-x86_64-native-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
       - name: Install pinned build dependencies
         timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 graal
@@ -506,6 +501,7 @@ jobs:
     defaults:
       run:
         shell: pwsh
+        working-directory: vm
     steps:
       - *windows_checkout
       - uses: actions/checkout@v7.0.1
@@ -529,10 +525,10 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/jam-vm-toolchain
-          key: windows-2022-x86_64-graal-${{ hashFiles('tools/ci/setup_windows.ps1') }}
+          key: windows-2022-x86_64-graal-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
           restore-keys: |
-            windows-2022-x86_64-hotspot-${{ hashFiles('tools/ci/setup_windows.ps1') }}
-            windows-2022-x86_64-native-${{ hashFiles('tools/ci/setup_windows.ps1') }}
+            windows-2022-x86_64-hotspot-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
+            windows-2022-x86_64-native-${{ hashFiles('vm/tools/ci/setup_windows.ps1') }}
       - name: Install runtime check dependencies
         timeout-minutes: 10
         run: ./tools/ci/setup_windows.ps1 graal

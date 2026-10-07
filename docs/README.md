@@ -15,3 +15,5 @@ parts you might want to customize.
 - [Single-base addressing](single-base.md): accepted design and remaining integration work.
 - [Hosting a runtime](hosting.md): external roots, collection phases and stable aliases.
 - [Building](building.md): toolchains, CMake consumers, benchmarks and Doxygen.
+
+- [Managed runtimes](../vm/README.md): Jam in HotSpot, GraalVM and Native Image.

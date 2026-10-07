@@ -4,10 +4,12 @@
 """Locate the native fastdebug JDK image on supported build hosts."""
 
 import argparse
+import os
 from pathlib import Path
 import platform
 
 ROOT = Path(__file__).resolve().parents[1]
+NATIVE_BUILD = Path(os.environ.get('JAM_NATIVE_BUILD', ROOT / 'build-jam')).resolve()
 
 
 def java_tool(home, name):

@@ -2197,7 +2197,7 @@ index 00000000..918be93c
 +}
 diff --git a/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamNative.java b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamNative.java
 new file mode 100644
-index 00000000..c3a96635
+index 00000000..8801bb5a
 --- /dev/null
 +++ b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamNative.java
 @@ -0,0 +1,94 @@
@@ -2221,7 +2221,7 @@ index 00000000..c3a96635
 +
 +/** The same opaque C ABI used by HotSpot. All calls run with GC or allocation ownership. */
 +@CContext(JamNative.Directives.class)
-+@CLibrary(value = "jam_vm", requireStatic = false)
++@CLibrary(value = "jam-vm", requireStatic = false)
 +final class JamNative {
 +    static final class Directives implements CContext.Directives {
 +        @Override public boolean isInConfiguration() { return SubstrateOptions.useJamGC(); }
@@ -2837,7 +2837,7 @@ index 00000000..4412594c
 +}
 diff --git a/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamRuntimeBundleFeature.java b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamRuntimeBundleFeature.java
 new file mode 100644
-index 00000000..33c9701d
+index 00000000..f43a762b
 --- /dev/null
 +++ b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamRuntimeBundleFeature.java
 @@ -0,0 +1,82 @@
@@ -2875,12 +2875,12 @@ index 00000000..33c9701d
 +        Path manifest = libraryDirectory.resolve("runtime-libraries.txt");
 +        try {
 +            libraries = Files.isRegularFile(manifest) ? Files.readAllLines(manifest) :
-+                            darwin ? List.of("libjam_vm.dylib", "libc++.1.dylib", "libc++abi.1.dylib", "libunwind.1.dylib") : List.of();
++                            darwin ? List.of("libjam-vm.dylib", "libc++.1.dylib", "libc++abi.1.dylib", "libunwind.1.dylib") : List.of();
 +        } catch (IOException error) {
 +            throw UserError.abort("Unable to read packaged Jam runtime manifest %s: %s", manifest, error.getMessage());
 +        }
 +        UserError.guarantee(!libraries.isEmpty() && libraries.stream().distinct().count() == libraries.size() &&
-+                        libraries.contains(windows ? "jam_vm.dll" : darwin ? "libjam_vm.dylib" : "libjam_vm.so"), "Missing or invalid Jam runtime manifest: %s", manifest);
++                        libraries.contains(windows ? "jam-vm.dll" : darwin ? "libjam-vm.dylib" : "libjam-vm.so"), "Missing or invalid Jam runtime manifest: %s", manifest);
 +        for (String library : libraries) {
 +            UserError.guarantee(library.matches(windows ? "[A-Za-z0-9_+.-]+\\.dll" : "lib[A-Za-z0-9_+.-]+"), "Invalid Jam runtime library name: %s", library);
 +            UserError.guarantee(Files.isRegularFile(libraryDirectory.resolve(library)), "Missing packaged Jam runtime: %s", libraryDirectory.resolve(library));

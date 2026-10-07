@@ -1,8 +1,4 @@
 {
-  "jam": {
-    "repo": "ekmett/jam",
-    "commit": "dcc3cf0a2cc63f82fc01295d1fae1a238e09a4b4"
-  },
   "jdk25": {
     "repo": "openjdk/jdk",
     "commit": "6c48f4ed707bf0b15f9b6098de30db8aae6fa40f",
@@ -86,10 +82,6 @@
       "libraries/ghc-internal/src/GHC/Internal/Weak.hs": "ddf8fda38abdde53f5aab351f30f9366c1c259f958caf00117400e8987f38a17",
       "libraries/base/src/System/Mem/Weak.hs": "6b3a8b3a2c55bedf3d8a2aea480aa80f46ae85593e157399701c098721a7e11a"
     }
-  },
-  "native": {
-    "repo": "ekmett/native",
-    "commit": "4f5f6533417b2951b063581a3252c63de0024102"
   },
   "labsjdk25": {
     "repo": "graalvm/labs-openjdk",

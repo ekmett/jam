@@ -85,6 +85,9 @@ puts the names in scope as above; use `import jam;` for qualified names.
 The [topic guides](docs/README.md) go deeper; the
 [API reference](https://ekmett.github.io/jam/) documents the individual operations.
 
+Jam also backs HotSpot, GraalVM and Native Image. The [runtime integration](vm/README.md)
+lives here too; the default build is still just the C++ library.
+
 ## License and contact
 
 See [LICENSE.md](LICENSE.md) for the dual BSD-2-Clause/Apache-2.0 license and

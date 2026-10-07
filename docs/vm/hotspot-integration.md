@@ -2,7 +2,7 @@
 
 HotSpot owns Java object layout, roots, safepoints and reference processing.
 Jam owns storage, marking and movement. The adapter connects them through
-[a small C interface](../adapter/jam_vm.h), compiled on each side with that
+[a small C interface](https://github.com/ekmett/jam/blob/main/vm/adapter/jam_vm.h), compiled on each side with that
 side's toolchain.
 
 The backend is C++26 module `thc.jam`, with `:heap` and `:weak` partitions.
@@ -26,7 +26,7 @@ identity and WhiteBox identity. Epsilon's original files are restored and
 
 These tables and types are compiled into HotSpot. A native library cannot
 register a new collector in a stock JVM. Once this integration has been built,
-ABI-compatible backend changes can rebuild `libjam_vm` alone. Changes to the
+ABI-compatible backend changes can rebuild `libjam-vm` alone. Changes to the
 host interfaces still require rebuilding `libjvm`.
 
 ## Reserving the heap
@@ -147,7 +147,7 @@ Java and generalized weak policy both use jam's actual marks and movement.
 ## Compiler support
 
 Interpreter, C1 and C2 use Jam's card barriers. The
-[Graal patch](../patches/graal-jam.patch) recognizes Jam's exported collector
+[Graal patch](https://github.com/ekmett/jam/blob/main/vm/patches/graal-jam.patch) recognizes Jam's exported collector
 identity and selects the generic card-table barrier set. Both Java Graal and
 libgraal use that selection. The VM checks the actual compiler's GC support
 before installing Java code, including code returned by a libgraal isolate.
@@ -179,4 +179,4 @@ The C header is a deliberate foreign-language boundary. Its declarations must
 remain consumable by the JDK's C++14 translation units and C JNI callers. C++26
 module types belong behind that boundary. See [the build guide](build.md) for
 toolchain selection. The phase contracts are declared in
-[`jam_vm.h`](../adapter/jam_vm.h).
+[`jam_vm.h`](https://github.com/ekmett/jam/blob/main/vm/adapter/jam_vm.h).

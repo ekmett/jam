@@ -7,6 +7,7 @@ import argparse
 import filecmp
 import os
 from pathlib import Path
+from platform_paths import NATIVE_BUILD
 import platform
 import re
 import shutil
@@ -17,7 +18,7 @@ from pe_runtime import (check_import_library, check_pe_paths, find_dll, pe_comma
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM = ('/usr/lib/', '/System/Library/')
-DARWIN_RUNTIME = ('libjam_vm.dylib', 'libc++.1.dylib', 'libc++abi.1.dylib', 'libunwind.1.dylib')
+DARWIN_RUNTIME = ('libjam-vm.dylib', 'libc++.1.dylib', 'libc++abi.1.dylib', 'libunwind.1.dylib')
 CPP_RUNTIME = re.compile(r'lib(?:c\+\+|c\+\+abi|unwind|stdc\+\+)\.so(?:\..+)?$')
 
 
@@ -44,7 +45,7 @@ def runtime_libraries(directory):
     if manifest.is_file():
         names = tuple(manifest.read_text().splitlines())
         windows = platform.system() == 'Windows'
-        collector = 'jam_vm.dll' if windows else 'libjam_vm.dylib' if platform.system() == 'Darwin' else 'libjam_vm.so'
+        collector = 'jam-vm.dll' if windows else 'libjam-vm.dylib' if platform.system() == 'Darwin' else 'libjam-vm.so'
         pattern = r'[a-z0-9_+.-]+\.dll' if windows else r'lib[A-Za-z0-9_+.-]+'
         if collector not in names or len(set(name.casefold() if windows else name for name in names)) != len(names) or any(
                 not re.fullmatch(pattern, name) for name in names):
@@ -228,43 +229,43 @@ def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_li
     if output.is_relative_to(java_home):
         raise SystemExit('The output must be outside the source JDK.')
     libraries = {
-        'libjam_vm.dylib': ROOT / 'build-jam/libjam_vm.dylib',
+        'libjam-vm.dylib': NATIVE_BUILD / 'libjam-vm.dylib',
         'libjam_bridge.dylib': ROOT / 'build/bridge/lib/libjam_bridge.dylib',
         'libc++.1.dylib': runtime / 'lib/c++/libc++.1.dylib',
         'libc++abi.1.dylib': runtime / 'lib/c++/libc++abi.1.dylib',
         'libunwind.1.dylib': runtime / 'lib/unwind/libunwind.1.dylib',
     } if system == 'Darwin' else {
-        'libjam_vm.so': ROOT / 'build-jam/libjam_vm.so',
+        'libjam-vm.so': NATIVE_BUILD / 'libjam-vm.so',
         'libjam_bridge.so': ROOT / 'build/bridge/lib/libjam_bridge.so',
     }
     import_library = None
     if system == 'Windows':
         libraries = {
-            'jam_vm.dll': ROOT / 'build-jam/jam_vm.dll',
+            'jam-vm.dll': NATIVE_BUILD / 'jam-vm.dll',
             'jam_bridge.dll': ROOT / 'build/bridge/lib/jam_bridge.dll',
         }
-        import_library = ROOT / 'build-jam/jam_vm.lib'
+        import_library = NATIVE_BUILD / 'jam-vm.lib'
         for source in (*libraries.values(), import_library):
             if not source.is_file():
                 raise SystemExit(f'Missing package input: {source}')
         libraries.update(windows_runtime_libraries(libraries, runtime, java_home))
         check_import_library(import_library, pe_machine(java_home / 'bin/java.exe'))
-        introduced = [name for name, source in libraries.items() if not name.startswith('jam_')
+        introduced = [name for name, source in libraries.items() if not name.startswith(('jam_', 'jam-'))
                       and ((existing := find_dll(java_home / 'bin', name)) is None
                            or not filecmp.cmp(source, existing, shallow=False))]
         if introduced and not runtime_licenses:
             raise SystemExit('Pass --runtime-license with the genuine MSVC redistributable notice for: '
                              + ', '.join(introduced))
     if system == 'Linux':
-        if not libraries['libjam_vm.so'].is_file():
-            raise SystemExit(f'Missing package input: {libraries["libjam_vm.so"]}')
-        libraries.update(linux_runtime_libraries(libraries['libjam_vm.so'], runtime))
+        if not libraries['libjam-vm.so'].is_file():
+            raise SystemExit(f'Missing package input: {libraries["libjam-vm.so"]}')
+        libraries.update(linux_runtime_libraries(libraries['libjam-vm.so'], runtime))
     native_runtime = [name for name in libraries if not name.startswith(('libjam_bridge.', 'jam_bridge.'))]
     licenses = {
         'LICENSE.md': ROOT / 'LICENSE.md',
         'NOTICE.md': ROOT / 'NOTICE.md',
-        'jam-LICENSE.md': ROOT / 'upstream/jam/LICENSE.md',
-        'native-LICENSE.md': ROOT / 'upstream/native/LICENSE.md',
+        'jam-LICENSE.md': ROOT.parent / 'LICENSE.md',
+        'native-LICENSE.md': NATIVE_BUILD / 'native-LICENSE.md',
     }
     if system == 'Windows':
         if compiler_runtime_license is None:
