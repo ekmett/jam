@@ -12,7 +12,7 @@ import tempfile
 
 with tempfile.TemporaryDirectory(prefix='jam-prepare-test-') as temporary:
     root = Path(temporary)
-    for name in ('tools', 'config', 'patches', 'upstream/graal25'):
+    for name in ('tools', 'config', 'patches', 'graal/new', 'upstream/graal25'):
         (root / name).mkdir(parents=True)
     script = root / 'tools/prepare_graal.py'
     shutil.copy2(Path(__file__).resolve().parents[1] / 'tools/prepare_graal.py', script)
@@ -32,10 +32,22 @@ with tempfile.TemporaryDirectory(prefix='jam-prepare-test-') as temporary:
     (source / 'input').write_text('after\n')
     # Full hashes differ from git diff's default serialization.
     (root / 'patches/graal-jam.patch').write_bytes(git('diff', '--full-index'))
+    (root / 'graal/new/Added.java').write_text('original addition\n')
     git('restore', 'input')
     subprocess.run([sys.executable, str(script)], check=True)
     subprocess.run([sys.executable, str(script), '--check'], check=True)
     assert (source / 'input').read_text() == 'after\n'
+    assert (source / 'new/Added.java').read_text() == 'original addition\n'
+    (root / 'graal/new/Added.java').write_text('edited source\n')
+    subprocess.run([sys.executable, str(script)], check=True)
+    assert (source / 'new/Added.java').read_text() == 'edited source\n'
+    (source / 'new/Added.java').write_text('upstream edit\n')
+    subprocess.run([sys.executable, str(script), '--export'], check=True)
+    assert (root / 'graal/new/Added.java').read_text() == 'upstream edit\n'
+    assert 'Added.java' not in (root / 'patches/graal-jam.patch').read_text()
+    (root / 'graal/new/Added.java').unlink()
+    subprocess.run([sys.executable, str(script)], check=True)
+    assert not (source / 'new/Added.java').exists()
     (source / 'input').write_text('local edit\n')
     result = subprocess.run([sys.executable, str(script)], capture_output=True)
     assert result.returncode != 0

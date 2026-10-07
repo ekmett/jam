@@ -299,3 +299,19 @@ Core and adapter checks run on pull requests. Full HotSpot, GraalVM and
 SubstrateVM builds run on `main`, manual dispatch, or a pull request carrying
 the `runtime-validation` label. They use the same runtime targets above, with
 separate Graal consumers sharing one built distribution per platform.
+
+
+## Editing the Graal integration
+
+Jam's added Java files live in [`vm/graal/`](https://github.com/ekmett/jam/tree/main/vm/graal),
+with paths relative to the Graal source root. Edit them directly. The
+[`graal-jam.patch`](https://github.com/ekmett/jam/blob/main/vm/patches/graal-jam.patch)
+contains only changes to existing upstream files. Preparation combines both.
+
+From `vm/`, run `python3 tools/prepare_graal.py` after an edit. It updates a
+previously prepared tree only when that tree still matches its recorded state;
+unexpected local edits are preserved. `--check` verifies without updating it.
+
+To work inside `upstream/graal25/` instead, stage any new files there, then run
+`python3 tools/export_patches.py --graal` from `vm/`. That writes additions back
+to `graal/` and upstream edits back to the patch. Do not edit both copies at once.

@@ -2,13 +2,20 @@
 # SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Export the HotSpot adaptation against the pinned source archive."""
+import argparse
 import difflib
+import sys
 import os
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--graal', action='store_true', help='Export Graal source files and upstream edits')
+if parser.parse_args().graal:
+    subprocess.run([sys.executable, str(root / 'tools/prepare_graal.py'), '--export'], check=True)
+    raise SystemExit(0)
 def difference(before, after, name):
     return ''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
                                        fromfile='a/' + name, tofile='b/' + name))
