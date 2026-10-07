@@ -2,6 +2,8 @@
 
 [![Build](https://github.com/ekmett/jam-vm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ekmett/jam-vm/actions/workflows/ci.yml)
 [![Docs](https://github.com/ekmett/jam-vm/actions/workflows/docs.yml/badge.svg?branch=main)](https://ekmett.github.io/jam-vm/)
+![C++](https://img.shields.io/badge/C%2B%2B-00599C?style=flat&logo=c%2B%2B&logoColor=white)
+![Java](https://img.shields.io/badge/Java-ED8B00?style=flat&logo=openjdk&logoColor=white)
 
 This project adapts [jam](https://github.com/ekmett/jam) to collect Java objects
 on HotSpot and Native Image, with both Java reference processing and GHC-style
