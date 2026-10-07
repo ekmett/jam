@@ -5,6 +5,7 @@
 import hashlib
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -20,7 +21,8 @@ if destination.exists():
     raise SystemExit(f'Preserving existing upstream/{label}; use a fresh workspace to reproduce.')
 destination.mkdir()
 subprocess.run(['tar', '-xzf', str(archive), '-C', str(destination), '--strip-components=1'], check=True)
-subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-i', str(root / 'patches/hotspot-jam.patch')], cwd=destination, check=True)
+patch = os.environ.get('JAM_PATCH', 'patch')
+subprocess.run([patch, '--batch', '--fuzz=0', '-p1', '-i', str(root / 'patches/hotspot-jam.patch')], cwd=destination, check=True)
 if label == 'labsjdk25':
-    subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-i', str(root / 'patches/labsjdk-compat.patch')], cwd=destination, check=True)
+    subprocess.run([patch, '--batch', '--fuzz=0', '-p1', '-i', str(root / 'patches/labsjdk-compat.patch')], cwd=destination, check=True)
 print(destination)

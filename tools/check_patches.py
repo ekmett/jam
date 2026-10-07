@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Check the pinned Jam extension and reproduce the HotSpot adaptation from its patch."""
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -35,14 +36,14 @@ with tarfile.open(root / 'upstream' / (label + '.tar.gz')) as archive:
             if name in members:
                 target.write_bytes(archive.extractfile(members[name]).read())
         for patch in patches:
-            subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-i', str(patch)], cwd=stage, check=True)
+            subprocess.run([os.environ.get('JAM_PATCH', 'patch'), '--batch', '--fuzz=0', '-p1', '-i', str(patch)], cwd=stage, check=True)
         for name in paths:
             if (stage / name).read_bytes() != (adapted / name).read_bytes():
                 raise SystemExit(f'Patch round trip differs: {name}')
     print(f'{", ".join(patch.name for patch in patches)}: {len(paths)} files reproduced exactly')
     epsilon_prefix = 'src/hotspot/share/gc/epsilon/'
     expected = {name for name in members if name.startswith(epsilon_prefix)}
-    actual = {str(p.relative_to(adapted))
+    actual = {p.relative_to(adapted).as_posix()
               for p in (adapted / epsilon_prefix).rglob('*') if p.is_file()}
     if actual != expected:
         raise SystemExit('Epsilon source file set differs from the pinned original')

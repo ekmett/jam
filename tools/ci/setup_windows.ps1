@@ -105,6 +105,7 @@ if (!$env:JAM_PYTHON) { $env:JAM_PYTHON = (Get-Command python).Source }
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $env:JAM_BASH = "$prefix/cygwin/bin/bash.exe"
+$env:JAM_PATCH = "$prefix/cygwin/bin/patch.exe"
 $git = Split-Path (Get-Command git).Source -Parent
 # Native tools must find MSVC's link.exe before Cygwin's hard-link utility.
 # The HotSpot wrapper supplies the opposite ordering inside Cygwin.

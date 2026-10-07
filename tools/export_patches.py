@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Export the HotSpot adaptation against the pinned source archive."""
 import difflib
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -54,11 +55,11 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
         'src/jdk.hotspot.agent/share/classes/sun/jvm/hotspot/gc/jam/JamHeap.java',
         'src/hotspot/share/include/jvm.h']]
     patch = ''
-    for p in sorted(paths):
-        name = str(p.relative_to(root / 'upstream/jdk25'))
+    for p in sorted(paths, key=lambda p: p.as_posix()):
+        name = p.relative_to(root / 'upstream/jdk25').as_posix()
         before = archive.extractfile(members[name]).read().decode() if name in members else ''
         patch += difference(before, p.read_text(), name)
-(root / 'patches/hotspot-jam.patch').write_text(patch)
+(root / 'patches/hotspot-jam.patch').write_text(patch, newline='\n')
 print('Exported the HotSpot source patch.')
 labs_archive = root / 'upstream/labsjdk25.tar.gz'
 if labs_archive.exists():
@@ -75,9 +76,9 @@ if labs_archive.exists():
             # Compare with the common Jam patch already applied to these files.
             shared = ''.join('--- a/' + section for section in patch.split('--- a/')[1:]
                              if section.splitlines()[0] in names)
-            subprocess.run(['patch', '--batch', '--fuzz=0', '-p1'], cwd=stage,
-                           input=shared, text=True, check=True)
+            subprocess.run([os.environ.get('JAM_PATCH', 'patch'), '--batch', '--fuzz=0', '-p1'], cwd=stage,
+                           input=shared.encode(), check=True)
             compatibility = ''.join(difference((stage / name).read_text(),
                 (root / 'upstream/labsjdk25' / name).read_text(), name) for name in names)
-            (root / 'patches/labsjdk-compat.patch').write_text(compatibility)
+            (root / 'patches/labsjdk-compat.patch').write_text(compatibility, newline='\n')
     print('Exported the LabsJDK compatibility patch.')
