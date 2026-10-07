@@ -10,8 +10,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(JAM_BUILD_TESTS "Build heap and tracing checks" ${PROJECT_IS_TOP_LEVEL})
 option(JAM_BUILD_BENCHMARKS "Build the compaction benchmark" OFF)
+option(JAM_BUILD_VM "Build the managed-runtime adapter and runtime targets" OFF)
 option(JAM_BUILD_DOCS "Build Doxygen documentation" OFF)
 option(JAM_CONTEXT_X28 "Reserve AArch64 x28 for the implicit heap instead of TLS" OFF)
+
+if(JAM_BUILD_VM AND JAM_CONTEXT_X28)
+  message(FATAL_ERROR "The VM adapter requires TLS: HotSpot and SubstrateVM reserve x28")
+endif()
 
 if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Darwin|Linux|Windows)$")
   message(FATAL_ERROR "jam requires macOS, Linux or Windows virtual-memory aliases")
@@ -169,6 +174,10 @@ if(JAM_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+if(JAM_BUILD_VM)
+  enable_language(C)
+  add_subdirectory(vm)
+endif()
 if(JAM_BUILD_BENCHMARKS)
   add_executable(heap-bench heap-bench.cc)
   target_link_libraries(heap-bench PRIVATE jam::jam)
@@ -214,8 +223,10 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
   set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
   set(DOXYGEN_QUIET YES)
+  file(GLOB jam_vm_guides CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/vm/*.md")
   doxygen_add_docs(jam-docs jam.ccm jam_unqualified.ccm heap.ccm units.ccm simd.ccm README.md LICENSE.md
     docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md docs/finalizers.md
+    ${jam_vm_guides} vm/README.md vm/NOTICE.md
     docs/simd.md docs/collector.md docs/single-base.md docs/hosting.md docs/building.md
     COMMENT "Build jam API documentation")
   # Removed declarations must not leave stale pages in the generated reference.

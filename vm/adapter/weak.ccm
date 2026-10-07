@@ -1,0 +1,106 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+
+module;
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <vector>
+export module thc.jam:weak;
+
+export namespace thc {
+/// \brief Generalized weak associations with irreversible batch retirement.
+/// The collector supplies liveness, tracing and forwarding. During a minor its
+/// liveness predicate treats old keys as live. IDs never move or get reused.
+/// \pre Registry access is serialized with mutators and the collection epoch.
+class weak_registry {
+  enum class state { active, queued, running, dead };
+  struct association {
+    std::uint32_t key, value, finalizer;
+    state status = state::active;
+    bool activated = false;
+  };
+  std::vector<association> entries;
+public:
+  /// \brief Register a conditional value and an optional managed finalizer.
+  [[nodiscard]] std::uint64_t create(std::uint32_t key, std::uint32_t value,
+                                    std::uint32_t finalizer) noexcept {
+    entries.push_back({key, value, finalizer});
+    return entries.size();
+  }
+  /// \brief Read an active value; retirement permanently makes this return null.
+  [[nodiscard]] std::uint32_t value(std::uint64_t id) const noexcept {
+    if (!id || id > entries.size()) return 0;
+    auto const & entry = entries[id - 1];
+    return entry.status == state::active ? entry.value : 0;
+  }
+  /// \brief Reset live-key activation at the start of a marking epoch.
+  void begin() noexcept { for (auto & entry : entries) entry.activated = false; }
+  /// \brief Retain queued and running finalizers, including during nested GC.
+  template<class Trace> void roots(Trace && trace) const noexcept {
+    std::vector<std::uint32_t> roots;
+    for (auto const & entry : entries)
+      if (entry.status == state::queued || entry.status == state::running)
+        roots.push_back(entry.finalizer);
+    trace(std::span<std::uint32_t const>{roots});
+  }
+  /// \brief Reach the least live-key fixed point, then freeze every dead decision.
+  /// No newly dead finalizer is traced here: the VM first clears Java weak refs.
+  /// An association's own value-to-key cycle cannot activate that association.
+  template<class Marked, class Trace> void close(Marked && marked, Trace && trace) noexcept {
+    std::vector<std::uint32_t> roots;
+    do {
+      roots.clear();
+      for (auto & entry : entries) {
+        if (entry.status != state::active || entry.activated || !marked(entry.key)) continue;
+        entry.activated = true;
+        roots.push_back(entry.value);
+        roots.push_back(entry.finalizer);
+      }
+      trace(std::span<std::uint32_t const>{roots});
+    } while (!roots.empty());
+    for (auto & entry : entries) {
+      if (entry.status != state::active || entry.activated) continue;
+      entry.status = entry.finalizer ? state::queued : state::dead;
+      entry.key = entry.value = 0;
+    }
+  }
+  /// \brief Repair the registry after successful forwarding-table preparation.
+  template<class Forward> void forward(Forward && forward) noexcept {
+    for (auto & entry : entries) {
+      entry.key = forward(entry.key);
+      entry.value = forward(entry.value);
+      entry.finalizer = forward(entry.finalizer);
+    }
+  }
+  /// \brief Claim one queued finalizer exactly once; zero means the queue is empty.
+  [[nodiscard]] std::uint32_t take(std::uint64_t & id) noexcept {
+    for (std::size_t n = 0; n != entries.size(); ++n) {
+      auto & entry = entries[n];
+      if (entry.status != state::queued) continue;
+      entry.status = state::running;
+      id = n + 1;
+      return entry.finalizer;
+    }
+    id = 0;
+    return 0;
+  }
+  /// \brief Explicit retirement shares the same at-most-once claim as take().
+  [[nodiscard]] std::uint32_t finalize(std::uint64_t id) noexcept {
+    if (!id || id > entries.size()) return 0;
+    auto & entry = entries[id - 1];
+    if (entry.status != state::active && entry.status != state::queued) return 0;
+    entry.status = entry.finalizer ? state::running : state::dead;
+    entry.key = entry.value = 0;
+    return entry.finalizer;
+  }
+  /// \brief Release a claimed finalizer root after the guest runtime finishes it.
+  void complete(std::uint64_t id) noexcept {
+    if (!id || id > entries.size()) return;
+    auto & entry = entries[id - 1];
+    if (entry.status != state::running) return;
+    entry.status = state::dead;
+    entry.finalizer = 0;
+  }
+};
+}
