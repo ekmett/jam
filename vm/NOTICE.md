@@ -8,7 +8,7 @@ licenses. Changes to OpenJDK in `patches/hotspot-jam.patch` and
 OpenJDK files.
 
 Changes to Graal in `patches/graal-jam.patch` retain the notices and terms of
-the corresponding Graal files. Added sources in `graal/` retain their own
+the corresponding Graal files. Added sources in `src/graal/` retain their own
 per-file license notices. Packaged runtimes include the upstream JDK and
 Graal notices, Jam and native licenses, and the LLVM runtime license under
 `legal/`. LLVM's libc++, libc++abi and libunwind use Apache-2.0 with LLVM

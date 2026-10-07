@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
-add_library(jam-vm SHARED adapter/jam_vm.cc)
+add_library(jam-vm SHARED src/adapter/jam_vm.cc)
 add_library(jam::vm ALIAS jam-vm)
 target_sources(jam-vm PRIVATE FILE_SET CXX_MODULES FILES
-  adapter/jam.ccm adapter/heap.ccm adapter/weak.ccm)
+  src/thc_jam.ccm src/thc/jam/heap.ccm src/thc/jam/weak.ccm)
 target_include_directories(jam-vm PUBLIC
-  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapter>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/adapter>"
   "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_compile_definitions(jam-vm PRIVATE JAM_VM_BUILD)
 target_link_libraries(jam-vm PRIVATE jam::jam)
@@ -18,11 +18,11 @@ if(APPLE)
   set_target_properties(jam-vm PROPERTIES BUILD_RPATH "${JAM_VM_RUNTIME}")
 endif()
 if(JAM_BUILD_TESTS)
-  add_executable(jam-vm-test tests/jam_vm_test.cc)
+  add_executable(jam-vm-test t/jam_vm_test.cc)
   set_target_properties(jam-vm-test PROPERTIES CXX_STANDARD 14 CXX_SCAN_FOR_MODULES OFF)
   target_link_libraries(jam-vm-test PRIVATE jam-vm)
   add_test(NAME jam-vm-test COMMAND jam-vm-test)
-  add_executable(jam-generational-test tests/generational_test.cc)
+  add_executable(jam-generational-test t/generational_test.cc)
   set_target_properties(jam-generational-test PROPERTIES CXX_STANDARD 14 CXX_SCAN_FOR_MODULES OFF)
   target_link_libraries(jam-generational-test PRIVATE jam-vm)
   add_test(NAME jam-generational-test COMMAND jam-generational-test)
@@ -50,7 +50,7 @@ configure_file("${jam_native_SOURCE_DIR}/LICENSE.md"
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 if(JAM_BUILD_TESTS)
   add_test(NAME jam-prepare-graal-test
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/prepare-graal-test.py")
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/t/prepare-graal-test.py")
   set_tests_properties(jam-prepare-graal-test PROPERTIES LABELS vm)
 endif()
 set(jam_vm_environment "JAM_NATIVE_BUILD=${PROJECT_BINARY_DIR}")
@@ -82,4 +82,4 @@ install(TARGETS jam-vm EXPORT jamTargets
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-install(FILES adapter/jam_vm.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(FILES src/adapter/jam_vm.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")

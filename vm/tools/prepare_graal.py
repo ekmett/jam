@@ -15,10 +15,10 @@ parser = argparse.ArgumentParser(description=__doc__)
 mode = parser.add_mutually_exclusive_group()
 mode.add_argument('--check', action='store_true', help='Verify prepared sources without changing them')
 mode.add_argument('--export', action='store_true', dest='export_sources',
-                  help='Export edits from the prepared tree to graal/ and the upstream patch')
+                  help='Export edits from the prepared tree to src/graal/ and the upstream patch')
 options = parser.parse_args()
 source = root / 'upstream/graal25'
-overlay = root / 'graal'
+overlay = root / 'src/graal'
 pin = json.loads((root / 'config/source-pins.json').read_text())['graal']['commit']
 patch = root / 'patches/graal-jam.patch'
 prepared_ref = 'refs/jam/prepared'

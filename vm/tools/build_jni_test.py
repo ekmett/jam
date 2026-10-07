@@ -23,7 +23,7 @@ def build(java_home, output, *, collector=False):
     if collector:
         name = name.replace('jam_weak_test', 'jam_jni')
     library = output / name
-    sources = [ROOT / 'tests' / name for name in
+    sources = [ROOT / 't' / name for name in
                (('jam_jni.c', 'critical_jni.c') if collector else ('weak_jni.c',))]
     compiler = shlex.split(os.environ.get('CC', 'clang-cl' if windows else 'cc'))
     if windows:

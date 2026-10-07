@@ -2,7 +2,7 @@
 
 HotSpot owns Java object layout, roots, safepoints and reference processing.
 Jam owns storage, marking and movement. The adapter connects them through
-[a small C interface](https://github.com/ekmett/jam/blob/main/vm/adapter/jam_vm.h), compiled on each side with that
+[a small C interface](https://github.com/ekmett/jam/blob/main/vm/src/adapter/jam_vm.h), compiled on each side with that
 side's toolchain.
 
 The backend is C++26 module `thc.jam`, with `:heap` and `:weak` partitions.
@@ -179,4 +179,4 @@ The C header is a deliberate foreign-language boundary. Its declarations must
 remain consumable by the JDK's C++14 translation units and C JNI callers. C++26
 module types belong behind that boundary. See [the build guide](build.md) for
 toolchain selection. The phase contracts are declared in
-[`jam_vm.h`](https://github.com/ekmett/jam/blob/main/vm/adapter/jam_vm.h).
+[`jam_vm.h`](https://github.com/ekmett/jam/blob/main/vm/src/adapter/jam_vm.h).

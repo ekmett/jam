@@ -31,21 +31,21 @@ def build(java_home):
         stage = Path(temporary)
         for directory in ("classes", "include", "lib", "api"):
             (stage / directory).mkdir()
-        sources = sorted((ROOT / "bridge/java").rglob("*.java"))
+        sources = sorted((ROOT / "src/bridge/java").rglob("*.java"))
         subprocess.run([str(jdk / "bin" / ("javac" + suffix)), "--release", "25", "-Xlint:all", "-Werror",
                         "-h", str(stage / "include"), "-d", str(stage / "classes"), *map(str, sources)], check=True)
         compiler = shlex.split(os.environ.get("CC", "clang-cl" if windows else "cc"))
         if windows:
             flags = ["/nologo", "/std:c11", "/O2", "/W4", "/WX", "/LD",
                      "/I" + str(jdk / "include"), "/I" + str(jdk / "include" / include),
-                     "/I" + str(stage / "include"), str(ROOT / "bridge/jam_bridge.c"),
+                     "/I" + str(stage / "include"), str(ROOT / "src/bridge/jam_bridge.c"),
                      "/Fe" + str(stage / "lib" / library), "/link", "/IMPLIB:" + str(stage / "jam_bridge.lib")]
         else:
             flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                         "-fvisibility=hidden", *(["-dynamiclib"] if system == "Darwin" else ["-shared", "-fPIC"]),
                         "-I" + str(jdk / "include"),
                         "-I" + str(jdk / "include" / include), "-I" + str(stage / "include"),
-                        str(ROOT / "bridge/jam_bridge.c"), "-o", str(stage / "lib" / library),
+                        str(ROOT / "src/bridge/jam_bridge.c"), "-o", str(stage / "lib" / library),
                         *([] if system == "Darwin" else ["-ldl"])]
         subprocess.run([*compiler, *flags], cwd=stage, check=True)
         manifest = stage / "MANIFEST.MF"
@@ -53,7 +53,7 @@ def build(java_home):
         subprocess.run([str(jdk / "bin" / ("jar" + suffix)), "--create", "--file", str(stage / "jam-vm.jar"),
                         "--manifest", str(manifest), "-C", str(stage / "classes"), "."], check=True)
         subprocess.run([str(jdk / "bin" / ("jar" + suffix)), "--create", "--file", str(stage / "jam-vm-sources.jar"),
-                        "-C", str(ROOT / "bridge/java"), "."], check=True)
+                        "-C", str(ROOT / "src/bridge/java"), "."], check=True)
         subprocess.run([str(jdk / "bin" / ("javadoc" + suffix)), "-quiet", "-Xdoclint:all", "-Werror",
                         "-d", str(stage / "api"), *map(str, sources)], check=True)
         # Replace generated outputs only, after every tool has succeeded.

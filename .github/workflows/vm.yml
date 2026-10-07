@@ -73,7 +73,7 @@ jobs:
           . "$env:JAM_CI_TOOLS/env.ps1"
           python tools/build_bridge.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          & "$env:JAM_BOOT_JDK/bin/javac.exe" -cp build/bridge/jam-vm.jar -d build-bridge-test tests/bridge/WeakBridgeSmoke.java
+          & "$env:JAM_BOOT_JDK/bin/javac.exe" -cp build/bridge/jam-vm.jar -d build-bridge-test t/bridge/WeakBridgeSmoke.java
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           & "$env:JAM_BOOT_JDK/bin/java.exe" -Xshare:off --enable-native-access=ALL-UNNAMED `
             "-Djava.library.path=$PWD/build/bridge/lib" `
@@ -120,7 +120,7 @@ jobs:
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           python3 tools/build_bridge.py
-          "$JAM_BOOT_JDK/bin/javac" -cp build/bridge/jam-vm.jar -d build-bridge-test tests/bridge/WeakBridgeSmoke.java
+          "$JAM_BOOT_JDK/bin/javac" -cp build/bridge/jam-vm.jar -d build-bridge-test t/bridge/WeakBridgeSmoke.java
           "$JAM_BOOT_JDK/bin/java" -Xshare:off --enable-native-access=ALL-UNNAMED \
             "-Djava.library.path=$PWD/build/bridge/lib" \
             -cp build-bridge-test:build/bridge/jam-vm.jar WeakBridgeSmoke unavailable

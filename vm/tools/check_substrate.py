@@ -52,29 +52,29 @@ def run(label, command, timeout=300, expected=None, trace_libraries=False, rejec
 
 
 run('javac', [java_tool(home, 'javac'), '--add-modules', 'org.graalvm.nativeimage',
-               '-cp', jar, '-d', classes, *sorted((root / 'tests/substrate').glob('*.java')),
-               root / 'tests/bridge/WeakBridgeSmoke.java', root / 'tests/bridge/JNIWeakSmoke.java'])
+               '-cp', jar, '-d', classes, *sorted((root / 't/substrate').glob('*.java')),
+               root / 't/bridge/WeakBridgeSmoke.java', root / 't/bridge/JNIWeakSmoke.java'])
 jni_library = build_jni_test(home, work / 'jni')
 jni_metadata = classes / 'META-INF/native-image/jam-vm/jni-weak/jni-config.json'
 jni_metadata.parent.mkdir(parents=True, exist_ok=True)
-shutil.copy2(root / 'tests/bridge/jni-config.json', jni_metadata)
+shutil.copy2(root / 't/bridge/jni-config.json', jni_metadata)
 if windows:
     run('pin-compile', [os.environ.get('JAM_CXX', 'clang-cl'), '/nologo', '/std:c11', '/O2', '/MD',
-                        '/W4', '/WX', '/c', root / 'tests/substrate/pin_writer.c',
+                        '/W4', '/WX', '/c', root / 't/substrate/pin_writer.c',
                         '/Fo' + str(work / 'pin_writer.obj')])
     run('pin-archive', ['lib', '/nologo', '/OUT:' + str(work / 'jam_pin_test.lib'), work / 'pin_writer.obj'])
 else:
     compiler = ['xcrun', 'clang'] if platform.system() == 'Darwin' else shlex.split(os.environ.get('CC', 'cc'))
     archiver = ['xcrun', 'ar'] if platform.system() == 'Darwin' else shlex.split(os.environ.get('AR', 'ar'))
     run('pin-compile', [*compiler, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
-                        '-c', root / 'tests/substrate/pin_writer.c', '-o', work / 'pin_writer.o'])
+                        '-c', root / 't/substrate/pin_writer.c', '-o', work / 'pin_writer.o'])
     run('pin-archive', [*archiver, 'rcs', work / 'libjam_pin_test.a', work / 'pin_writer.o'])
 executable = work / ('substrate-smoke.exe' if windows else 'substrate-smoke')
 run('image-build', [*image_options,
                     '--initialize-at-build-time=IsolateSmoke$EntryPoints',
                     '--initialize-at-run-time=JNIWeakSmoke',
                     '--enable-native-access=ALL-UNNAMED',
-                    '-Djam.pin.include=' + str(root / 'tests/substrate'),
+                    '-Djam.pin.include=' + str(root / 't/substrate'),
                     '-Djam.pin.library=' + str(work),
                     '-cp', os.pathsep.join(map(str, (classes, jar))),
                     'SubstrateSmoke', executable], timeout=1200,
@@ -147,7 +147,7 @@ for dependency in dependencies:
         raise SystemExit(f'Missing Truffle build dependency: {dependency}; build GraalVM first.')
 classpath = os.pathsep.join(map(str, (truffle_classes, jar, *dependencies)))
 run('truffle-javac', [java_tool(home, 'javac'), '-cp', classpath, '-d', truffle_classes,
-                      root / 'tests/substrate/truffle/TruffleSmoke.java'])
+                      root / 't/substrate/truffle/TruffleSmoke.java'])
 executable = work / ('truffle-smoke.exe' if windows else 'truffle-smoke')
 run('truffle-image-build', [*image_options, '--macro:truffle-svm',
                            # Truffle's partial evaluator requires initialized guest classes.
