@@ -1119,10 +1119,10 @@ index 00000000..84be4577
 +}
 diff --git a/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamGC.java b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamGC.java
 new file mode 100644
-index 00000000..bff68248
+index 00000000..a9703965
 --- /dev/null
 +++ b/substratevm/src/com.oracle.svm.core.jam/src/com/oracle/svm/core/jam/JamGC.java
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,461 @@
 +// SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 +// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 +package com.oracle.svm.core.jam;
@@ -1151,6 +1151,7 @@ index 00000000..bff68248
 +import com.oracle.svm.core.code.RuntimeCodeInfoMemory;
 +import com.oracle.svm.core.graal.nodes.WriteCurrentVMThreadNode;
 +import com.oracle.svm.core.graal.snippets.CEntryPointSnippets;
++import com.oracle.svm.core.handles.ObjectHandlesImpl;
 +import com.oracle.svm.core.heap.AbstractPinnedObjectSupport;
 +import com.oracle.svm.core.heap.DerivedReferenceSupport;
 +import com.oracle.svm.core.heap.GC;
@@ -1465,7 +1466,8 @@ index 00000000..bff68248
 +    private void processReferences(long start, long limit, boolean phantom) {
 +        for (long i = start; i < limit; i++) {
 +            Reference<?> reference = (Reference<?>) heap.decode((int) references.get(i));
-+            if ((reference instanceof PhantomReference<?>) != phantom) continue;
++            boolean late = reference instanceof PhantomReference<?> || ObjectHandlesImpl.isJNIWeakReference(reference);
++            if (late != phantom) continue;
 +            Pointer target = ReferenceInternals.getReferentPointer(reference);
 +            if (target.isNull() || marked(target)) continue;
 +            ReferenceInternals.setReferent(reference, null);
@@ -3541,6 +3543,56 @@ index 63ba8151..8b755a8c 100644
          /* Push a JavaFrameAnchor to the thread-local linked list. */
          JavaFrameAnchor anchor = (JavaFrameAnchor) LoweredStackValueNode.loweredStackValue(SizeOf.get(JavaFrameAnchor.class), SubstrateTarget.getWordSize(), frameAnchorIdentity);
          JavaFrameAnchors.pushFrameAnchor(anchor);
+diff --git a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/handles/ObjectHandlesImpl.java b/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/handles/ObjectHandlesImpl.java
+index 27d572b2..fca2ce60 100644
+--- a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/handles/ObjectHandlesImpl.java
++++ b/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/handles/ObjectHandlesImpl.java
+@@ -34,6 +34,8 @@ import org.graalvm.word.WordBase;
+ 
+ import jdk.internal.misc.Unsafe;
+ 
++import com.oracle.svm.shared.Uninterruptible;
++
+ /**
+  * This class implements {@link ObjectHandle word}-sized integer handles that refer to Java objects.
+  * {@link #create(Object) Creating}, {@link #get(ObjectHandle) dereferencing} and
+@@ -54,12 +56,19 @@ import jdk.internal.misc.Unsafe;
+ public final class ObjectHandlesImpl implements ObjectHandles {
+ 
+     /** Private subclass to distinguish from regular handles to {@link WeakReference} objects. */
+-    private static final class HandleWeakReference<T> extends WeakReference<T> {
++    private static class HandleWeakReference<T> extends WeakReference<T> {
+         HandleWeakReference(T referent) {
+             super(referent);
+         }
+     }
+ 
++    /* JNI weak globals remain readable until the phantom-reference phase. */
++    private static final class JNIWeakReference<T> extends HandleWeakReference<T> {
++        JNIWeakReference(T referent) {
++            super(referent);
++        }
++    }
++
+     private static final int MAX_FIRST_BUCKET_CAPACITY = 1024;
+     static { // must be a power of 2 for the arithmetic below to work
+         assert Integer.lowestOneBit(MAX_FIRST_BUCKET_CAPACITY) == MAX_FIRST_BUCKET_CAPACITY;
+@@ -214,6 +223,15 @@ public final class ObjectHandlesImpl implements ObjectHandles {
+         return create(new HandleWeakReference<>(obj));
+     }
+ 
++    public ObjectHandle createJNIWeak(Object obj) {
++        return create(new JNIWeakReference<>(obj));
++    }
++
++    @Uninterruptible(reason = "Classify a discovered JNI weak global without retaining its referent.")
++    public static boolean isJNIWeakReference(Object reference) {
++        return reference instanceof JNIWeakReference<?>;
++    }
++
+     @SuppressWarnings("unchecked")
+     @Override
+     public <T> T get(ObjectHandle handle) {
 diff --git a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/heap/Heap.java b/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/heap/Heap.java
 index 2bd9f8bc..c5334c85 100644
 --- a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/heap/Heap.java
@@ -3560,6 +3612,19 @@ index 2bd9f8bc..c5334c85 100644
      public abstract void suspendAllocation();
  
      public abstract void resumeAllocation();
+diff --git a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/jni/JNIObjectHandles.java b/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/jni/JNIObjectHandles.java
+index dfe0bd70..ce76060f 100644
+--- a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/jni/JNIObjectHandles.java
++++ b/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/jni/JNIObjectHandles.java
+@@ -347,7 +347,7 @@ final class JNIGlobalHandles {
+     }
+ 
+     static JNIObjectHandle createWeak(Object obj) {
+-        return encode(globalHandles.createWeak(obj));
++        return encode(globalHandles.createJNIWeak(obj));
+     }
+ 
+     static void destroyWeak(JNIObjectHandle weakRef) {
 diff --git a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/option/GCOptionValue.java b/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/option/GCOptionValue.java
 index 39141d8c..4614bebf 100644
 --- a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/option/GCOptionValue.java

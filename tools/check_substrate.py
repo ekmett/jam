@@ -15,6 +15,7 @@ from package_jdk import (check_elf_paths, check_loaded_libraries, load_commands,
 from pe_runtime import check_pe_paths
 from platform_paths import java_tool
 from runtime_probe import run as audit_runtime
+from build_jni_test import build as build_jni_test
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -52,7 +53,11 @@ def run(label, command, timeout=300, expected=None, trace_libraries=False, rejec
 
 run('javac', [java_tool(home, 'javac'), '--add-modules', 'org.graalvm.nativeimage',
                '-cp', jar, '-d', classes, *sorted((root / 'tests/substrate').glob('*.java')),
-               root / 'tests/bridge/WeakBridgeSmoke.java'])
+               root / 'tests/bridge/WeakBridgeSmoke.java', root / 'tests/bridge/JNIWeakSmoke.java'])
+jni_library = build_jni_test(home, work / 'jni')
+jni_metadata = classes / 'META-INF/native-image/jam-vm/jni-weak/jni-config.json'
+jni_metadata.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy2(root / 'tests/bridge/jni-config.json', jni_metadata)
 if windows:
     run('pin-compile', [os.environ.get('JAM_CXX', 'clang-cl'), '/nologo', '/std:c11', '/O2', '/MD',
                         '/W4', '/WX', '/c', root / 'tests/substrate/pin_writer.c',
@@ -67,6 +72,8 @@ else:
 executable = work / ('substrate-smoke.exe' if windows else 'substrate-smoke')
 run('image-build', [*image_options,
                     '--initialize-at-build-time=IsolateSmoke$EntryPoints',
+                    '--initialize-at-run-time=JNIWeakSmoke',
+                    '--enable-native-access=ALL-UNNAMED',
                     '-Djam.pin.include=' + str(root / 'tests/substrate'),
                     '-Djam.pin.library=' + str(work),
                     '-cp', os.pathsep.join(map(str, (classes, jar))),
@@ -113,16 +120,19 @@ def run_executable(label, executable, arguments, expected):
 
 
 executable = relocate(executable)
+shutil.copy2(jni_library, executable.parent / jni_library.name)
 
 for mode, expected in (
         ('heap', 'Jam Native Image heap passed'),
         ('weak', 'Weak bridge passed:'),
+        ('jni-weak', 'JNI weak globals passed:'),
         ('pin', 'Jam Native Image concurrent pin passed'),
         ('runtime', 'Jam Native Image runtime contracts passed'),
         ('continuations', 'Jam Native Image continuations passed'),
         ('isolates', 'Jam Native Image isolate lifecycle passed'),
         ('capacity', 'Jam Native Image pin capacity passed')):
-    run_executable(mode, executable, ['-Xmx128m', '-Xmn32m', mode], expected)
+    run_executable(mode, executable, ['-Xmx128m', '-Xmn32m',
+                   *(['-Djava.library.path=' + str(executable.parent)] if mode == 'jni-weak' else []), mode], expected)
     print(f'Native Image {mode}: passed')
 
 truffle_classes = work / 'truffle-classes'

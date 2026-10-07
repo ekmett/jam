@@ -92,7 +92,7 @@ the hosted phase boundary.
 
 ## Java references in the same heap
 
-The VM uses OpenJDK's `ReferenceProcessor` for Java soft, weak, final and
+HotSpot uses OpenJDK's `ReferenceProcessor` for Java soft, weak, final and
 phantom references. Generalized weak processing shares its tracing epoch:
 
 1. Trace ordinary VM roots and queued/running guest finalizers. Java discovery
@@ -111,6 +111,28 @@ referent. It also gives phantom processing the final retained graph.
 
 Running two weak processors once in sequence would not establish this closure
 or ordering: following one association can expose another policy's edges.
+
+## Java and JNI access
+
+Use `java.lang.ref.WeakReference<T>` for an ordinary Java weak pointer. Its
+`get()` returns a strong Java reference when the referent is still available.
+Use `jam.vm.Weak` when a live key must retain a separate value or finalizer,
+including values and finalizers that refer back to the key.
+
+Native code can keep a JNI weak global created by `NewWeakGlobalRef`. Acquire
+a strong local with `NewLocalRef` before using its referent, and release that
+local with `DeleteLocalRef` when done. A separate null check does not keep the
+referent alive between JNI calls. `NewLocalRef` can return null after collection
+or an allocation failure. Check for a pending exception before treating null as
+a collected referent.
+Release the weak handle itself with `DeleteWeakGlobalRef`.
+
+JNI weak globals have [phantom-reference clearing semantics](https://docs.oracle.com/en/java/javase/25/docs/specs/jni/functions.html#weak-global-references).
+A newly queued generalized finalizer can therefore keep a JNI weak global's
+referent available after a Java `WeakReference` to the same object has cleared.
+After the finalizer completes and its acquired strong references are released,
+a later collection can clear the JNI weak global too. This ordering applies on
+both HotSpot and Native Image.
 
 ## Claiming a finalizer
 

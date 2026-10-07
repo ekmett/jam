@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 from platform_paths import jdk_home
+from build_jni_test import build as build_jni_test
 
 root = Path(__file__).resolve().parents[1]
 vm = Path(os.environ.get('JAM_JAVA', jdk_home() / 'bin/java'))
@@ -20,12 +21,15 @@ evidence.mkdir(exist_ok=True)
 subprocess.run([sys.executable, str(root / 'tools/build_bridge.py'), '--java-home',
                 str(javac.parent.parent)], check=True)
 jar = root / 'build/bridge/jam-vm.jar'
+native = classes / 'native'
+build_jni_test(javac.parent.parent, native)
 subprocess.run([str(javac), '-cp', str(jar), '-d', str(classes),
-                *map(str, sorted((root / 'tests/java').glob('*.java')))], check=True)
+                *map(str, sorted((root / 'tests/java').glob('*.java'))),
+                str(root / 'tests/bridge/JNIWeakSmoke.java')], check=True)
 flags = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
          '-XX:JamWorkers=4', '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC', '-Xlog:gc',
          '--enable-native-access=ALL-UNNAMED',
-         '-Djava.library.path=' + os.pathsep.join(str(root / p) for p in ('build/bridge/lib', 'build-jam')),
+         '-Djava.library.path=' + os.pathsep.join(map(str, (root / 'build/bridge/lib', root / 'build-jam', native))),
          '-cp', os.pathsep.join((str(classes), str(jar)))]
 
 
@@ -52,5 +56,6 @@ for mode, compiler in (
         *('-XX:CompileCommand=dontinline,GenerationSmoke::' + method for method in methods)])
     run(f'CompiledBarrierSmoke-{mode}', 'CompiledBarrierSmoke', [*compiler,
         '-Xms128m', '-Xmx128m', '-XX:JamYoungSize=8m', '-XX:CompileCommand=dontinline,CompiledBarrierSmoke::*'])
+    run(f'JNIWeakGenerations-{mode}', 'JNIWeakGenerations', [*compiler, '-Xcheck:jni'])
 run('GenerationCapacitySmoke', 'GenerationCapacitySmoke',
     ['-Xms64m', '-Xmx64m', '-XX:JamYoungSize=32m', '-XX:JamPromoteEvery=1000'])

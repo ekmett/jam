@@ -1,5 +1,5 @@
 diff --git a/docs/hosting.md b/docs/hosting.md
-index 2a288d8..422c82a 100644
+index 314f1fb..773de9d 100644
 --- a/docs/hosting.md
 +++ b/docs/hosting.md
 @@ -81,11 +81,31 @@ Jam's private views. Publication aliases the backing pages; it does not copy
@@ -43,7 +43,7 @@ index 2a288d8..422c82a 100644
 +expose used cells, capacity and ring origins; `storage.compactor_name()` reports
 +the selected kernel.
 diff --git a/heap.ccm b/heap.ccm
-index ed10732..2c782b0 100644
+index eff82f1..0703f38 100644
 --- a/heap.ccm
 +++ b/heap.ccm
 @@ -156,8 +156,15 @@ class heap_mapping {
@@ -119,7 +119,7 @@ index ed10732..2c782b0 100644
  #endif
    }
    /// \brief Exchange mappings without moving payload bytes.
-@@ -1840,6 +1874,14 @@ public:
+@@ -1851,6 +1885,14 @@ public:
      phase state = phase::idle;
      std::size_t old_words = 0, young_words = 0;
      bool promoting = false;
@@ -134,7 +134,7 @@ index ed10732..2c782b0 100644
    public:
      /// \brief Select the arena for raw allocation or publication.
      enum class generation { old, young };
-@@ -1860,12 +1902,18 @@ public:
+@@ -1871,12 +1913,18 @@ public:
      host(host const &) = delete;
      host & operator=(host const &) = delete;
      /// \brief Release the capability after finishing its last collection.
@@ -153,7 +153,7 @@ index ed10732..2c782b0 100644
      void publish(generation which, void * target, std::size_t skip, std::size_t count) const noexcept {
        if (state != phase::idle) detail::heap_failure("publish during host collection");
        auto const & g = which == generation::young ? owner.nursery : owner.arena;
-@@ -1873,9 +1921,53 @@ public:
+@@ -1884,9 +1932,53 @@ public:
        if (config.capacity != config.maximum || config.shrink_shift ||
            skip > g.capacity() || count > g.capacity() - skip)
          detail::heap_failure("published heap requires a fixed generation");
@@ -208,10 +208,10 @@ index ed10732..2c782b0 100644
      /// A host may subdivide the extent; scanner claims determine record boundaries.
      /// \pre Positive extent fits the selected generation; no active collection.
 diff --git a/tests/host-test.cc b/tests/host-test.cc
-index ae5b5e3..36b5ac9 100644
+index d343409..e8e4eb1 100644
 --- a/tests/host-test.cc
 +++ b/tests/host-test.cc
-@@ -6,8 +6,17 @@
+@@ -6,12 +6,17 @@
  #include <cstdlib>
  #include <cstring>
  #include <thread>
@@ -224,17 +224,19 @@ index ae5b5e3..36b5ac9 100644
 +#include <cerrno>
 +#include <csignal>
  #include <sys/mman.h>
-+#include <sys/resource.h>
+-#include <sys/wait.h>
+ #include <sys/resource.h>
 +#include <sys/wait.h>
-+#include <unistd.h>
+ #include <unistd.h>
+-#include <csignal>
  #endif
  import jam;
  
-@@ -128,13 +137,60 @@ void external_targets() {
-   f.host.finish();
-   check(f.at(owner).left == live && !f.at(owner).right, "weak field clears during relocation");
+@@ -153,12 +158,61 @@ void rejects_cpp_weak_roots() {
+   check(::waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
+         "host rejects ordinary weak root registrations");
  }
--#if !defined(_WIN32)
++#endif
 +void inaccessible(std::byte * address) {
 +#if defined(_WIN32)
 +  MEMORY_BASIC_INFORMATION region{};
@@ -294,7 +296,7 @@ index ae5b5e3..36b5ac9 100644
      for (unsigned i = 0; i != 24; ++i) {
        f.host.publish(generation::young, target, page_words, page_words * 9);
        static_cast<void>(f.make(generation::young, 999));
-@@ -143,20 +199,38 @@ void publication() {
+@@ -167,20 +221,41 @@ void publication() {
        check(published->id == 42, "private writes visible in canonical alias");
        published->id = 84;
        check(f.at(p).id == 84, "canonical writes visible in private view");
@@ -333,9 +335,11 @@ index ae5b5e3..36b5ac9 100644
  #endif
 +}
  int main() {
-   cycles(1); cycles(4); retry_and_subdivision(); external_targets();
--#if !defined(_WIN32)
-   publication();
--#endif
+   cycles(1); cycles(4); retry_and_subdivision(8); retry_and_subdivision(64); external_targets();
++  publication();
+ #if !defined(_WIN32)
+-  publication(); rejects_cpp_weak_roots();
++  rejects_cpp_weak_roots();
+ #endif
    std::puts("host phases, promotion retry, tracing and publication passed");
  }

@@ -4,10 +4,18 @@
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import org.graalvm.nativeimage.PinnedObject;
 
 /** One image exercises the collector through its ordinary application interfaces. */
 public final class SubstrateSmoke {
     private static volatile Object sink;
+
+    private static void minorWithPin() {
+        try (PinnedObject pin = PinnedObject.create(new Object())) {
+            System.gc();
+            java.lang.ref.Reference.reachabilityFence(pin);
+        }
+    }
 
     private static void continuations() throws Exception {
         CountDownLatch ready = new CountDownLatch(16);
@@ -48,10 +56,14 @@ public final class SubstrateSmoke {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 1) throw new IllegalArgumentException("heap | weak | pin | runtime | continuations | isolates | capacity");
+        if (args.length != 1) throw new IllegalArgumentException("heap | weak | jni-weak | pin | runtime | continuations | isolates | capacity");
         switch (args[0]) {
             case "heap" -> HeapSmoke.main(new String[0]);
             case "weak" -> WeakBridgeSmoke.main(new String[0]);
+            case "jni-weak" -> {
+                JNIWeakSmoke.run(SubstrateSmoke::minorWithPin, System::gc);
+                JNIWeakSmoke.oldReferent(SubstrateSmoke::minorWithPin, SubstrateSmoke::minorWithPin, System::gc);
+            }
             case "pin" -> NativePinSmoke.main(new String[0]);
             case "runtime" -> RuntimeContractSmoke.main(new String[0]);
             case "continuations" -> continuations();

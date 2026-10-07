@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import xml.etree.ElementTree as ET
+from build_jni_test import build as build_jni_test
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -21,9 +22,12 @@ classes = root / 'build-graal-tests'
 jar = home / 'lib/jam/jam-vm.jar'
 evidence = root / 'evidence'
 evidence.mkdir(exist_ok=True)
+native = classes / 'native'
+build_jni_test(home, native)
 subprocess.run([str(home / 'bin/javac'), '-cp', str(jar), '-d', str(classes),
                 *map(str, sorted((root / 'tests/java').glob('*.java'))),
-                str(root / 'tests/bridge/WeakBridgeSmoke.java')], check=True)
+                str(root / 'tests/bridge/WeakBridgeSmoke.java'),
+                str(root / 'tests/bridge/JNIWeakSmoke.java')], check=True)
 exports = ['--add-modules=jdk.internal.vm.ci',
            '--add-exports=jdk.internal.vm.ci/jdk.vm.ci.hotspot=ALL-UNNAMED']
 subprocess.run([str(home / 'bin/javac'), *exports, '-d', str(classes),
@@ -37,7 +41,7 @@ flags = [
     '-Djdk.graal.CompilationFailureAction=ExitVM', '-Djdk.graal.ShowConfiguration=info',
     '-Djdk.graal.DumpPath=' + str(evidence / 'graal-dumps'),
     '--enable-native-access=ALL-UNNAMED',
-    '-Djava.library.path=' + os.pathsep.join((str(home / 'lib/jam'), str(root / 'build-jam'))),
+    '-Djava.library.path=' + os.pathsep.join(map(str, (home / 'lib/jam', root / 'build-jam', native))),
     '-cp', os.pathsep.join((str(classes), str(jar))),
 ]
 cases = [
@@ -54,6 +58,7 @@ cases = [
     ('GenerationCapacitySmoke', ['-Xms64m', '-Xmx64m', '-XX:JamYoungSize=32m', '-XX:JamPromoteEvery=1000'],
      [], 'GenerationCapacitySmoke passed:'),
     ('WeakBridgeSmoke', [], [], 'Weak bridge passed:'),
+    ('JNIWeakGenerations', ['-Xcheck:jni'], [], 'JNI weak globals passed:'),
 ]
 for name, extra, methods, expected in cases:
     log = evidence / f'graal-{mode}-{name}.xml'
