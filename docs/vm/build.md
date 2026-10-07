@@ -2,7 +2,7 @@
 
 jam-vm builds two things: a native jam backend and a patched JDK. The backend
 uses C++26 modules. The JDK uses its normal C++14 toolchain and calls the
-backend through [a C header](https://github.com/ekmett/jam/blob/main/vm/adapter/jam_vm.h).
+backend through [a C header](https://github.com/ekmett/jam/blob/main/vm/src/adapter/jam_vm.h).
 
 Build on macOS 26 arm64, Linux x86_64 or Windows 11 x86_64. See
 [supported configurations](status.md) for the current limits.
@@ -303,7 +303,7 @@ separate Graal consumers sharing one built distribution per platform.
 
 ## Editing the Graal integration
 
-Jam's added Java files live in [`vm/graal/`](https://github.com/ekmett/jam/tree/main/vm/graal),
+Jam's added Java files live in [`vm/src/graal/`](https://github.com/ekmett/jam/tree/main/vm/src/graal),
 with paths relative to the Graal source root. Edit them directly. The
 [`graal-jam.patch`](https://github.com/ekmett/jam/blob/main/vm/patches/graal-jam.patch)
 contains only changes to existing upstream files. Preparation combines both.
@@ -314,4 +314,4 @@ unexpected local edits are preserved. `--check` verifies without updating it.
 
 To work inside `upstream/graal25/` instead, stage any new files there, then run
 `python3 tools/export_patches.py --graal` from `vm/`. That writes additions back
-to `graal/` and upstream edits back to the patch. Do not edit both copies at once.
+to `src/graal/` and upstream edits back to the patch. Do not edit both copies at once.

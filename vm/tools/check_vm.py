@@ -26,8 +26,8 @@ native = classes / 'native'
 build_jni_test(javac.parent.parent, native)
 build_jni_test(javac.parent.parent, native, collector=True)
 subprocess.run([str(javac), '-cp', str(jar), '-d', str(classes),
-                *map(str, sorted((root / 'tests/java').glob('*.java'))),
-                str(root / 'tests/bridge/JNIWeakSmoke.java')], check=True)
+                *map(str, sorted((root / 't/java').glob('*.java'))),
+                str(root / 't/bridge/JNIWeakSmoke.java')], check=True)
 flags = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
          '-XX:JamWorkers=4', '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC', '-Xlog:gc',
          '--enable-native-access=ALL-UNNAMED',

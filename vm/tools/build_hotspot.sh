@@ -31,7 +31,7 @@ case $(uname -s) in
     make_bin=${JAM_MAKE:-/usr/bin/make}
     native_root=$(cygpath -m "$root")
     native_build=$(cygpath -m "$native_build")
-    native_flags=("--with-extra-cxxflags=-I$native_root/adapter"
+    native_flags=("--with-extra-cxxflags=-I$native_root/src/adapter"
                   "--with-extra-ldflags=-libpath:$native_build jam-vm.lib")
     # The build runs its own newly linked java before assembling the images.
     export PATH="$(cygpath -u "$native_build"):$PATH"
@@ -40,7 +40,7 @@ case $(uname -s) in
     export AUTOCONF=${JAM_AUTOCONF:-$root/.toolchains/autoconf-install/bin/autoconf}
     export M4=${JAM_M4:-$root/.toolchains/gnu/bin/m4}
     make_bin=${JAM_MAKE:-$root/.toolchains/gnu/bin/make}
-    native_flags=("--with-extra-cxxflags=-I$root/adapter"
+    native_flags=("--with-extra-cxxflags=-I$root/src/adapter"
                   "--with-extra-ldflags=-L$native_build -ljam-vm -Wl,-rpath,$native_build")
     ;;
 esac

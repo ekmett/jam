@@ -106,8 +106,8 @@ add_library(jam::jam ALIAS jam)
 target_compile_features(jam PUBLIC cxx_std_26)
 set_target_properties(jam PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
 target_sources(jam PUBLIC FILE_SET modules TYPE CXX_MODULES
-  BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
-  FILES jam.ccm jam_unqualified.ccm heap.ccm compact.ccm work.ccm units.ccm simd.ccm)
+  BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  FILES src/jam.ccm src/jam_unqualified.ccm src/jam/heap.ccm src/jam/compact.ccm src/jam/work.ccm src/jam/units.ccm src/jam/simd.ccm)
 target_link_libraries(jam PUBLIC Threads::Threads native::native)
 target_compile_definitions(jam PUBLIC JAM_PAGE_BYTES=${JAM_PAGE_BYTES})
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -172,7 +172,7 @@ endif()
 
 if(JAM_BUILD_TESTS)
   enable_testing()
-  add_subdirectory(tests)
+  add_subdirectory(t)
 endif()
 if(JAM_BUILD_VM)
   enable_language(C)
@@ -224,7 +224,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
   set(DOXYGEN_QUIET YES)
   file(GLOB jam_vm_guides CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/vm/*.md")
-  doxygen_add_docs(jam-docs jam.ccm jam_unqualified.ccm heap.ccm units.ccm simd.ccm README.md LICENSE.md
+  doxygen_add_docs(jam-docs src/jam.ccm src/jam_unqualified.ccm src/jam/heap.ccm src/jam/units.ccm src/jam/simd.ccm README.md LICENSE.md
     docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md docs/finalizers.md
     ${jam_vm_guides} vm/README.md vm/NOTICE.md
     docs/simd.md docs/collector.md docs/single-base.md docs/hosting.md docs/building.md

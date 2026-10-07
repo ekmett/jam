@@ -27,13 +27,13 @@ native = classes / 'native'
 build_jni_test(home, native)
 build_jni_test(home, native, collector=True)
 subprocess.run([str(home / 'bin/javac'), '-cp', str(jar), '-d', str(classes),
-                *map(str, sorted((root / 'tests/java').glob('*.java'))),
-                str(root / 'tests/bridge/WeakBridgeSmoke.java'),
-                str(root / 'tests/bridge/JNIWeakSmoke.java')], check=True)
+                *map(str, sorted((root / 't/java').glob('*.java'))),
+                str(root / 't/bridge/WeakBridgeSmoke.java'),
+                str(root / 't/bridge/JNIWeakSmoke.java')], check=True)
 exports = ['--add-modules=jdk.internal.vm.ci',
            '--add-exports=jdk.internal.vm.ci/jdk.vm.ci.hotspot=ALL-UNNAMED']
 subprocess.run([str(home / 'bin/javac'), *exports, '-d', str(classes),
-                str(root / 'tests/graal/InvalidationReasonSmoke.java')], check=True)
+                str(root / 't/graal/InvalidationReasonSmoke.java')], check=True)
 flags = [
     '-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
     '-XX:+EnableJVMCI', '-XX:+UseJVMCICompiler', '-XX:+UseJVMCINativeLibrary',

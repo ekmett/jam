@@ -278,7 +278,7 @@ def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_li
     else:
         licenses['LLVM-LICENSE.txt'] = runtime / 'LICENSE.TXT'
     jars = [ROOT / 'build/bridge' / name for name in ('jam-vm.jar', 'jam-vm-sources.jar')]
-    header = ROOT / 'adapter/jam_vm.h'
+    header = ROOT / 'src/adapter/jam_vm.h'
     for source in [*libraries.values(), *licenses.values(), *jars, header]:
         if not source.is_file():
             raise SystemExit(f'Missing package input: {source}')

@@ -20,7 +20,7 @@ jar = root / 'build/bridge/jam-vm.jar'
 build_bridge(home)
 build_jni_test(home, native, collector=True)
 subprocess.run([str(java_tool(home, 'javac')), '-cp', str(jar), '-d', str(classes),
-                *map(str, (root / 'tests/java' / name for name in
+                *map(str, (root / 't/java' / name for name in
                            ('CollectorIdentitySmoke.java', 'HeapSmoke.java', 'JamWeak.java')))], check=True)
 common = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-Xlog:gc',
           '--enable-native-access=ALL-UNNAMED',
