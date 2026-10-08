@@ -126,7 +126,9 @@ public final class TruffleSmoke {
             check(Boolean.TRUE.equals(found), "active guest frame is visible to stack introspection");
             invalidate(target);
             root.clear();
+            long beforeMajor = majorCollections();
             collect();
+            check(majorCollections() > beforeMajor, "major collection runs with the deoptimization snapshot pinned");
             check(Weak.pump() == 0, "live deoptimized caller retains its conditional graph");
             deoptimized++;
             return;
@@ -186,10 +188,10 @@ public final class TruffleSmoke {
         check(Weak.deref(token) == result.value(), "deoptimized caller retains the weak association");
         root.captured = result.key();
         root.token = token;
-        // The deoptimization snapshot's pin has closed; a major is now possible again.
+        // The snapshot's pin has closed; subsequent collection must still preserve its returned values.
         long beforeMajor = majorCollections();
         collect();
-        check(majorCollections() > beforeMajor, "returning from the deoptimized frame releases its pin");
+        check(majorCollections() > beforeMajor, "major collection still runs after the deoptimized frame returns");
         compile(target);
         exercise(target, id);
     }

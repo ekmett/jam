@@ -34,6 +34,7 @@ import com.oracle.svm.core.code.CodeInfoAccess;
 import com.oracle.svm.core.code.CodeInfoTable;
 import com.oracle.svm.core.code.RuntimeCodeInstallation;
 import com.oracle.svm.core.code.RuntimeCodeInfoAccess;
+import com.oracle.svm.core.config.ObjectLayout;
 import com.oracle.svm.core.deopt.DeoptimizedFrame;
 import com.oracle.svm.core.deopt.Deoptimizer;
 import com.oracle.svm.core.heap.CodeReferenceMapDecoder;
@@ -111,10 +112,8 @@ final class JamStackRoots {
                     }
                 }
             } else {
-                /*
-                 * This is a deoptimized frame. The DeoptimizedFrame object is stored in the frame,
-                 * but it is pinned so we do not need to visit references of the frame.
-                 */
+                // Side-alias pins preserve native addresses, but the managed frame reference can move.
+                visitor.visitObjectReferences(frame.getSP(), true, ObjectLayout.singleton().getReferenceSize(), null, 1);
             }
         }
     }
