@@ -39,17 +39,6 @@
          jfr jni-check jvmci jvmti management parallelgc services \
          shenandoahgc vm-structs zgc"
      if test "x$OPENJDK_TARGET_CPU" = xarm ; then
-@@ -513,6 +520,10 @@
- [
-   variant=$1
- 
-+  if JVM_FEATURES_IS_ACTIVE(jamgc) && ! JVM_FEATURES_IS_ACTIVE(serialgc); then
-+    AC_MSG_ERROR([Specified JVM feature 'jamgc' requires feature 'serialgc' for its block-offset-table utility in variant '$variant'])
-+  fi
-+
-   if JVM_FEATURES_IS_ACTIVE(jvmci) && ! (JVM_FEATURES_IS_ACTIVE(compiler1) || \
-       JVM_FEATURES_IS_ACTIVE(compiler2)); then
-     AC_MSG_ERROR([Specified JVM feature 'jvmci' requires feature 'compiler2' or 'compiler1' for variant '$variant'])
 --- a/make/hotspot/lib/JvmFeatures.gmk
 +++ b/make/hotspot/lib/JvmFeatures.gmk
 @@ -151,6 +151,11 @@
@@ -66,10 +55,11 @@
  ifneq ($(call check-jvm-feature, zgc), true)
 --- a/src/hotspot/cpu/aarch64/gc/jam/jamBarrierSetAssembler_aarch64.cpp
 +++ b/src/hotspot/cpu/aarch64/gc/jam/jamBarrierSetAssembler_aarch64.cpp
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,41 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "asm/macroAssembler.inline.hpp"
 +#include "gc/jam/jamBarrierSet.hpp"
++#include "gc/jam/jamHeap.hpp"
 +#include "gc/jam/jamBarrierSetAssembler.hpp"
 +#define __ masm->
 +void JamBarrierSetAssembler::oop_store_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
@@ -77,8 +67,8 @@
 +  if ((decorators & IN_HEAP) != 0) {
 +    __ push_call_clobbered_registers();
 +    __ lea(rscratch2, dst);
-+    __ stp(dst.base(), rscratch2, Address(pre(sp, -2 * wordSize)));
-+    __ ldp(c_rarg0, c_rarg1, Address(post(sp, 2 * wordSize)));
++    __ stp(dst.base(), rscratch2, Address(Pre(sp, -2 * wordSize)));
++    __ ldp(c_rarg0, c_rarg1, Address(Post(sp, 2 * wordSize)));
 +    __ mov(c_rarg2, 1);
 +    __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), c_rarg0, c_rarg1, c_rarg2);
 +    __ pop_call_clobbered_registers();
@@ -88,17 +78,32 @@
 +void JamBarrierSetAssembler::gen_write_ref_array_post_barrier(MacroAssembler* masm, DecoratorSet,
 +                                         Register start, Register count, Register, RegSet) {
 +  __ push_call_clobbered_registers();
-+  __ stp(start, count, Address(pre(sp, -2 * wordSize)));
-+  __ ldp(c_rarg0, c_rarg1, Address(post(sp, 2 * wordSize)));
++  __ stp(start, count, Address(Pre(sp, -2 * wordSize)));
++  __ ldp(c_rarg0, c_rarg1, Address(Post(sp, 2 * wordSize)));
 +  __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_array), c_rarg0, c_rarg1);
 +  __ pop_call_clobbered_registers();
 +}
++
++void JamBarrierSetAssembler::tlab_allocate(MacroAssembler* masm, Register obj,
++    Register var_size_in_bytes, int con_size_in_bytes, Register t1, Register t2, Label& slow_case) {
++  BarrierSetAssembler::tlab_allocate(masm, obj, var_size_in_bytes, con_size_in_bytes, t1, t2, slow_case);
++  Label done;
++  __ mov(rscratch1, (address)&JamHeap::_track_starts);
++  __ ldrb(rscratch1, Address(rscratch1));
++  __ cbz(rscratch1, done);
++  __ push_call_clobbered_registers();
++  __ mov(c_rarg0, obj);
++  __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamHeap::record_start), c_rarg0);
++  __ pop_call_clobbered_registers();
++  __ bind(done);
++}
 --- a/src/hotspot/cpu/x86/gc/jam/jamBarrierSetAssembler_x86.cpp
 +++ b/src/hotspot/cpu/x86/gc/jam/jamBarrierSetAssembler_x86.cpp
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,46 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "asm/macroAssembler.inline.hpp"
 +#include "gc/jam/jamBarrierSet.hpp"
++#include "gc/jam/jamHeap.hpp"
 +#include "gc/jam/jamBarrierSetAssembler.hpp"
 +#define __ masm->
 +void JamBarrierSetAssembler::oop_store_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
@@ -126,6 +131,20 @@
 +  __ pop(c_rarg0);
 +  __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_array), c_rarg0, c_rarg1);
 +  __ pop_call_clobbered_registers();
++}
++
++void JamBarrierSetAssembler::tlab_allocate(MacroAssembler* masm, Register obj,
++    Register var_size_in_bytes, int con_size_in_bytes, Register t1, Register t2, Label& slow_case) {
++  BarrierSetAssembler::tlab_allocate(masm, obj, var_size_in_bytes, con_size_in_bytes, t1, t2, slow_case);
++  Label done;
++  __ movptr(t1, (intptr_t)&JamHeap::_track_starts);
++  __ cmpb(Address(t1, 0), 0);
++  __ jcc(Assembler::equal, done);
++  __ push_call_clobbered_registers();
++  __ movptr(c_rarg0, obj);
++  __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamHeap::record_start), c_rarg0);
++  __ pop_call_clobbered_registers();
++  __ bind(done);
 +}
 --- a/src/hotspot/os/windows/os_windows.cpp
 +++ b/src/hotspot/os/windows/os_windows.cpp
@@ -316,12 +335,14 @@
 +};
 --- a/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.cpp
 +++ b/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.cpp
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,66 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "gc/jam/c2/jamBarrierSetC2.hpp"
 +#include "gc/jam/jamBarrierSet.hpp"
 +#include "opto/graphKit.hpp"
 +#include "opto/runtime.hpp"
++#include "opto/macro.hpp"
++#include "gc/jam/jamHeap.hpp"
 +Node* JamBarrierSetC2::store_at_resolved(C2Access& access, C2AccessValue& val) const {
 +  Node* store = BarrierSetC2::store_at_resolved(access, val);
 +  if (access.is_oop() && (access.decorators() & (IN_HEAP | ON_UNKNOWN_OOP_REF)) != 0) {
@@ -350,9 +371,40 @@
 +  return node->is_CallLeaf() &&
 +      node->as_CallLeaf()->entry_point() == CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow);
 +}
++
++Node* JamBarrierSetC2::obj_allocate(PhaseMacroExpand* macro, Node* mem, Node* toobig_false,
++    Node* size_in_bytes, Node*& i_o, Node*& needgc_ctrl, Node*& fast_oop_ctrl,
++    Node*& fast_oop_rawmem, intx prefetch_lines) const {
++  Node* obj = BarrierSetC2::obj_allocate(macro, mem, toobig_false, size_in_bytes,
++      i_o, needgc_ctrl, fast_oop_ctrl, fast_oop_rawmem, prefetch_lines);
++  Node* guard = macro->makecon(TypeRawPtr::make((address)&JamHeap::_track_starts));
++  Node* enabled = macro->make_load(fast_oop_ctrl, fast_oop_rawmem, guard, 0, TypeInt::BOOL, T_BOOLEAN);
++  Node* test = macro->transform_later(new CmpINode(enabled, macro->intcon(0)));
++  Node* condition = macro->transform_later(new BoolNode(test, BoolTest::ne));
++  Node* branch = macro->transform_later(new IfNode(fast_oop_ctrl, condition, PROB_UNLIKELY_MAG(4), COUNT_UNKNOWN));
++  Node* yes = macro->transform_later(new IfTrueNode(branch->as_If()));
++  Node* no = macro->transform_later(new IfFalseNode(branch->as_If()));
++  const Type** fields = TypeTuple::fields(1);
++  fields[TypeFunc::Parms] = TypeRawPtr::BOTTOM;
++  const TypeFunc* type = TypeFunc::make(TypeTuple::make(TypeFunc::Parms + 1, fields),
++      TypeTuple::make(TypeFunc::Parms, TypeTuple::fields(0)));
++  Node* call = macro->make_leaf_call(yes, fast_oop_rawmem, type,
++      CAST_FROM_FN_PTR(address, JamHeap::record_start), "jam_record_start", TypeRawPtr::BOTTOM, obj);
++  macro->transform_later(call);
++  Node* region = new RegionNode(3);
++  region->init_req(1, no);
++  region->init_req(2, macro->transform_later(new ProjNode(call, TypeFunc::Control)));
++  macro->transform_later(region);
++  Node* memory = new PhiNode(region, Type::MEMORY, TypeRawPtr::BOTTOM);
++  memory->init_req(1, fast_oop_rawmem);
++  memory->init_req(2, macro->transform_later(new ProjNode(call, TypeFunc::Memory)));
++  fast_oop_ctrl = region;
++  fast_oop_rawmem = macro->transform_later(memory);
++  return obj;
++}
 --- a/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.hpp
 +++ b/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.hpp
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,17 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#pragma once
 +#include "gc/shared/c2/modRefBarrierSetC2.hpp"
@@ -361,6 +413,9 @@
 +  Node* store_at_resolved(C2Access& access, C2AccessValue& val) const override;
 +  void post_barrier(GraphKit* kit, Node* obj, Node* adr, Node* val, bool precise) const override;
 +public:
++  Node* obj_allocate(PhaseMacroExpand* macro, Node* mem, Node* toobig_false, Node* size_in_bytes,
++                     Node*& i_o, Node*& needgc_ctrl, Node*& fast_oop_ctrl, Node*& fast_oop_rawmem,
++                     intx prefetch_lines) const override;
 +  bool is_gc_barrier_node(Node* node) const override;
 +  void clone_at_expansion(PhaseMacroExpand* phase, ArrayCopyNode* ac) const override;
 +  bool array_copy_requires_gc_barriers(bool, BasicType type, bool is_clone, bool, ArrayCopyPhase) const override {
@@ -743,11 +798,14 @@
 +#endif // SHARE_GC_JAM_JAMBARRIERSET_HPP
 --- a/src/hotspot/share/gc/jam/jamBarrierSetAssembler.hpp
 +++ b/src/hotspot/share/gc/jam/jamBarrierSetAssembler.hpp
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,18 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#pragma once
 +#include "gc/shared/modRefBarrierSetAssembler.hpp"
 +class JamBarrierSetAssembler : public ModRefBarrierSetAssembler {
++public:
++  void tlab_allocate(MacroAssembler* masm, Register obj, Register var_size_in_bytes,
++                     int con_size_in_bytes, Register t1, Register t2, Label& slow_case) override;
 +protected:
 +  void oop_store_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
 +                    Address dst, Register val, Register tmp1, Register tmp2, Register tmp3) override;
@@ -761,7 +819,7 @@
 +};
 --- a/src/hotspot/share/gc/jam/jamHeap.cpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.cpp
-@@ -0,0 +1,754 @@
+@@ -0,0 +1,801 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -826,10 +884,13 @@
 +#include "runtime/threads.hpp"
 +#include "runtime/vmThread.hpp"
 +#include "utilities/growableArray.hpp"
++#include "utilities/count_trailing_zeros.hpp"
 +#include "utilities/resizeableResourceHash.hpp"
 +#include "classfile/javaClasses.inline.hpp"
 +#include "oops/instanceKlass.hpp"
 +#include "utilities/ostream.hpp"
++
++bool JamHeap::_track_starts = false;
 +
 +static const size_t jam_young_displacement = size_t(1) << 34;
 +
@@ -897,6 +958,12 @@
 +  _monitoring_support = new JamMonitoringSupport(this);
 +  _last_counter_update = 0;
 +  _last_heap_print = 0;
++
++  // Verification can run before a diagnostic preparation boundary.
++  if (VerifyDuringStartup || VerifyBeforeGC || VerifyAfterGC || VerifyDuringGC || VerifyBeforeExit) {
++    guarantee(jam_vm_track_starts(_jam), "Unable to allocate Jam object-start metadata");
++    _track_starts = true;
++  }
 +
 +  // Install barrier set
 +  JamBarrierSet* barriers = new JamBarrierSet();
@@ -1072,9 +1139,26 @@
 +  return allocate_work(size, true, /* verbose = */false);
 +}
 +
++void JamHeap::record_start(oopDesc* obj) {
++  jam_vm_record_start(heap()->jam(), CompressedOops::narrow_oop_value(cast_to_oop(obj)));
++}
++
 +void JamHeap::object_iterate(ObjectClosure *cl) {
-+  _space->object_iterate(cl);
-+  _young_space->object_iterate(cl);
++  assert(SafepointSynchronize::is_at_safepoint(), "Must stop mutators");
++  guarantee(_track_starts, "Heap iteration requires diagnostic preparation");
++  for (int young = 0; young != 2; ++young) {
++    size_t count;
++    uint32_t const* bits = jam_vm_start_bits(_jam, young, &count);
++    for (size_t i = 0; i < count; ++i) {
++      uint32_t word = bits[i];
++      while (word != 0) {
++        unsigned bit = count_trailing_zeros(word);
++        uint32_t at = uint32_t(i * 32 + bit) | (young ? uint32_t(1) << 31 : 0);
++        cl->do_object(CompressedOops::decode(narrowOop(at)));
++        word &= word - 1;
++      }
++    }
++  }
 +}
 +
 +void JamHeap::print_heap_on(outputStream *st) const {
@@ -1361,18 +1445,39 @@
 +class VM_JamCollect : public VM_GC_Operation {
 +  bool _minor;
 +  bool _promote;
++  bool _track_starts;
 +public:
-+  VM_JamCollect(uint count, uint full_count, GCCause::Cause cause, bool minor, bool promote)
-+    : VM_GC_Operation(count, cause, full_count, !minor), _minor(minor), _promote(promote) {}
++  VM_JamCollect(uint count, uint full_count, GCCause::Cause cause, bool minor, bool promote, bool track_starts = false)
++    : VM_GC_Operation(count, cause, full_count, !minor), _minor(minor), _promote(promote), _track_starts(track_starts) {}
++  bool skip_operation() const override {
++    return _track_starts ? JamHeap::_track_starts : VM_GC_Operation::skip_operation();
++  }
 +  VMOp_Type type() const override { return VMOp_JamCollect; }
 +  void doit() override {
 +    JamHeap* heap = JamHeap::heap();
 +    GCCauseSetter cause(heap, _gc_cause);
++    if (_track_starts) {
++      guarantee(jam_vm_track_starts(heap->jam()), "Unable to allocate Jam object-start metadata");
++      Atomic::release_store(&JamHeap::_track_starts, true);
++    }
 +    heap->do_collection(_minor, _promote,
 +                        !_minor && (_gc_cause == GCCause::_allocation_failure ||
 +                                     _gc_cause == GCCause::_metadata_GC_clear_soft_refs));
 +  }
 +};
++
++void JamHeap::prepare_for_object_iteration() {
++  if (Atomic::load_acquire(&_track_starts)) return;
++  assert(!SafepointSynchronize::is_at_safepoint(), "Prepare before retaining raw oops");
++  uint count, full_count;
++  {
++    MutexLocker ml(Heap_lock);
++    count = total_collections();
++    full_count = total_full_collections();
++  }
++  VM_JamCollect operation(count, full_count, GCCause::_heap_inspection, false, false, true);
++  VMThread::execute(&operation);
++}
 +
 +HeapWord* JamHeap::allocate_or_collect_work(size_t size, bool tlab, bool verbose) {
 +  bool young = size <= _young_space->capacity() / HeapWordSize;
@@ -1510,15 +1615,15 @@
 +void JamHeap::prepare_for_verify() { ensure_parsability(false); }
 +
 +void JamHeap::verify(VerifyOption option) {
-+  // Existing VM verifier checks every object's class/fields and that the final
-+  // object boundary equals top(), in addition to Universe's external roots.
-+  _space->verify();
-+  _young_space->verify();
++  class VerifyObjects : public ObjectClosure {
++    void do_object(oop obj) override { oopDesc::verify(obj); }
++  } verify_objects;
++  object_iterate(&verify_objects);
 +
 +}
 --- a/src/hotspot/share/gc/jam/jamHeap.hpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.hpp
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,171 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -1646,7 +1751,10 @@
 +  void trace_external(uint32_t const* roots, size_t count);
 +
 +  // Heap walking support
++  void prepare_for_object_iteration() override;
 +  void object_iterate(ObjectClosure* cl) override;
++  static bool _track_starts;
++  static void record_start(oopDesc* obj);
 +
 +  // Moving collection waits for JNI critical regions through GCLocker.
 +  void pin_object(JavaThread* thread, oop obj) override;
@@ -2468,6 +2576,15 @@
    };
  
   protected:
+@@ -392,6 +393,8 @@
+   virtual GrowableArray<MemoryPool*> memory_pools() = 0;
+ 
+   // Iterate over all objects, calling "cl.do_object" on each.
++  // Called by diagnostic VM-operation prologues before retaining raw oops.
++  virtual void prepare_for_object_iteration() {}
+   virtual void object_iterate(ObjectClosure* cl) = 0;
+ 
+   virtual ParallelObjectIteratorImpl* parallel_object_iterator(uint thread_num) {
 --- a/src/hotspot/share/gc/shared/gcConfig.cpp
 +++ b/src/hotspot/share/gc/shared/gcConfig.cpp
 @@ -30,6 +30,9 @@
@@ -2571,7 +2688,19 @@
    }
 --- a/src/hotspot/share/gc/shared/gcVMOperations.cpp
 +++ b/src/hotspot/share/gc/shared/gcVMOperations.cpp
-@@ -95,7 +95,7 @@
+@@ -57,6 +57,11 @@
+   Heap_lock->unlock();
+ }
+ 
++bool VM_Verify::doit_prologue() {
++  Universe::heap()->prepare_for_object_iteration();
++  return VM_GC_Sync_Operation::doit_prologue();
++}
++
+ void VM_Verify::doit() {
+   Universe::heap()->prepare_for_verify();
+   Universe::verify();
+@@ -95,7 +100,7 @@
  
  static bool should_use_gclocker() {
    // Only Serial and Parallel use GCLocker to synchronize with threads in JNI critical-sections, in order to handle pinned objects.
@@ -2580,6 +2709,24 @@
  }
  
  bool VM_GC_Operation::doit_prologue() {
+@@ -146,6 +151,7 @@
+ }
+ 
+ bool VM_GC_HeapInspection::doit_prologue() {
++  Universe::heap()->prepare_for_object_iteration();
+   if (_full_gc && (UseZGC || UseShenandoahGC)) {
+     // ZGC and Shenandoah cannot perform a synchronous GC cycle from within the VM thread.
+     // So VM_GC_HeapInspection::collect() is a noop. To respect the _full_gc
+--- a/src/hotspot/share/gc/shared/gcVMOperations.hpp
++++ b/src/hotspot/share/gc/shared/gcVMOperations.hpp
+@@ -97,6 +97,7 @@
+ 
+ class VM_Verify : public VM_GC_Sync_Operation {
+  public:
++  bool doit_prologue() override;
+   VMOp_Type type() const { return VMOp_Verify; }
+   void doit();
+ };
 --- a/src/hotspot/share/gc/shared/gc_globals.hpp
 +++ b/src/hotspot/share/gc/shared/gc_globals.hpp
 @@ -30,6 +30,9 @@
@@ -2617,6 +2764,26 @@
                                                                              \
    product(bool, UseZGC, false,                                              \
            "Use the Z garbage collector")                                    \
+--- a/src/hotspot/share/gc/shared/memAllocator.cpp
++++ b/src/hotspot/share/gc/shared/memAllocator.cpp
+@@ -27,6 +27,9 @@
+ #include "gc/shared/allocTracer.hpp"
+ #include "gc/shared/collectedHeap.hpp"
+ #include "gc/shared/memAllocator.hpp"
++#if INCLUDE_JAMGC
++#include "gc/jam/jamHeap.hpp"
++#endif
+ #include "gc/shared/threadLocalAllocBuffer.inline.hpp"
+ #include "gc/shared/tlab_globals.hpp"
+ #include "memory/universe.hpp"
+@@ -230,6 +233,7 @@
+ }
+ 
+ void MemAllocator::Allocation::notify_allocation() {
++  JAMGC_ONLY(if (UseJamGC && JamHeap::_track_starts) JamHeap::record_start(obj());)
+   notify_allocation_low_memory_detector();
+   notify_allocation_jfr_sampler();
+   notify_allocation_dtrace_sampler();
 --- a/src/hotspot/share/gc/shared/referenceProcessor.cpp
 +++ b/src/hotspot/share/gc/shared/referenceProcessor.cpp
 @@ -179,7 +179,8 @@
@@ -2789,17 +2956,26 @@
  void JVMCIGlobals::check_jvmci_supported_gc() {
 --- a/src/hotspot/share/jvmci/vmStructs_jvmci.cpp
 +++ b/src/hotspot/share/jvmci/vmStructs_jvmci.cpp
-@@ -26,6 +26,9 @@
+@@ -26,6 +26,10 @@
  #include "code/compiledIC.hpp"
  #include "compiler/compileBroker.hpp"
  #include "gc/shared/collectedHeap.hpp"
 +#if INCLUDE_JAMGC
 +#include "gc/jam/jamBarrierSet.hpp"
++#include "gc/jam/jamHeap.hpp"
 +#endif
  #include "jvmci/jvmciCodeInstaller.hpp"
  #include "jvmci/jvmciCompilerToVM.hpp"
  #include "jvmci/jvmciRuntime.hpp"
-@@ -672,6 +675,7 @@
+@@ -60,6 +64,7 @@
+ #endif
+ 
+ #define VM_STRUCTS(nonstatic_field, static_field, unchecked_nonstatic_field, volatile_nonstatic_field) \
++  JAMGC_ONLY(static_field(JamHeap, _track_starts, bool)) \
+   static_field(CompilerToVM::Data,             oopDesc_klass_offset_in_bytes,          int)                                          \
+   static_field(CompilerToVM::Data,             arrayOopDesc_length_offset_in_bytes,    int)                                          \
+                                                                                                                                      \
+@@ -672,6 +677,7 @@
    declare_constant(CollectedHeap::Parallel)                               \
    declare_constant(CollectedHeap::G1)                                     \
    declare_constant(CollectedHeap::Epsilon)                                \
@@ -2807,10 +2983,11 @@
    declare_constant(CollectedHeap::Z)                                      \
    declare_constant(CollectedHeap::Shenandoah)                             \
                                                                            \
-@@ -854,6 +858,7 @@
+@@ -854,6 +860,8 @@
  
  
  #define VM_ADDRESSES(declare_address, declare_preprocessor_address, declare_function, declare_function_with_value) \
++  JAMGC_ONLY(declare_function(JamHeap::record_start))                       \
 +  JAMGC_ONLY(declare_function(JamBarrierSet::record_narrow))                \
    declare_function(SharedRuntime::register_finalizer)                     \
    declare_function(SharedRuntime::exception_handler_for_return_address)   \
@@ -2877,6 +3054,24 @@
  
  inline address stackChunkOopDesc::pc() const            { return jdk_internal_vm_StackChunk::pc(as_oop()); }
  inline void stackChunkOopDesc::set_pc(address value)    { jdk_internal_vm_StackChunk::set_pc(this, value); }
+--- a/src/hotspot/share/prims/jvmtiTagMap.cpp
++++ b/src/hotspot/share/prims/jvmtiTagMap.cpp
+@@ -1118,6 +1118,7 @@
+                                     jvmtiHeapObjectCallback heap_object_callback,
+                                     const void* user_data)
+ {
++  Universe::heap()->prepare_for_object_iteration();
+   // EA based optimizations on tagged objects are already reverted.
+   EscapeBarrier eb(object_filter == JVMTI_HEAP_OBJECT_UNTAGGED ||
+                    object_filter == JVMTI_HEAP_OBJECT_EITHER,
+@@ -1146,6 +1147,7 @@
+                                        const jvmtiHeapCallbacks* callbacks,
+                                        const void* user_data)
+ {
++  Universe::heap()->prepare_for_object_iteration();
+   // EA based optimizations on tagged objects are already reverted.
+   EscapeBarrier eb(!(heap_filter & JVMTI_HEAP_FILTER_UNTAGGED), JavaThread::current());
+   eb.deoptimize_objects_all_threads();
 --- a/src/hotspot/share/runtime/continuationFreezeThaw.cpp
 +++ b/src/hotspot/share/runtime/continuationFreezeThaw.cpp
 @@ -2448,6 +2448,9 @@
@@ -2927,6 +3122,34 @@
    template(SerialGCCollect)                       \
    template(ParallelCollectForAllocation)          \
    template(ParallelGCCollect)                     \
+--- a/src/hotspot/share/runtime/vmOperations.cpp
++++ b/src/hotspot/share/runtime/vmOperations.cpp
+@@ -172,6 +172,7 @@
+ bool VM_PrintThreads::doit_prologue() {
+   // Get Heap_lock if concurrent locks will be dumped
+   if (_print_concurrent_locks) {
++    Universe::heap()->prepare_for_object_iteration();
+     Heap_lock->lock();
+   }
+   return true;
+@@ -260,6 +261,7 @@
+ 
+ bool VM_ThreadDump::doit_prologue() {
+   if (_with_locked_synchronizers) {
++    Universe::heap()->prepare_for_object_iteration();
+     // Acquire Heap_lock to dump concurrent locks
+     Heap_lock->lock();
+   }
+--- a/src/hotspot/share/services/heapDumper.cpp
++++ b/src/hotspot/share/services/heapDumper.cpp
+@@ -2355,6 +2355,7 @@
+ }
+ 
+ bool VM_HeapDumper::doit_prologue() {
++  Universe::heap()->prepare_for_object_iteration();
+   if (_gc_before_heap_dump && (UseZGC || UseShenandoahGC)) {
+     // ZGC and Shenandoah cannot perform a synchronous GC cycle from within the VM thread.
+     // So collect_as_vm_thread() is a noop. To respect the _gc_before_heap_dump flag a
 --- a/src/hotspot/share/utilities/macros.hpp
 +++ b/src/hotspot/share/utilities/macros.hpp
 @@ -161,6 +161,24 @@

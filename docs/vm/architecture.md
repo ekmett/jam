@@ -209,17 +209,20 @@ allocation failure returns zero without enabling it. The VM then runs a major
 collection whose tracer calls `jam_vm_record_start` after each successful object
 claim. Raw allocations can contain many Java objects, so `jam_vm_allocate` does
 not invent a start for a TLAB. When tracking is enabled, the VM also records each
-new object after formatting it.
+new object before it can be exposed to a safepoint.
 
 `jam_vm_start_bits` borrows the current canonical bitmap through the generation's
 allocated high-water mark: one bit per eight-byte cell, returned in 32-bit words.
 Reacquire the view after each collection and inspect it only with mutators stopped.
 The tracer supplies the meaning of the bits; core Jam does not decode Java headers.
-Native Image enables tracking on its first heap-dump request and takes a major
-collection to establish starts, including when that request disables its usual
-pre-dump GC. Its allocation snippets then record new formatted objects. Further
-dumps can use the maintained bitmap without an extra collection. HotSpot's
-separate diagnostic enumeration integration is still in progress.
+Both VM adapters enable tracking before their first diagnostic heap walk and
+take a major collection to establish starts, even when the request normally
+skips collection. HotSpot prepares on the requesting thread before the diagnostic
+operation retains raw object pointers. Its interpreter, C1, C2, Graal and slow
+allocation paths then record new starts; Native Image uses its allocation
+snippets. Later walks use the maintained bitmap without an extra collection.
+HotSpot verification flags enable tracking at startup because verification can
+run before a diagnostic request. TLAB allocation remains enabled.
 
 The metadata packer has `template<bool tracks_starts>` specializations. The false
 version never accesses start bits. The true version relocates them in the existing

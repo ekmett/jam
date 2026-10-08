@@ -74,7 +74,7 @@ needs to be passed through guest code.
 Use this GraalVM as the image builder for the Truffle application. Keep its
 language and Truffle dependencies on the application's normal image class path
 and add `--gc=jam` to the build. The runtime compiler uses Jam's allocation and
-card barriers; collection repairs stack, continuation and installed-code
+exact-slot barriers; collection repairs stack, continuation and installed-code
 references as well as the image heap's writable roots.
 
 The thc owner still needs to lower weak primitives through `jam.vm.Weak` and

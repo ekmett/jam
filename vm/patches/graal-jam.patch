@@ -1,10 +1,12 @@
 --- a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/GraalHotSpotVMConfig.java
 +++ b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/GraalHotSpotVMConfig.java
-@@ -503,6 +503,8 @@
+@@ -503,6 +503,10 @@
      public final long stubArrayPartition = getFieldValue("StubRoutines::_array_partition", Long.class, "address");
  
      // Allocation stubs that return null when allocation fails
 +    public final long jamRememberAddress = gc == HotSpotGraalRuntime.HotSpotGC.Jam ? getAddress("JamBarrierSet::record_narrow") : 0;
++    public final long jamTrackStartsAddress = gc == HotSpotGraalRuntime.HotSpotGC.Jam ? getFieldAddress("JamHeap::_track_starts", "bool") : 0;
++    public final long jamRecordStartAddress = gc == HotSpotGraalRuntime.HotSpotGC.Jam ? getAddress("JamHeap::record_start") : 0;
 +
      public final long newInstanceOrNullAddress = getAddress("JVMCIRuntime::new_instance_or_null");
      public final long newArrayOrNullAddress = getAddress("JVMCIRuntime::new_array_or_null");
@@ -69,21 +71,25 @@
              }
 --- a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/meta/HotSpotHostForeignCallsProvider.java
 +++ b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/meta/HotSpotHostForeignCallsProvider.java
-@@ -176,6 +176,9 @@
+@@ -176,6 +176,12 @@
   */
  public abstract class HotSpotHostForeignCallsProvider extends HotSpotForeignCallsProviderImpl implements ArrayCopyForeignCalls {
  
++    public static final HotSpotForeignCallDescriptor JAM_RECORD_START = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(),
++                    "jam_record_start", void.class, Word.class);
++
 +    public static final HotSpotForeignCallDescriptor JAM_REMEMBER = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(),
 +                    "jam_remember", void.class, Object.class, Word.class, long.class);
 +
      public static final HotSpotForeignCallDescriptor JAVA_TIME_MILLIS = new HotSpotForeignCallDescriptor(LEAF_NO_VZERO, NO_SIDE_EFFECT, NO_LOCATIONS, "javaTimeMillis", long.class);
      public static final HotSpotForeignCallDescriptor JAVA_TIME_NANOS = new HotSpotForeignCallDescriptor(LEAF_NO_VZERO, NO_SIDE_EFFECT, NO_LOCATIONS, "javaTimeNanos", long.class);
  
-@@ -463,6 +466,7 @@
+@@ -463,6 +469,8 @@
  
      public void initialize(HotSpotProviders providers, OptionValues options) {
          GraalHotSpotVMConfig c = runtime.getVMConfig();
 +        if (c.jamRememberAddress != 0) registerForeignCall(JAM_REMEMBER, c.jamRememberAddress, NativeCall);
++        if (c.jamRecordStartAddress != 0) registerForeignCall(JAM_RECORD_START, c.jamRecordStartAddress, NativeCall);
          registerForeignCall(DEOPT_BLOB_UNPACK, c.deoptBlobUnpack, NativeCall);
          if (c.deoptBlobUnpackWithExceptionInTLS != 0) {
              registerForeignCall(DEOPT_BLOB_UNPACK_WITH_EXCEPTION_IN_TLS, c.deoptBlobUnpackWithExceptionInTLS, NativeCall);
@@ -621,3 +627,47 @@
      private static final CGlobalData<CCharPointer> MAP_VIEW_OF_FILE_3 = CGlobalDataFactory.createCString("MapViewOfFile3");
      private static final CGlobalData<CFunctionPointerPointer<MapViewOfFile3>> MAP_VIEW_OF_FILE_3_POINTER = CGlobalDataFactory.createWord(WindowsUtils.UNINITIALIZED_POINTER);
  
+--- a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/replacements/HotSpotAllocationSnippets.java
++++ b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/replacements/HotSpotAllocationSnippets.java
+@@ -31,6 +31,7 @@
+ import static jdk.graal.compiler.hotspot.HotSpotBackend.NEW_ARRAY_OR_NULL;
+ import static jdk.graal.compiler.hotspot.HotSpotBackend.NEW_INSTANCE_OR_NULL;
+ import static jdk.graal.compiler.hotspot.HotSpotBackend.NEW_MULTI_ARRAY_OR_NULL;
++import static jdk.graal.compiler.hotspot.meta.HotSpotHostForeignCallsProvider.JAM_RECORD_START;
+ import static jdk.graal.compiler.hotspot.replacements.HotSpotReplacementsUtil.HotSpotOptimizingFieldLocationIdentity.CLASS_ARRAY_KLASS_LOCATION;
+ import static jdk.graal.compiler.hotspot.replacements.HotSpotReplacementsUtil.HotSpotFieldLocationIdentity.CLASS_INIT_STATE_LOCATION;
+ import static jdk.graal.compiler.hotspot.replacements.HotSpotReplacementsUtil.HotSpotFieldLocationIdentity.CLASS_INIT_THREAD_LOCATION;
+@@ -65,6 +66,7 @@
+ import static jdk.vm.ci.meta.DeoptimizationReason.RuntimeConstraint;
+ 
+ import org.graalvm.word.UnsignedWord;
++import org.graalvm.word.LocationIdentity;
+ import org.graalvm.word.impl.Word;
+ 
+ import jdk.graal.compiler.api.replacements.Fold;
+@@ -422,11 +424,25 @@
+         return getMinimalBulkZeroingSize(INJECTED_OPTIONVALUES);
+     }
+ 
++    @Fold
++    static long jamTrackStartsAddress(@InjectedParameter GraalHotSpotVMConfig config) {
++        return config.jamTrackStartsAddress;
++    }
++
++    @NodeIntrinsic(ForeignCallNode.class)
++    private static native void recordJamStart(@ConstantNodeParameter ForeignCallDescriptor descriptor, Word object);
++
+     @Override
+     public final void initializeObjectHeader(Word memory, Word hub, boolean isArray) {
+         KlassPointer klassPtr = KlassPointer.fromWord(hub);
+         Word markWord = Word.signed(HotSpotReplacementsUtil.defaultPrototypeMarkWord(INJECTED_VMCONFIG));
+         HotSpotReplacementsUtil.initializeObjectHeader(memory, markWord, klassPtr);
++        long starts = jamTrackStartsAddress(INJECTED_VMCONFIG);
++        Word flag = Word.unsigned(starts);
++        if (starts != 0 && flag.readByte(0, LocationIdentity.any()) != 0) {
++            // This leaf call records only the address; formatting finishes before any safepoint.
++            recordJamStart(JAM_RECORD_START, memory);
++        }
+     }
+ 
+     @Override

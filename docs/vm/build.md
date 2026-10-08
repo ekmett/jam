@@ -136,8 +136,8 @@ bash tools/build_hotspot.sh
 
 The first command builds `build-jam/` and runs the native tests. The second
 configures and builds the selected JDK flavor with `jamgc`, `epsilongc` and `serialgc`.
-Jam uses Serial's block-offset-table utility, so the Serial build feature is
-required even when Jam is the selected collector.
+The other collectors remain available in the build; Jam no longer depends on
+Serial's block-offset-table utility.
 
 Use the completed image's `bin/java`; the path helper selects the host platform:
 
@@ -178,7 +178,7 @@ bash tools/build_graal.sh
 
 This builds `build/graalvm/`, including patched libgraal, the Jam backend and
 the weak API. Use it as `JAVA_HOME` and select Jam as above. The compiler uses
-Jam's card table for old-to-young stores. Compressed oops remain enabled.
+Jam's exact remembered slots for old-to-young stores. Compressed oops remain enabled.
 
 The build uses the pinned `mx` checkout and keeps downloaded build dependencies
 in `.toolchains/mx-cache/`. `JAM_GRAAL_OUTPUT` selects another output directory;

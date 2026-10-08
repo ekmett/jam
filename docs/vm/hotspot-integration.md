@@ -149,10 +149,10 @@ Java and generalized weak policy both use jam's actual marks and movement.
 
 ## Compiler support
 
-Interpreter, C1 and C2 use Jam's card barriers. The
+Interpreter, C1 and C2 record exact old-to-young source slots. The
 [Graal patch](https://github.com/ekmett/jam/blob/main/vm/patches/graal-jam.patch) recognizes Jam's exported collector
-identity and selects the generic card-table barrier set. Both Java Graal and
-libgraal use that selection. The VM checks the actual compiler's GC support
+identity and lowers stores and array copies to the same remembered-slot API.
+Both Java Graal and libgraal use that lowering. The VM checks the actual compiler's GC support
 before installing Java code, including code returned by a libgraal isolate.
 An unmodified compiler cannot silently treat Jam as Serial GC.
 

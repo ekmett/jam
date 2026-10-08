@@ -24,7 +24,8 @@ shift-three compressed oops. Each generation, including its guard and copy
 reserve, must fit within a 16 GiB domain. Class unloading and CDS heap loading
 are disabled.
 
-Interpreter, C1, C2 and the patched Graal compiler use Jam's card barriers.
+Interpreter, C1, C2 and the patched Graal compiler record exact old-to-young
+source slots in Jam's remembered set.
 The GraalVM build includes patched libgraal. The VM rejects a compiler that
 does not recognize Jam before it can install Java code. Other operating
 systems and instruction sets still need validation.

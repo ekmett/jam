@@ -51,6 +51,8 @@ cases = [
      '--add-opens=jdk.internal.vm.ci/jdk.vm.ci.hotspot=ALL-UNNAMED'], [],
      'InvalidationReasonSmoke passed:'),
     ('HeapSmoke', [], ['walk'], 'allocation checks passed'),
+    ('JvmHeapWalkSmoke', ['-Xms128m', '-Xmx128m', '-Djam.heap.walk.first=jvmti', '-XX:-VerifyBeforeGC', '-XX:-VerifyAfterGC', '-XX:-VerifyBeforeExit'],
+     ['allocate', 'array', 'duplicate'], 'JvmHeapWalkSmoke passed:'),
     ('WeakSmoke', [], [], 'finalization checks passed'),
     ('BoundarySmoke', [], [], 'phantom checks passed'),
     ('GenerationSmoke', [], ['store', 'arrayStore', 'unsafeStore', 'largeStore', 'copy'],
