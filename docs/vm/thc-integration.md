@@ -11,6 +11,12 @@ The thc owner can lower weak primitives to this API and wrap Haskell finalizers
 in runnables that enter thc. The collector owns reachability, retirement and
 at-most-once claims. The runnable owns entering and executing the guest code.
 
+For lifted Haskell keys, the agreed [language-owned weak handoff](lifted-tracing.md)
+uses bootstrap finalizers on top of this API. THC owns resolution and the stable
+logical handle; it does not wait for a Jam Lifted interface or collector-entry
+compiler. That wrapper is planned, not yet implemented. Ordinary unlifted keys
+continue to use the direct registration below.
+
 Run the source-tree commands below from `vm/`.
 
 ## Build the API

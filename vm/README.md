@@ -69,7 +69,7 @@ low-level claims, native loading and the thc handoff.
 * [Native Image](../docs/vm/native-image.md)
 * [Integrating thc](../docs/vm/thc-integration.md)
 * [Weak-pointer semantics](../docs/vm/weak-pointers.md)
-* [Lifted reference tracing](../docs/vm/lifted-tracing.md) (proposed interface)
+* [Lifted weak references](../docs/vm/lifted-tracing.md) (language-layer plan)
 * [Heap architecture](../docs/vm/architecture.md)
 * [HotSpot integration](../docs/vm/hotspot-integration.md)
 * [Supported configurations](../docs/vm/status.md)

@@ -1,162 +1,125 @@
-# Lifted reference tracing
+# Lifted weak references
 
 <!-- SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com> -->
 <!-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
-**Design accepted October 7, 2026; not implemented.** Jam owns the VM interface
-and collector integration. [THC](https://github.com/ekmett/thc) owns its language
-implementations. The interface below is the proposed contract, not an API in
-released runtime packages.
+**Plan agreed October 7, 2026; not implemented.** This replaces the proposed
+collector-integrated Lifted interface and collector-entry compiler plan.
 
-## Purpose and ownership
+A thunk can die while its answer remains live. A weak reference to the thunk
+alone therefore has the wrong identity for a Haskell weak key. We need to
+follow the answer, but we need not teach the collector what a thunk is.
 
-A lifted reference can point to a computation or its result. Once a thunk has
-an answer, we want incoming lifted references to skip the thunk. A selector can
-also shed the rest of a constructor once its chosen field is available, without
-evaluating that field. The language supplies these rules as methods; `jam::vm`
-must make those methods safe to run during collection on HotSpot and
-SubstrateVM.
+`lifted_ptr<T>` and `lifted_weak<T>` are concepts in `jam::vm` and its language
+implementations. They are not new core Jam pointer types. The language owns
+resolution, forcing states and representation; the VM layer supplies ordinary
+weak associations and finalizer execution. The names here describe the design,
+not shipped C++ templates or Java classes.
 
-Keep Jam physical forwarding as address lookup plus popcount. Do not add THC type knowledge to forwarding, marking, the frontier, or compaction. Do not substitute a terminal-thunk-only hook for this general protocol.
+## Use the finalizer we already have
 
-## Native model first
+An ordinary association is `K ⇒ (V, F)`: an independently live key retains the
+value and finalizer. The key and value are separate, even when they initially
+name the same object. The value can be a backing object carrying ownership or
+finalization state, such as a foreign-resource owner. Its return edge to the
+key cannot make the association live by itself.
 
-An ordinary `ptr<T>` names the object whose identity it preserves. A `lifted_ptr<T>` may name either a computation or its value. The incoming lifted pointer's tracer probes the target through a common vtable protocol, follows available replacements, rewrites its actual source slot, then requests ordinary tracing of the endpoint. The concrete target's tracing method supplies its allocation extent and outgoing fields. Use existing virtual `claim_and_trace`/`tracer<T>` machinery, not a second interpreted layout schema or redundant tag word.
-
-Resolve an incoming lifted edge even when some other edge already marked its original target. Mark-once controls traversal of allocations; it does not control which incoming references get shortened. Never cast an unresolved computation to T.
-
-Existing native `visitor.pointer`, `field`, and `target` separate slot declaration from following its contents. Hosted `visitor.fields` already receives indices identifying the actual mutable slots. The hosted shim can normalize before declaring/following those slots without changing Jam's collector algorithms. A native C++ implementation of `lifted_ptr` would additionally need a sanctioned collector-owned store capability: ordinary mutator assignment/barriers are not legal during collection.
-
-## Java interface
-
-Expose this beside `jam.vm.Weak`, in the bridge API supplied by Jam:
-
-```java
-package jam.vm;
-
-public interface Lifted {
-    Lifted resolve();
-    Lifted resolveField(int field);
-}
-```
-
-`resolve()` returns the next replacement, or null when no replacement is available. An ordinary terminal value and an unresolved thunk both return null. Null means stop, not WHNF, death, or a null guest value. A completed indirection returns its referent, which may itself be another thunk.
-
-`resolveField(n)` returns the existing lifted reference at the language-defined projection n when available without evaluation; otherwise null. It must not box an unboxed field or force the selected field. THC defines the projection numbering and constructor-shape contract from its existing layouts. It forwards this request through already available indirections. Invalid compiler-generated projections remain compiler/runtime bugs; do not silently reinterpret an arbitrary field as lifted.
-
-A selector is itself a lifted object. Its `resolve()` asks its target for `resolveField(n)`. On success it publishes the answer as an indirection and discards the old target/captures. On failure it keeps the unresolved selector. A projected answer may remain unevaluated.
-
-Use plain `Lifted`. Generic `Lifted<T>` could add source-level constraints but erases to the same JVM type and does not help collector dispatch. In particular `Thunk<T>` erases to `Thunk`, so a field declared `Thunk<T>` cannot receive an unrelated constructor. A rewritable reference field uses the common `Lifted` type; concrete carrier references keep their ordinary identity and tracing policy.
-
-The VM already enumerates physical reference slots and can inspect a referent's class/interface metadata. This identifies potential protocol implementations, but does not alone grant permission to replace every reference to that object. Eligible fields, array elements, and roots need a representation/type contract permitting every endpoint. Generated THC storage that currently uses `Object` needs an explicit semantic mapping or migration to `Lifted`; do not infer eligibility merely from `Object` or rewrite concrete `Thunk` slots. Preserve Java-owned handles/monitors and any references requiring wrapper identity.
-
-## Resolution and tracing
-
-For a nonnull eligible source slot, the semantic operation is:
+For an unlifted key, register that association directly. For a lifted key,
+the language first checks whether it can resolve the thunk without evaluating
+it. If an ordinary target is already available, register against that target.
+Otherwise register against the thunk, with a bootstrap finalizer:
 
 ```text
-last = load(slot)
-while (next = last.resolve()) is not null:
-    last = next
-store_gc(slot, last)
-declare_real_slot_for_relocation(slot)
-trace_normally(last)
+register(thunk, value, bootstrap(thunk, value, real_finalizer, control))
+
+when bootstrap runs:
+    inspect the thunk using the language's resolution rules
+    if a replacement is available:
+        install the association against the replacement
+        publish its registration in control
+    otherwise:
+        retire the logical weak handle and invoke the real finalizer
 ```
 
-This shows the successful acyclic path. The implementation must also terminate on self/cyclic indirections without evaluating them or manufacturing a value; there must be no arbitrary depth limit on valid chains. Preserve a valid opaque reference when a cycle prevents contraction. Never register a temporary local copy instead of the persistent source slot.
+This is lifecycle pseudocode, not a new Jam API. An unresolved replacement can
+need the same bootstrap strategy again; an ordinary result uses a normal weak
+registration. Resolve available chains without forcing, and handle self/cyclic
+indirections without endlessly reinstalling equivalent registrations. The
+language must distinguish an ordinary terminal value from an unresolved thunk;
+`resolve()` returning null alone does not establish that distinction.
 
-When `resolve()` returns null immediately, trace the original object as an ordinary Java object. After rewriting to another unresolved thunk, trace that thunk normally, including its live captures. Its outgoing lifted fields recursively use the same rule.
+The bootstrap runs when the normal finalizer pump invokes it, outside GC.
+It can use ordinary language methods, allocate, synchronize and install another
+weak association. There is no collector callback to `resolve()` or `project()`.
+Existing Java references keep their ordinary types and identities.
 
-A selector's own ordinary object scan must also have a way to perform its contraction before following obsolete captures, when a direct reference retains the wrapper. Incoming-edge normalization alone must not leave the old selector environment strongly reachable indefinitely.
+## Hold the right things through the handoff
 
-Collector stores must preserve relocation and generational bookkeeping, including old-to-young edges created by contraction, old source slots repaired after a minor collection, compressed references and applicable roots. Existing old-slot repair/card mechanisms remain authoritative. Normalize before enqueueing: a frontier job knows the target, not the original source slot.
+The bootstrap finalizer must capture the thunk, backing value and real finalizer.
+While its key is live, these are conditional edges. When the registration
+retires, the ordinary finalizer machinery retains the queued/running callback
+and its captures. That keeps the thunk and its current answer safe to inspect,
+and keeps the backing object available even though the retiring association's
+value is no longer dereferenceable.
 
-## Laws and safety
+The replacement registration must be installed and published before releasing
+those captures. A callback that triggers collection must obey the usual rooting
+and borrowing rules. Reuse the existing finalizer claim/completion protocol;
+there must be no interval in which the backing value or real finalizer is lost.
+Once the handoff completes, the old callback must release its obsolete captures.
+Do not accidentally make the new callback retain the original thunk forever.
+References deliberately present in the user's value or finalizer retain their
+normal meaning.
 
-- If resolution gives y, evaluating x and y has the same guest result/effects: resolution performs no guest evaluation and preserves sharing. Physical Java wrapper identity is deliberately preserved only by ordinary references.
-- For stable published state, normalizing twice gives the same endpoint as normalizing once. A later thunk update can make further normalization possible in a later collection.
-- `null` stops at the last nonnull object; it never overwrites a live slot with null.
-- Selector contraction retains the chosen field and releases obsolete selectee captures. It never evaluates the field, loses its sharing, or treats an unboxed field as a reference.
-- Unevaluated, owned/blackholed, suspended, failed and completed states retain their distinct meanings. Failure and ownership are not successful forwarding.
-- Weak-key normalization never marks the key. The independently marked endpoint controls conditional reachability. Keep the weak least fixed point and freeze dead decisions before finalizer rescue; keep/rebind resolution policy across collections when endpoints can later change.
-- Termination and relocation hold for long chains, cycles, young/old references, Java-held roots, and both VM providers. Source-slot exclusivity is not sufficient to synchronize concurrent updates to a shared selector: the owner must define publication and contraction rules before enabling parallel dispatch.
+The user-facing handle needs stable control state across registrations. That
+state may hold tokens and lifecycle state, but the handle must not strongly
+retain the thunk, value or callbacks through it. The callbacks may refer to the
+control state; the reverse strong path would defeat weak reachability. Dropping
+the handle must not cancel finalization.
 
-## Collector-safe method execution is required work
+Bootstrap retirement is not logical retirement. Dereferencing during a queued
+or running handoff, explicit finalization racing the pump, nested collection,
+and failure while installing a replacement all need a defined language-level
+policy. A null result from the expired bootstrap token is not sufficient to
+permanently expire the outer handle. The implementation plan requires these
+cases to be settled before delivery. Real finalization remains at most once,
+and resurrection never rearms a logically retired handle.
 
-Ordinary `invokeinterface`/JavaCalls from a HotSpot collector callback is not a valid implementation. Jam must provide a verified/generated collector entry for language-defined resolution methods. For SubstrateVM, use an equivalent verified uninterruptible call graph. The entry must neither allocate, safepoint, block, initialize classes, throw, deoptimize, nor evaluate guest code. Compile/validate implementations and their reachable helpers before they can be invoked during collection. Include class-loader and code-lifetime ownership.
+## Why this approach
 
-The intent is language-owned semantics, not a growing VM switch over THC thunk/constructor classes. If the required method dispatch cannot be supplied safely, report that design gap before replacing it with narrower descriptors. Do not introduce a separate weak-key field-descriptor API; weak keys must use the same language-owned resolution protocol without marking the endpoint.
+The old plan required collector-safe Java method compilation, special dispatch,
+slot rewriting and lifetime rules for installed code. A terminal field-descriptor
+API added a competing resolution protocol without implementing the general one.
+Both approaches made the collector responsible for a language's indirection
+strategy. Neither is the implementation path for this plan.
 
-## THC integration and delivery
+Here the language chooses how to resolve its values. Jam sees ordinary weak
+registrations and ordinary finalizers. No Lifted interface, pointer-kind switch,
+class/field registration or resolver metadata is added to the core collector.
+Existing weak users incur no new resolution dispatch or bootstrap bookkeeping.
+Only users of this strategy pay for its registrations, captured state and handoffs.
 
-1. Jam owns the canonical design in its repository, the bridge API, safe entry compilation/validation, slot discovery/store semantics, and matching HotSpot/SubstrateVM implementations. Supply a versioned package/artifact containing the API and both providers, with focused evidence and build times. An interface JAR alone is not qualification.
-2. THC implements the published interface on its lifted carriers and selectors, using existing `Thunk`, `DataLayout`/`DataValues`, capture and frame machinery. Inventory all lifted storage, arrays and roots; keep primitive/vector/aggregate storage and normal Java references unchanged. No per-object forwarding registry or replacement of normal CBD decoding.
-3. Current THC state 2 means terminal WHNF; `Force` rejects a thunk result. General selector indirections to an unevaluated thunk require an explicit alias-state/forcing-contract change, preserving ownership, sharing, masking, suspension, tail handoff and both execution backends. Do not label that alias WHNF.
-4. Qualify observable behavior with compact, intentional checks: ordinary value/unresolved thunk, a chain ending in an unresolved thunk, selector retention of only the chosen field, cycle termination, old-to-young relocation, and weak liveness through an independently live endpoint. Exercise both providers and relevant THC modes, with independent GHC results where applicable. Reuse existing producers; no giant matrix or additional acquisition harness.
+The price is delayed reclamation and finalization. A bootstrap callback retains
+the thunk and its answer even if both were otherwise dead. Installing a new weak
+association can therefore require another collection before the real finalizer
+becomes eligible. Longer chains and pump scheduling can add further delay; there
+is no fixed one-collection guarantee. Retained captures can also affect other
+weak associations during that interval. This is not a claim of identical
+collection-by-collection behavior to collector-time normalization or GHC.
 
-Measure collector overhead and record build duration alongside qualification.
+This weak strategy does not contract ordinary strong references or discard
+selector environments during GC. Such optimizations are separate language/VM
+work, not prerequisites for this handoff and not implemented by it.
 
-## Next dispatch decision
+## Ownership and delivery
 
-The first implementation gate is a collector entry for the language-authored
-methods on HotSpot. Identify how to compile and verify the restricted call graph,
-enter it from a GC worker, and keep its code and class metadata alive without
-requiring a Java thread transition. A normal compiled Java method is not such
-an entry merely because its source contains no allocations. Its generated code
-may still contain safepoint polls, resolution paths or deoptimization points.
-SubstrateVM must enforce equivalent restrictions through its uninterruptible
-call graph, including every possible virtual implementation.
+THC owns its resolution policy and the language wrapper/state machine. `jam::vm`
+provides the existing `jam.vm.Weak` association and pump protocol and checks its
+generic retention guarantees on HotSpot and Native Image. Core Jam needs no
+change for this plan. Any discovered backend defect must be fixed as an ordinary
+weak-association defect, not by adding a lifted-specific hook.
 
-### Source investigation
-
-HotSpot's normal `JavaCallWrapper` requires a Java thread, rejects VM-thread
-entry, and performs a thread-state transition that can block. Calling an
-ordinary compiled method directly does not remove its Java-thread assumptions.
-See [JavaCalls](https://github.com/openjdk/jdk/blob/6c48f4ed707bf0b15f9b6098de30db8aae6fa40f/src/hotspot/share/runtime/javaCalls.cpp).
-
-Graal's runtime-stub backend is a candidate for a separate entry. Its
-[stub checks](https://github.com/oracle/graal/blob/7b025988a922a73286d1326e1eddc1ca39d3f569/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/stubs/Stub.java)
-reject ordinary Java calls, embedded object/metadata constants, exception
-handlers and speculative assumptions. These checks do not establish collector
-safety: runtime calls are still possible, including paths we must reject.
-There is no existing Jam path that compiles an application's resolver into
-such an entry. We would need graph validation, collector-specific lowering of
-dispatch and stores, a native calling convention, and code/class-lifetime
-management. The first implementation targets GraalVM HotSpot; HotSpot packages without a
-Graal compiler are outside its critical path.
-
-SubstrateVM's
-[uninterruptible checker](https://github.com/oracle/graal/blob/7b025988a922a73286d1326e1eddc1ca39d3f569/substratevm/src/com.oracle.svm.hosted/src/com/oracle/svm/hosted/code/UninterruptibleAnnotationChecker.java)
-rejects allocations and Java monitor entry, checks overrides and callees, and
-restricts class initialization. It is not a no-throw/no-block guarantee.
-`ImplicitExceptions.throwCachedNullPointerException` and `VMMutex.lockNoTransition`
-are counterexamples in the VM itself. Uninterruptible code also omits ordinary
-stack-overflow checks. An annotation cannot make recursive selector dispatch safe.
-
-The candidate validation boundary is a closed, AOT call graph on SubstrateVM
-and separately compiled collector entries on HotSpot. Check every possible
-implementation and reachable helper. Reject annotation escape hatches, unchecked
-native calls, exception/deoptimization paths and unbounded recursive dispatch;
-allow only audited collector-safe foreign operations. Require class initialization
-and code installation before collection, and validate collector stores separately.
-Keep chain traversal and cycle handling in the collector; each resolver step
-needs bounded execution. SubstrateVM qualification must keep its annotation
-checker enabled, including avoiding the experimental reachability-analysis mode
-that skips it.
-
-This is a source-validated architectural gap, not a working dispatch prototype
-or a proof that the design is impossible. The next runtime experiment must
-compile a language-authored resolver into a separate collector entry, exercise
-it from the real scanner, and reject representative unsafe implementations.
-Until that succeeds on both providers, the interface remains proposed and
-consumers should defer storage migration. A finite set of thunk descriptors is
-not an implementation of these methods.
-
-Once the API is stable, consumers pin a release's
-[runtime manifest](distribution.md), the matching bridge JAR and provider
-archives. Qualification must identify the source revision and exercise both
-providers; a separately published interface JAR is insufficient. THC can then
-implement the carriers and migrate eligible slots against that version.
-
-The [collector-entry implementation plan](lifted-dispatch-plan.md) defines the
-bounded prototype, validation gates and delivery boundary.
+The [implementation plan](lifted-dispatch-plan.md) records the lifecycle and
+qualification work. The [weak-pointer contract](weak-pointers.md) remains the
+underlying collector contract; this document does not change its fixed point,
+batch retirement, generational treatment or finalizer ordering.
