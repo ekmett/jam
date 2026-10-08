@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
 module;
-#include <native/attributes.h>
+#include <hint.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>

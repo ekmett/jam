@@ -7,7 +7,7 @@
 module;
 #include <native/config.h>
 #include <native/targets.h>
-#include <native/attributes.h>
+#include <hint.h>
 #include <array>
 #include <bit>
 #include <cassert>
@@ -25,24 +25,24 @@ module;
 // Temporary bridge until native exposes per-lane variable shifts.
 // Intrinsic calls are owned by the global module fragment.
 namespace {
-native_inline native_const native_target("avx2")
+hint_inline hint_const hint_target("avx2")
 __m256i shift_left(__m256i value, __m256i counts) noexcept {
   return _mm256_sllv_epi32(value, counts);
 }
-native_inline native_const native_target("avx512f")
+hint_inline hint_const hint_target("avx512f")
 __m512i shift_left(__m512i value, __m512i counts) noexcept {
   return _mm512_sllv_epi32(value, counts);
 }
-native_inline native_const native_target("avx2")
+hint_inline hint_const hint_target("avx2")
 __m256i shift_right(__m256i value, __m256i counts) noexcept {
   return _mm256_srlv_epi32(value, counts);
 }
-native_inline native_const native_target("avx512f")
+hint_inline hint_const hint_target("avx512f")
 __m512i shift_right(__m512i value, __m512i counts) noexcept {
   return _mm512_srlv_epi32(value, counts);
 }
 // Native's AVX2 compress_store currently copies through a stack buffer.
-native_inline native_target("avx2")
+hint_inline hint_target("avx2")
 void store_prefix(std::uint32_t * target, __m256i value, unsigned count) noexcept {
   auto const mask = _mm256_cmpgt_epi32(_mm256_set1_epi32(count),
                                      _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
@@ -195,7 +195,7 @@ static_assert(sizeof(heap_block) == 16 && offsetof(heap_block, live) == 0
 #if NATIVE_HOST_X86
 // Avoid expanding native's scalar from_bitset loop before each AVX2 gather/store.
 template<class V>
-native_inline native_const native_target(NATIVE_TARGET_jam_avx2)
+hint_inline hint_const hint_target(NATIVE_TARGET_jam_avx2)
 typename V::mask vector_mask(bitmap bits) noexcept {
   static_assert(V::lanes == 8);
   constexpr std::array<bitmap, 8> positions{1, 2, 4, 8, 16, 32, 64, 128};
@@ -203,7 +203,7 @@ typename V::mask vector_mask(bitmap bits) noexcept {
 }
 
 template<class V>
-native_inline native_target(NATIVE_TARGET_jam_avx2)
+hint_inline hint_target(NATIVE_TARGET_jam_avx2)
 bitmap pack_store(word * target, bitmap kept, V value) noexcept {
   auto const packed = native::compress(vector_mask<V>(kept), value);
   store_prefix(reinterpret_cast<bitmap *>(target), packed.value.to_native(),

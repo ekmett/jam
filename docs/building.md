@@ -5,7 +5,9 @@
 
 Jam requires Clang 23+, CMake 4.4+ and Ninja on macOS, Linux or Windows 10 1803+.
 CMake checks the C++26 features and platform page size. It fetches a pinned
-[native](https://github.com/ekmett/native) for SIMD, target dispatch and attributes.
+[native](https://github.com/ekmett/native) for SIMD and target dispatch.
+[Hint](https://github.com/ekmett/hint) supplies the textual `<hint.h>` attribute
+catalog through `hint::hint`; Native fetches a pinned Hint revision.
 To use an existing checkout, set `FETCHCONTENT_SOURCE_DIR_JAM_NATIVE=/path/to/native`.
 
 ```sh
@@ -43,10 +45,10 @@ add_executable(example example.cc)
 target_link_libraries(example PRIVATE jam::jam)
 ```
 
-Set `CMAKE_PREFIX_PATH` to the installation prefix. The package includes native
-and module sources; CMake regenerates consumer BMIs after installation or
-relocation. The compiler, standard library, exception mode and extension mode
-must match the module build. `jam::jam` supplies C++26.
+Set `CMAKE_PREFIX_PATH` to the installation prefixes for Jam, native and Hint.
+Jam installs its module sources; CMake regenerates consumer BMIs after
+installation or relocation. The compiler, standard library, exception mode and
+extension mode must match the module build. `jam::jam` supplies C++26.
 
 With Clang 23.1.2 and libc++ on macOS, include `<new>` before importing Jam.
 Without it, the README example crashes the compiler while emitting libc++'s

@@ -4,6 +4,7 @@
 @PACKAGE_INIT@
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
+find_dependency(hint CONFIG)
 find_dependency(native CONFIG COMPONENTS native)
 include("${CMAKE_CURRENT_LIST_DIR}/jamTargets.cmake")
 if(WIN32)
