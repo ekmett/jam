@@ -135,6 +135,7 @@ public final class WeakBridgeSmoke {
         long old = bootstrap(answer, calls, handle);
         System.gc();
         check(Weak.deref(old) == null, "dead thunk retires its bootstrap registration");
+        System.gc(); // Another collection while the bootstrap is queued, before take().
         check(Weak.pump() == 1 && handle[0] > old && calls[0] == 0, "handoff does not run real finalizer");
         System.gc();
         check(Weak.deref(handle[0]) instanceof byte[] payload && payload.length == 4096 && payload[0] == 42,
