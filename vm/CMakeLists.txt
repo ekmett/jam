@@ -18,6 +18,10 @@ if(APPLE)
   set_target_properties(jam-vm PROPERTIES BUILD_RPATH "${JAM_VM_RUNTIME}")
 endif()
 if(JAM_BUILD_TESTS)
+  add_executable(jam-weak-registry-test t/weak-registry-test.cc)
+  target_sources(jam-weak-registry-test PRIVATE FILE_SET CXX_MODULES FILES
+    t/weak-registry.ccm src/thc/jam/weak.ccm)
+  add_test(NAME jam-weak-registry-test COMMAND jam-weak-registry-test)
   add_executable(jam-vm-test t/jam_vm_test.cc)
   set_target_properties(jam-vm-test PROPERTIES CXX_STANDARD 14 CXX_SCAN_FOR_MODULES OFF)
   target_link_libraries(jam-vm-test PRIVATE jam-vm)
@@ -31,7 +35,7 @@ if(JAM_BUILD_TESTS)
     target_link_libraries(jam-generational-test PRIVATE onecore)
   endif()
 
-  set_tests_properties(jam-vm-test jam-generational-test PROPERTIES LABELS vm)
+  set_tests_properties(jam-vm-test jam-generational-test jam-weak-registry-test PROPERTIES LABELS vm)
 endif()
 
 # Runtime tools receive this directory explicitly; standalone wrappers default

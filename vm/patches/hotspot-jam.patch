@@ -1965,7 +1965,7 @@
 +#endif // SHARE_GC_JAM_JAMTHREADLOCALDATA_HPP
 --- a/src/hotspot/share/gc/jam/jamWeak.cpp
 +++ b/src/hotspot/share/gc/jam/jamWeak.cpp
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,108 @@
 +// SPDX-FileCopyrightText: 2026 Edward Kmett
 +// SPDX-License-Identifier: GPL-2.0-only
 +
@@ -2001,10 +2001,17 @@
 +  if (key == nullptr) {
 +    THROW_MSG_0(vmSymbols::java_lang_NullPointerException(), "weak key");
 +  }
-+  MutexLocker lock(Heap_lock);
-+  // Acquiring the lock may safepoint; resolve all arguments only afterward.
-+  return jlong(jam_vm_weak_create(heap->jam(), jam_weak_offset(key),
-+                                  jam_weak_offset(value), jam_weak_offset(finalizer)));
++  uint64_t token;
++  {
++    MutexLocker lock(Heap_lock);
++    // Acquiring the lock may safepoint; resolve all arguments only afterward.
++    token = jam_vm_weak_create(heap->jam(), jam_weak_offset(key),
++                               jam_weak_offset(value), jam_weak_offset(finalizer));
++  }
++  if (token == 0) {
++    THROW_MSG_0(vmSymbols::java_lang_OutOfMemoryError(), "Jam weak registration metadata exhausted");
++  }
++  return jlong(token);
 +JVM_END
 +
 +JVM_ENTRY(jobject, JVM_JamWeakDeref(JNIEnv* env, jclass ignored, jlong token))

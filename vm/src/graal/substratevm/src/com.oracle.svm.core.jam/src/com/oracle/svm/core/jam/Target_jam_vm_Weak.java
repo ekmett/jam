@@ -19,7 +19,9 @@ final class Target_jam_vm_Weak {
     @Substitute
     public static long create(Object key, Object value, Runnable finalizer) {
         if (key == null) throw new NullPointerException("weak key");
-        return JamWeakSupport.create(key, value, finalizer);
+        long token = JamWeakSupport.create(key, value, finalizer);
+        if (token == 0) throw new OutOfMemoryError("Jam weak registration metadata exhausted");
+        return token;
     }
 
     @Substitute

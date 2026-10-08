@@ -53,6 +53,8 @@ public final class Weak {
      * @param finalizer code to run on the JVM, or null for no finalizer
      * @return a positive JVM-local token
      * @throws NullPointerException if key is null
+     * @throws OutOfMemoryError if registration metadata or token space is exhausted;
+     *         no association is installed and existing registrations are unchanged
      */
     public static native long create(Object key, Object value, Runnable finalizer);
 

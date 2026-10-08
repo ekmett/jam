@@ -136,7 +136,8 @@ public final class WeakBridgeSmoke {
         System.gc();
         check(Weak.deref(old) == null, "dead thunk retires its bootstrap registration");
         System.gc(); // Another collection while the bootstrap is queued, before take().
-        check(Weak.pump() == 1 && handle[0] > old && calls[0] == 0, "handoff does not run real finalizer");
+        check(Weak.pump() == 1 && calls[0] == 0, "handoff does not run real finalizer");
+        check(handle[0] > 0 && handle[0] != old, "handoff installs a fresh opaque token");
         System.gc();
         check(Weak.deref(handle[0]) instanceof byte[] payload && payload.length == 4096 && payload[0] == 42,
               "independently live answer retains replacement value");
@@ -226,7 +227,7 @@ public final class WeakBridgeSmoke {
         long previous = throwing;
         for (int i = 0; i < 512; i++) {
             long current = Weak.create(key, value, null);
-            check(current > previous, "weak tokens are never reused");
+            check(current > 0 && current != previous, "weak tokens are never reused");
             Weak.finalizeNow(current);
             Weak.complete(current);
             check(Weak.deref(previous) == null && Weak.deref(current) == null,
