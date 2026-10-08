@@ -32,6 +32,7 @@ class SiteTest(unittest.TestCase):
             shell = (output / 'index.html').read_text()
             revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
             self.assertIn(f'assets/site.css?v={revision}', shell)
+            self.assertIn(f'home.html?v={revision}', shell)
             self.assertIn(f'assets/reference.css?v={revision}', (output / 'api/index.html').read_text())
             self.assertIn('data-thc-appearance="light"', shell)
             self.assertIn('data-thc-appearance="dark"', shell)
