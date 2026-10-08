@@ -56,8 +56,9 @@ public final class SubstrateSmoke {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 1) throw new IllegalArgumentException("heap | weak | jni-weak | pin | runtime | continuations | isolates | capacity");
+        if (args.length != 1) throw new IllegalArgumentException("heap | weak | jni-weak | pin | runtime | continuations | isolates | capacity | image-roots");
         switch (args[0]) {
+            case "image-roots" -> ImageRootsSmoke.main(new String[0]);
             case "heap" -> HeapSmoke.main(new String[0]);
             case "weak" -> WeakBridgeSmoke.main(new String[0]);
             case "jni-weak" -> {
