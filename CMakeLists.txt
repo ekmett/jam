@@ -98,7 +98,7 @@ FetchContent_Declare(jam_native
 FetchContent_MakeAvailable(jam_native)
 FetchContent_Declare(work
   GIT_REPOSITORY https://github.com/ekmett/work.git
-  GIT_TAG bd8160ef2091dc8e914a2259900bb8439affd4d5)
+  GIT_TAG 295598e8a6f2348d5ec96547e46ff76bd0642700)
 FetchContent_MakeAvailable(work)
 
 find_package(Threads REQUIRED)
