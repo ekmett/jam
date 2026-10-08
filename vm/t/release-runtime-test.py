@@ -10,11 +10,27 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools/ci'))
-from release_runtime import inventory, require_run, PLATFORMS
+from release_runtime import inventory, require_run, qualified_artifacts, PLATFORMS
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from platform_paths import build_flavor, jdk_home, reported_flavor
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_build_flavor_selection_and_report(self):
+        for flavor in ('release', 'fastdebug'):
+            with self.subTest(flavor=flavor), patch.dict('os.environ', {'JAM_BUILD_FLAVOR': flavor}):
+                self.assertEqual(build_flavor(), flavor)
+                self.assertIn(f'server-{flavor}', str(jdk_home()))
+                self.assertIn(f'server-{flavor}', str(jdk_home(graal=True)))
+                self.assertEqual(reported_flavor(f'Property settings:\n    jdk.debug = {flavor}\n'), flavor)
+        with patch.dict('os.environ', {'JAM_BUILD_FLAVOR': 'unknown'}), self.assertRaises(SystemExit):
+            build_flavor()
+        for output in ('', 'jdk.debug = unknown', 'jdk.debug = release\njdk.debug = fastdebug'):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                reported_flavor(output)
+
     def test_only_qualified_main_runs(self):
         run = dict(status='completed', conclusion='success', event='push', head_branch='main', head_repository={'full_name': 'ekmett/jam'}, path='.github/workflows/vm.yml')
         jobs = [dict(name=f'{s} ({p})', conclusion='success') for p in PLATFORMS for s in
@@ -29,8 +45,18 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             require_run(run, jobs, {'status': 'diverged'})
 
+    def test_artifact_flavor_is_unambiguous(self):
+        artifacts = [dict(name=f'jam-{kind}-release-{platform}', expired=False)
+                     for kind in ('jdk', 'graal') for platform in PLATFORMS]
+        self.assertEqual(qualified_artifacts(artifacts, 'release'), artifacts)
+        for invalid in (artifacts[:-1], artifacts + artifacts[:1],
+                        [{**a, 'expired': True} for a in artifacts],
+                        [{**a, 'name': a['name'].replace('release', 'fastdebug')} for a in artifacts]):
+            with self.subTest(artifacts=invalid), self.assertRaises(ValueError):
+                qualified_artifacts(invalid, 'release')
+
     def test_content_identity_and_unsafe_members(self):
-        files = {'release': b'JAVA_VERSION="25"\r\n', 'lib/jam/jam-vm.jar': b'api',
+        files = {'release': b'JAVA_VERSION="25"\r\nJAM_BUILD_FLAVOR="release"\r\n', 'lib/jam/jam-vm.jar': b'api',
                  'lib/jam/runtime-libraries.txt': b'libjam-vm.so\n', 'legal/jam-vm/NOTICE.md': b'notice'}
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'runtime.tar.gz'
@@ -50,6 +76,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(identity['sha256'], expected)
             self.assertEqual((identity['files'], identity['symlinks']), (4, 1))
             self.assertEqual(release['JAVA_VERSION'], '25')
+            self.assertEqual(release['JAM_BUILD_FLAVOR'], 'release')
             for name in ('../escape', '/absolute', 'graalvm/release'):
                 write(tarfile.TarInfo(name))
                 with self.subTest(name=name), self.assertRaises(ValueError): inventory(path, 'graalvm')

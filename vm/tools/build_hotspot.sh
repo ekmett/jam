@@ -5,6 +5,8 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 native_build=${JAM_NATIVE_BUILD:-$root/build-jam}
 : "${JAM_BOOT_JDK:?Set JAM_BOOT_JDK to a JDK 24 or 25 installation}"
+flavor=${JAM_BUILD_FLAVOR:-fastdebug}
+case "$flavor" in release|fastdebug) ;; *) echo "Unsupported JAM_BUILD_FLAVOR: $flavor" >&2; exit 1;; esac
 configure_flags=("--with-boot-jdk=$JAM_BOOT_JDK" --with-boot-jdk-jvmargs=-Xshare:off)
 case "${1:-}" in
   '') source_dir="$root/upstream/jdk25"; target=images ;;
@@ -46,6 +48,6 @@ case $(uname -s) in
 esac
 cd "$source_dir"
 bash configure "${configure_flags[@]}" \
-  --with-debug-level=fastdebug --with-jvm-variants=server --with-jvm-features=jamgc,epsilongc,serialgc \
+  "--with-debug-level=$flavor" --with-jvm-variants=server --with-jvm-features=jamgc,epsilongc,serialgc \
   --disable-warnings-as-errors "${native_flags[@]}"
-"$make_bin" "JOBS=${JAM_JOBS:-8}" "$target"
+"$make_bin" "CONF=server-$flavor" "JOBS=${JAM_JOBS:-8}" "$target"

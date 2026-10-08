@@ -7,7 +7,7 @@ import argparse
 import filecmp
 import os
 from pathlib import Path
-from platform_paths import NATIVE_BUILD
+from platform_paths import NATIVE_BUILD, build_flavor, runtime_flavor
 import platform
 import re
 import shutil
@@ -420,6 +420,12 @@ def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_li
                     target = (path.parent / value.removeprefix('@loader_path/')).resolve()
                     if not target.is_relative_to(stage) or not target.exists():
                         raise SystemExit(f'Broken or external loader path in {path.relative_to(stage)}: {value}')
+        actual = runtime_flavor(stage, loader_environment(os.environ))
+        if actual != build_flavor():
+            raise SystemExit(f'Packaged VM flavor {actual} differs from requested {build_flavor()}')
+        release_file = stage / 'release'
+        release_text = re.sub(r'^JAM_BUILD_FLAVOR=.*\n?', '', release_file.read_text(), flags=re.MULTILINE)
+        release_file.write_text(release_text.rstrip() + f'\nJAM_BUILD_FLAVOR="{actual}"\n')
         stage.rename(output)
     print(f'Packaged Jam JDK: {output}')
 

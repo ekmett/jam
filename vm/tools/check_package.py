@@ -7,10 +7,11 @@ import argparse
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import tempfile
 from package_jdk import check_loaded_libraries, loader_environment, runtime_libraries
-from platform_paths import java_tool
+from platform_paths import java_tool, build_flavor, runtime_flavor
 from runtime_probe import run
 
 root = Path(__file__).resolve().parents[1]
@@ -18,6 +19,10 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--java-home', required=True, type=Path)
 options = parser.parse_args()
 home = options.java_home.resolve()
+actual = runtime_flavor(home, loader_environment(os.environ))
+recorded = re.findall(r'^JAM_BUILD_FLAVOR="([^"\n]+)"$', (home / 'release').read_text(), re.MULTILINE)
+if recorded != [actual] or actual != build_flavor():
+    raise SystemExit(f'Package flavor mismatch: VM={actual}, recorded={recorded}, requested={build_flavor()}')
 library = home / 'lib/jam'
 jar = library / 'jam-vm.jar'
 windows = platform.system() == 'Windows'

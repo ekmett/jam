@@ -13,7 +13,7 @@ available: the first release contains GraalVM; older CI runs did not retain
 plain JDK archives.
 
 ```sh
-tar -xf jam-graalvm-<release>-<platform>-<arch>.tar.gz
+tar -xf jam-graalvm-<tag>-<flavor>-<platform>-<arch>.tar.gz
 export JAVA_HOME="$PWD/graalvm"
 export PATH="$JAVA_HOME/bin:$PATH"
 java -Xshare:off -Xms256m -Xmx256m \
@@ -25,7 +25,10 @@ Verify the archive against `SHA256SUMS` before extraction (`sha256sum` on Linux,
 Windows also supports `tar -xf`; set `$env:JAVA_HOME` to the extracted
 `graalvm` directory and prepend its `bin` directory to `$env:Path`.
 
-These are **fastdebug preview builds**. The initial Linux x86_64 archives need
+These are preview builds. New archives identify `release` or `fastdebug` in
+the filename and manifest; `release` is the optimized build and `fastdebug`
+retains VM assertions. The first release used fastdebug and predates the
+filename suffix. The initial Linux x86_64 archives need
 glibc 2.38 or newer; macOS arm64 needs macOS 26. Windows x86_64 is tested on
 Windows Server 2022. Read the manifest for each release's actual requirements.
 Native Image needs the platform C/C++ toolchain, and generated applications may
@@ -34,7 +37,7 @@ need companion Jam libraries; see [deployment](native-image.md).
 ## Consumer contract
 
 Manifest schema 1 records the producer commit, upstream source pins and passing
-CI run. Select a package by `product`, `os` and `arch`, then verify
+CI run. Select a package by `product`, `os`, `arch` and `build_flavor`, then verify
 `archive.sha256` before unpacking. `installation.root` is relative to the
 extraction directory. Paths in `paths` are relative to that installation,
 except `sdk_jars[].path`, which is relative to the extraction directory.
@@ -57,9 +60,11 @@ it does not establish arbitrary application compatibility or complete Haskell
 ## Publishing
 
 The **Publish prebuilt runtimes** workflow takes a successful **Managed runtimes**
-run ID and a new release tag. Its source must belong to this repository and be
+run ID, its build flavor and a new release tag. Its source must belong to this repository and be
 merged into `main`; all fifteen platform/runtime jobs must have passed. It
-checks the Actions artifact hashes, preserves the exact inner archive bytes,
+requires all six JDK/GraalVM archives of that flavor, checks their recorded
+`JAM_BUILD_FLAVOR` against the artifact identity, verifies the Actions artifact
+hashes, preserves the exact inner archive bytes,
 and publishes a prerelease with checksums and provenance. It does not rebuild
 a runtime or replace an existing release. CI retains archives for fourteen days,
 so promote them before expiration.
@@ -67,7 +72,7 @@ so promote them before expiration.
 To prepare the same assets locally with Python 3.10+ and authenticated `gh`:
 
 ```sh
-python3 vm/tools/ci/release_runtime.py --run RUN_ID --tag NEW_TAG \
+python3 vm/tools/ci/release_runtime.py --run RUN_ID --tag NEW_TAG --build-flavor release \
   --cache /tmp/jam-downloads --output /tmp/jam-release
 ```
 

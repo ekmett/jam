@@ -10,6 +10,12 @@ on:
         description: Successful Managed runtimes run whose source is merged into main
         required: true
         type: string
+      build_flavor:
+        description: Expected flavor of every qualified package
+        required: true
+        type: choice
+        options: [release, fastdebug]
+        default: release
       tag:
         description: New release tag (for example vm-2026.10.07-a7ebfc52)
         required: true
@@ -33,6 +39,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ inputs.tag }}
       PRODUCER_RUN: ${{ inputs.run_id }}
+      BUILD_FLAVOR: ${{ inputs.build_flavor }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -42,7 +49,7 @@ jobs:
       - name: Prepare exact qualified archives and manifest
         run: >-
           python3 vm/tools/ci/release_runtime.py
-          --run "$PRODUCER_RUN" --tag "$RELEASE_TAG"
+          --run "$PRODUCER_RUN" --tag "$RELEASE_TAG" --build-flavor "$BUILD_FLAVOR"
           --cache "$RUNNER_TEMP/downloads" --output "$RUNNER_TEMP/release"
       - name: Publish new prerelease without replacing existing assets
         run: |
