@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 
 import jam.vm.Weak;
+import jam.vm.Lifted;
 import java.lang.ref.Reference;
 import java.lang.ref.WeakReference;
 
@@ -76,7 +77,79 @@ public final class WeakBridgeSmoke {
         Weak.complete(permanent);
     }
 
+    // A tiny language fixture: publication and terminal-state policy belong here.
+    private static final class Thunk implements Lifted {
+        volatile Lifted answer;
+        @Override public Lifted resolve() { return answer; }
+        @Override public Lifted project(int field) {
+            Lifted value = answer;
+            return value != null ? value.project(field) : null;
+        }
+    }
+
+    private record Product(Lifted field) implements Lifted {
+        @Override public Lifted resolve() { return null; }
+        @Override public Lifted project(int index) { return index == 0 ? field : null; }
+    }
+
+    // The language's I# constructor stores int directly, not a stock Integer box.
+    private record Int(int value) implements Lifted {
+        @Override public Lifted resolve() { return null; }
+        @Override public Lifted project(int index) { return null; }
+    }
+
+    private static void liftedAPI() {
+        Thunk thunk = new Thunk();
+        check(thunk.resolve() == null && thunk.project(0) == null, "unresolved means unavailable");
+        Lifted value = new Int(42);
+        thunk.answer = new Product(value);
+        check(thunk.project(0) == value, "projection preserves an existing lifted reference");
+        thunk.answer = value;
+        Lifted slot = thunk;
+        slot = slot.resolve();
+        check(slot == value && ((Int) slot).value() == 42, "terminal replacement fits the lifted slot");
+        check(slot.project(0) == null, "primitive payload is not boxed by projection");
+    }
+
+    private static long bootstrap(Lifted answer, int[] calls, long[] handle) {
+        byte[] backing = new byte[4096];
+        backing[0] = 42;
+        Thunk thunk = new Thunk();
+        long token = Weak.create(thunk, backing, () -> {
+            System.gc();
+            Lifted target = thunk.resolve();
+            check(target != null, "queued bootstrap retains the published answer");
+            handle[0] = Weak.create(target, backing, () -> calls[0]++);
+            System.gc();
+            check(Weak.deref(handle[0]) == backing, "replacement retains backing through nested GC");
+            Reference.reachabilityFence(target);
+        });
+        thunk.answer = answer;
+        return token;
+    }
+
+    private static void liftedHandoff() {
+        Lifted answer = new Int(42);
+        int[] calls = {0};
+        long[] handle = {0}; // Stable control has no strong path to either conditional object.
+        long old = bootstrap(answer, calls, handle);
+        System.gc();
+        check(Weak.deref(old) == null, "dead thunk retires its bootstrap registration");
+        System.gc(); // Another collection while the bootstrap is queued, before take().
+        check(Weak.pump() == 1 && handle[0] > old && calls[0] == 0, "handoff does not run real finalizer");
+        System.gc();
+        check(Weak.deref(handle[0]) instanceof byte[] payload && payload.length == 4096 && payload[0] == 42,
+              "independently live answer retains replacement value");
+        Runnable finalizer = Weak.finalizeNow(handle[0]);
+        check(finalizer != null, "replacement can be explicitly finalized");
+        try { finalizer.run(); } finally { Weak.complete(handle[0]); }
+        check(calls[0] == 1 && Weak.finalizeNow(handle[0]) == null && Weak.pump() == 0,
+              "real finalizer is claimed once after handoff");
+        Reference.reachabilityFence(answer);
+    }
+
     public static void main(String[] args) throws Exception {
+        liftedAPI();
         if (args.length != 0) {
             try {
                 Weak.checkAvailable();
@@ -165,6 +238,7 @@ public final class WeakBridgeSmoke {
         Reference.reachabilityFence(key);
         Reference.reachabilityFence(value);
         generalized();
+        liftedHandoff();
         System.out.println("Weak bridge passed: JVM runnables, retirement, pumping and nested GC");
         if (Boolean.getBoolean("jam.runtime.audit")) {
             System.clearProperty("jam.runtime.audit");

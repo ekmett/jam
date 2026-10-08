@@ -127,6 +127,27 @@ need an ordinary value trace or manifest if they contain pointers. The hook
 may also be nonvirtual. The byte-relocation and no-destructor contracts still
 apply; a virtual destructor does not make Jam invoke it during collection.
 
+## User-defined lifted pointers
+
+[`t/lifted-test.cc`](https://github.com/ekmett/jam/blob/main/t/lifted-test.cc)
+contains a small user-land `lifted_ptr<T>`. It stores one ordinary `ptr<T>` and
+its trace visits that actual slot. Its `resolve()` runs in normal mutator code,
+follows already available answers, and assigns the endpoint through the normal
+write barrier. It does not force a computation or run resolution during GC.
+
+Here `T` is the common representation base, not the primitive result type.
+Thunks and terminal constructors both derive from it and provide the allocation
+hook above. An integer terminal stores an unboxed integer directly. Every
+replacement therefore fits the same pointer slot; an unrelated object cannot
+be substituted by casting its offset.
+
+Resolution must neither allocate nor collect while temporary pointers are in
+use. The example preserves the original pointer on a cycle and has no chain
+length limit. Embedded handles are traced through their owner; stack copies
+have the same lifetime rules as `ptr`. Keep the owner rooted across collection
+and reacquire its fields afterward. The tests cover compaction, old-to-young
+replacement, discarded chains and cycles with one and four workers.
+
 ## Cooperative walks
 
 A static hook can take over allocation traversal. For a list:

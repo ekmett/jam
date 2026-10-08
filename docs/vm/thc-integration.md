@@ -1,6 +1,6 @@
 # Integrating thc
 
-The guest API is `jam.vm.Weak`. It exposes the collector hooks through a Java
+The weak guest API is `jam.vm.Weak`. It exposes the collector hooks through a Java
 JAR and a small JNI library. A finalizer is a JVM `Runnable`. It may enter
 whatever guest context it needs; jam-vm has no context IDs or routing table.
 As long as some caller pumps the queue, callbacks from every producer can run.
@@ -16,6 +16,40 @@ Planned support for lifted Haskell weak keys is tracked in
 weak associations.
 
 Run the source-tree commands below from `vm/`.
+
+## Lifted references
+
+The same API JAR supplies `jam.vm.Lifted`:
+
+```java
+public interface Lifted {
+    Lifted resolve();
+    Lifted project(int field);
+}
+```
+
+These are language calls outside collection. `resolve()` reports an already
+available replacement without evaluating it. `project(n)` reports an
+existing reference-valued projection without forcing or boxing it. Null means
+unavailable; it does not distinguish a terminal constructor from an unresolved
+thunk. The language owns that distinction, field numbering, publication and
+cycle handling.
+
+Store replaceable references as `Lifted`. Both computations and terminal
+constructors implement it, so replacement remains type-correct. A language
+`Int` constructor can hold its primitive integer directly, like `I#`; it need
+not wrap `java.lang.Integer`. Primitive fields are not turned into lifted
+references by projection. Ordinary foreign Java objects need an explicit
+language representation if they are to occupy these slots.
+
+This interface neither rewrites Java slots during GC nor changes ordinary
+`Weak` registrations. A language weak wrapper can resolve before registration
+or install a bootstrap finalizer against an unresolved thunk. The bootstrap
+uses the existing claim/completion protocol to retain its captures while it
+installs and publishes a replacement association. The full lifecycle and THC
+adoption remain tracked in [issue #7](https://github.com/ekmett/jam/issues/7).
+The provider smoke test exercises re-registration through nested GC on both
+HotSpot and Native Image; it is not a complete language weak implementation.
 
 ## Build the API
 
