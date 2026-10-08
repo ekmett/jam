@@ -69,7 +69,10 @@ final class JamGC implements GC {
     private final JamNativeList references = new JamNativeList();
     private final JamNativeList roots = new JamNativeList();
     private final JamNativeList derived = new JamNativeList();
-    private final RootVisitor rootVisitor = new RootVisitor();
+    private final RootVisitor rootVisitor = new RootVisitor(true);
+    private final RootVisitor imageRootVisitor = new RootVisitor(false);
+    private final ImageSnapshotVisitor imageSnapshotVisitor = new ImageSnapshotVisitor();
+    private final ImageSnapshotRoots imageSnapshotRoots = new ImageSnapshotRoots();
     private final FieldVisitor fieldVisitor = new FieldVisitor();
     private final RepairVisitor repairVisitor = new RepairVisitor();
     private final ImageVisitor imageVisitor = new ImageVisitor();
@@ -196,6 +199,8 @@ final class JamGC implements GC {
         JamNative.weakFinalizers(heap.nativeHeap(), SCAN.getFunctionPointer(), context);
         processReferences(weakLimit, references.size(), false);
         processReferences(0, references.size(), true);
+        // Reference processing can populate previously null image fields. Capture them now.
+        heap.walkImageHeapRoots(imageSnapshotVisitor);
         snapshotRoots();
         boolean promoted = minor && JamNative.prepare(heap.nativeHeap(), 1) != 0;
         if (!promoted) VMError.guarantee(JamNative.prepare(heap.nativeHeap(), 0) != 0, "Retaining collection must fit");
@@ -361,12 +366,21 @@ final class JamGC implements GC {
     }
 
     private final class RootVisitor implements UninterruptibleObjectReferenceVisitor {
+        private final boolean record;
+
+        @Platforms(Platform.HOSTED_ONLY.class)
+        RootVisitor(boolean record) { this.record = record; }
+
         @Override @Uninterruptible(reason = "Enumerate external root slots.")
         public void visitObjectReferences(Pointer first, boolean compressed, int stride, Object holder, int count) {
-            for (int i = 0; i < count; i++) addRoot(first.add(Word.unsigned(i).multiply(stride)), compressed);
+            for (int i = 0; i < count; i++) {
+                Pointer slot = first.add(Word.unsigned(i).multiply(stride));
+                if (record) addRoot(slot, compressed);
+                else traceTarget(ReferenceAccess.singleton().readObjectAsUntrackedPointer(slot, compressed), Word.nullPointer());
+            }
         }
         @Override @Uninterruptible(reason = "Trace derived bases as ordinary roots.")
-        public void visitDerivedReferenceBase(Pointer slot, boolean compressed, int stride, Object holder) { addRoot(slot, compressed); }
+        public void visitDerivedReferenceBase(Pointer slot, boolean compressed, int stride, Object holder) { visitObjectReferences(slot, compressed, stride, holder, 1); }
         @Override @Uninterruptible(reason = "Save derived offsets before root repair.")
         public void visitDerivedReference(Pointer base, Pointer slot, boolean compressed, Object holder) { addDerived(base, slot, compressed); }
     }
@@ -411,13 +425,40 @@ final class JamGC implements GC {
     private final class ImageVisitor implements UninterruptibleObjectVisitor {
         @Override @Uninterruptible(reason = "Permanent image objects supply external roots.", callerMustBe = true)
         public void visitObject(Object object) {
-            InteriorObjRefWalker.walkObjectInline(object, rootVisitor);
+            InteriorObjRefWalker.walkObjectInline(object, imageRootVisitor);
             if (object instanceof Reference<?>) {
                 Reference<?> reference = (Reference<?>) object;
                 references.add(heap.encode(object) & 0xffffffffL);
-                recordRoot(ReferenceInternals.getReferentFieldAddress(reference), true);
                 if (!clearSoft && reference instanceof SoftReference<?>) traceTarget(ReferenceInternals.getReferentPointer(reference), Word.nullPointer());
             }
+        }
+    }
+
+    @Uninterruptible(reason = "Only moving image references need scratch storage and repair.")
+    private void recordImageRoot(Pointer slot, boolean compressed) {
+        Pointer target = ReferenceAccess.singleton().readObjectAsUntrackedPointer(slot, compressed);
+        if (target.isNonNull() && !heap.isInImageHeap(target)) {
+            VMError.guarantee(heap.isManaged(target), "Image root outside Jam and the permanent image heap");
+            recordRoot(slot, compressed);
+        }
+    }
+
+    private final class ImageSnapshotRoots implements UninterruptibleObjectReferenceVisitor {
+        @Override @Uninterruptible(reason = "Capture image slots after reference policy has settled.")
+        public void visitObjectReferences(Pointer first, boolean compressed, int stride, Object holder, int count) {
+            for (int i = 0; i < count; i++) recordImageRoot(first.add(Word.unsigned(i).multiply(stride)), compressed);
+        }
+        @Override @Uninterruptible(reason = "Capture the ordinary base slot.")
+        public void visitDerivedReferenceBase(Pointer slot, boolean compressed, int stride, Object holder) { recordImageRoot(slot, compressed); }
+        @Override @Uninterruptible(reason = "The marking walk already recorded derived displacements.")
+        public void visitDerivedReference(Pointer base, Pointer slot, boolean compressed, Object holder) { }
+    }
+
+    private final class ImageSnapshotVisitor implements UninterruptibleObjectVisitor {
+        @Override @Uninterruptible(reason = "Capture permanent image fields without retaining permanent targets.", callerMustBe = true)
+        public void visitObject(Object object) {
+            InteriorObjRefWalker.walkObjectInline(object, imageSnapshotRoots);
+            if (object instanceof Reference<?> reference) recordImageRoot(ReferenceInternals.getReferentFieldAddress(reference), true);
         }
     }
 
