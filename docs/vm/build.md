@@ -30,6 +30,10 @@ the platform tools below, including a boot JDK. Neither configuring Jam nor
 building the adapter fetches a JDK. Runtime outputs live in `vm/build/jam-jdk`
 and `vm/build/graalvm`; external source trees and tool caches stay under `vm/`.
 Run runtime builds serially: they share prepared sources and bridge outputs.
+Set `JAM_BUILD_FLAVOR=release` for optimized runtimes or `fastdebug` for VM
+assertions. Local scripts default to `fastdebug`; keep the variable set through
+building, packaging and checking. The packaged JVM reports its flavor, which
+must match the selection.
 
 With those tools configured, from the repository root:
 
@@ -131,7 +135,7 @@ bash tools/build_hotspot.sh
 ```
 
 The first command builds `build-jam/` and runs the native tests. The second
-configures and builds a fastdebug JDK with `jamgc`, `epsilongc` and `serialgc`.
+configures and builds the selected JDK flavor with `jamgc`, `epsilongc` and `serialgc`.
 Jam uses Serial's block-offset-table utility, so the Serial build feature is
 required even when Jam is the selected collector.
 
@@ -194,7 +198,7 @@ python3 tools/check_patches.py
 ```
 
 `check_vm.sh` uses `JAM_JAVA` when set, with `javac` next to it; `JAM_JAVAC`
-overrides that choice. Without overrides it uses the host platform's fastdebug
+overrides that choice. Without overrides it uses the host platform's selected
 JDK image. These checks exercise the public API, Java reference behavior,
 barriers and generation transitions. Generated logs stay local and are ignored
 by Git. `check_patches.py` reconstructs the HotSpot sources from the patch.
@@ -301,7 +305,9 @@ BMI files are build inputs; they are not runtime dependencies.
 Core and adapter checks run on pull requests. Full HotSpot, GraalVM and
 SubstrateVM builds run on `main`, manual dispatch, or a pull request carrying
 the `runtime-validation` label. They use the same runtime targets above, with
-separate Graal consumers sharing one built distribution per platform.
+separate Graal consumers sharing one built distribution per platform. CI defaults
+to `release`; manual dispatch also offers `fastdebug`. Artifact names include
+the flavor so the two cannot be confused.
 
 
 ## Editing the Graal integration

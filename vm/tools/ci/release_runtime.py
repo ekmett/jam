@@ -21,6 +21,7 @@ import tarfile
 import zipfile
 
 REPO = 'ekmett/jam'
+FLAVORS = ('release', 'fastdebug')
 PLATFORMS = {'linux': ('Linux', 'x86_64', 'Ubuntu 24.04'),
              'macos': ('Darwin', 'arm64', 'macOS 26'),
              'windows': ('Windows', 'x86_64', 'Windows Server 2022')}
@@ -51,6 +52,16 @@ def require_run(run, jobs, comparison):
                  'GraalVM runtime', 'SubstrateVM')}
     if not expected <= passed:
         raise ValueError(f'missing qualification: {sorted(expected - passed)}')
+
+
+def qualified_artifacts(artifacts, flavor):
+    selected = [a for a in artifacts if re.fullmatch(r'jam-(graal|jdk)-(release|fastdebug)-(linux|macos|windows)', a['name'])]
+    expected_artifacts = {f'jam-{kind}-{flavor}-{p}' for kind in ('graal', 'jdk') for p in PLATFORMS}
+    if {a['name'] for a in selected if not a['expired']} != expected_artifacts:
+        raise ValueError('require all six qualified JDK/Graal artifacts of the requested build flavor')
+    if len({a['name'] for a in selected}) != len(selected):
+        raise ValueError('ambiguous duplicate artifact names')
+    return selected
 
 
 def inventory(path, root):
@@ -118,6 +129,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', required=True, type=int)
     parser.add_argument('--tag', required=True)
+    parser.add_argument('--build-flavor', choices=FLAVORS, required=True)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--cache', required=True, type=Path)
     args = parser.parse_args()
@@ -129,11 +141,7 @@ def main():
     artifacts = api(f'actions/runs/{args.run}/artifacts?per_page=100')['artifacts']
     source = run['head_sha']
     pins = json.loads(base64.b64decode(api(f'contents/vm/config/source-pins.json?ref={source}')['content']))
-    selected = [a for a in artifacts if re.fullmatch(r'jam-(graal|jdk)-(linux|macos|windows)', a['name'])]
-    if not {f'jam-graal-{p}' for p in PLATFORMS} <= {a['name'] for a in selected if not a['expired']}:
-        raise ValueError('all three qualified Graal artifacts must still be available')
-    if len({a['name'] for a in selected}) != len(selected):
-        raise ValueError('ambiguous duplicate artifact names')
+    selected = qualified_artifacts(artifacts, args.build_flavor)
     args.output.mkdir(parents=True, exist_ok=False)
     args.cache.mkdir(parents=True, exist_ok=True)
     manifest = {'schema': 1, 'tag': args.tag, 'repository': REPO, 'source_commit': source,
@@ -144,7 +152,7 @@ def main():
     for artifact in sorted(selected, key=lambda a: a['name']):
         if artifact['expired']:
             raise ValueError(f"expired artifact: {artifact['name']}")
-        _, kind, platform = artifact['name'].split('-')
+        _, kind, flavor, platform = artifact['name'].split('-')
         system, arch, tested = PLATFORMS[platform]
         product, root = ('graalvm', 'graalvm') if kind == 'graal' else ('jdk', 'jdk')
         transport = args.cache / f"{artifact['id']}.zip"
@@ -156,7 +164,7 @@ def main():
             temporary.rename(transport)
         if sha256(transport) != expected:
             raise ValueError(f'artifact checksum mismatch: {transport}')
-        filename = f'jam-{product}-{args.tag}-{platform}-{arch}.tar.gz'
+        filename = f'jam-{product}-{args.tag}-{flavor}-{platform}-{arch}.tar.gz'
         target = args.output / filename
         with zipfile.ZipFile(transport) as archive:
             inner = f'jam-{kind}-ci.tar.gz'
@@ -165,10 +173,12 @@ def main():
             with archive.open(inner) as src, target.open('wb') as dst:
                 shutil.copyfileobj(src, dst)
         installation, contents, release, requirements = inventory(target, root)
+        if release.get('JAM_BUILD_FLAVOR') != flavor:
+            raise ValueError(f'packaged VM flavor disagrees with artifact identity: {artifact["name"]}')
         inventory_name = filename.removesuffix('.tar.gz') + '.files.json'
         (args.output / inventory_name).write_text(json.dumps(contents, indent=2) + '\n')
         manifest['packages'].append({'product': product, 'os': system, 'arch': arch,
-            'tested_on': tested, 'requirements': requirements, 'build_flavor': 'fastdebug',
+            'tested_on': tested, 'requirements': requirements, 'build_flavor': flavor,
             'java_version': release.get('JAVA_VERSION'), 'graal_version': release.get('GRAALVM_VERSION') if kind == 'graal' else None,
             'archive': {'url': base + filename, 'type': 'tar.gz', 'sha256': sha256(target), 'bytes': target.stat().st_size},
             'installation': {**installation, 'root': root, 'inventory_url': base + inventory_name},
@@ -182,11 +192,11 @@ def main():
     (args.output / 'SHA256SUMS').write_text(''.join(f'{sha256(p)}  {p.name}\n' for p in sorted(args.output.iterdir())))
     notes = f'''Prebuilt Jam runtimes from [{source[:12]}](https://github.com/{REPO}/commit/{source}).
 
-These are **fastdebug preview builds**, promoted byte-for-byte from the [successful runtime CI run]({run['html_url']}). Download the archive for your platform, verify SHA256SUMS, extract it, and set JAVA_HOME to its graalvm/ or jdk/ directory. See manifest.json for exact source pins, platform requirements, matching SDK JARs and full installation identities. Windows includes tar; use tar -xf to preserve the published layout.
+These are **{args.build_flavor} preview builds**, promoted byte-for-byte from the [successful runtime CI run]({run['html_url']}). Download the archive for your platform, verify SHA256SUMS, extract it, and set JAVA_HOME to its graalvm/ or jdk/ directory. See manifest.json for exact source pins, platform requirements, matching SDK JARs and full installation identities. Windows includes tar; use tar -xf to preserve the published layout.
 
 GraalVM includes the matching LabsJDK, patched Graal compiler and Native Image/SubstrateVM. Use -XX:+UnlockExperimentalVMOptions -XX:+UseJamGC for Java and --gc=jam for Native Image. Native Image still needs the platform C/C++ toolchain. Its outputs may require companion Jam libraries; see the [deployment documentation](https://github.com/{REPO}/blob/{source}/docs/vm/native-image.md).
 
-Qualification covers the producer's runtime regressions. General Haskell System.Mem.Weak integration and arbitrary application Native Image deployment are not claimed. Only products listed in the manifest are available; older runs did not retain plain-JDK artifacts. No source runtime rebuild was performed for publication.
+Qualification covers the producer's runtime regressions. General Haskell System.Mem.Weak integration and arbitrary application Native Image deployment are not claimed. No source runtime rebuild was performed for publication.
 '''
     (args.output / 'release-notes.md').write_text(notes)
 

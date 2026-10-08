@@ -149,6 +149,21 @@ public final class WeakBridgeSmoke {
         }
         check(Weak.finalizeNow(throwing) == null && Weak.pump() == 0,
               "throwing finalizer is completed without retry");
+        // Retired tokens never alias new registrations, even through metadata churn.
+        long previous = throwing;
+        for (int i = 0; i < 512; i++) {
+            long current = Weak.create(key, value, null);
+            check(current > previous, "weak tokens are never reused");
+            Weak.finalizeNow(current);
+            Weak.complete(current);
+            check(Weak.deref(previous) == null && Weak.deref(current) == null,
+                  "retired metadata stays unreachable after new registrations");
+            previous = current;
+        }
+        System.gc();
+        check(Weak.deref(previous) == null && Weak.pump() == 0, "retired entries do not return after GC");
+        Reference.reachabilityFence(key);
+        Reference.reachabilityFence(value);
         generalized();
         System.out.println("Weak bridge passed: JVM runnables, retirement, pumping and nested GC");
         if (Boolean.getBoolean("jam.runtime.audit")) {
