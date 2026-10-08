@@ -530,3 +530,39 @@ index 5e16a074..679607d5 100644
          }
  
          /*
+--- a/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/thread/VMOperationControl.java
++++ b/substratevm/src/com.oracle.svm.core/src/com/oracle/svm/core/thread/VMOperationControl.java
+@@ -687,7 +687,7 @@
+ 
+     protected static class JavaVMOperationQueue extends AllocationFreeQueue<JavaVMOperation> {
+         private JavaVMOperation head;
+-        private JavaVMOperation tail; // can point to an incorrect value if head is null
++        private JavaVMOperation tail;
+ 
+         JavaVMOperationQueue(String name) {
+             super(name);
+@@ -717,6 +717,9 @@
+             }
+             JavaVMOperation resultElement = head;
+             head = resultElement.getNext();
++            if (head == null) {
++                tail = null;
++            }
+             resultElement.setNext(null);
+             return resultElement;
+         }
+@@ -731,10 +734,13 @@
+             if (prev == null) {
+                 assert head == remove;
+                 head = remove.getNext();
+-                remove.setNext(null);
+             } else {
+                 prev.setNext(remove.getNext());
+             }
++            if (tail == remove) {
++                tail = prev;
++            }
++            remove.setNext(null);
+         }
+     }
+ 
