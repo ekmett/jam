@@ -8,9 +8,8 @@ the association dies and its finalizer becomes eligible to run.
 The interesting part is deciding what *live* means. Both `V` and `F` may refer
 to `K`, and other weak associations may lead to it as well.
 
-Lifted guest keys can use the planned [bootstrap-finalizer handoff](lifted-tracing.md).
-That is a `jam::vm` language-layer strategy over these associations, not a new
-core Jam pointer type or collector resolution rule.
+The proposed language-layer strategy for lifted guest keys is tracked in
+[issue #7](https://github.com/ekmett/jam/issues/7).
 
 ## Start with a cycle
 
