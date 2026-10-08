@@ -124,7 +124,8 @@ safety: runtime calls are still possible, including paths we must reject.
 There is no existing Jam path that compiles an application's resolver into
 such an entry. We would need graph validation, collector-specific lowering of
 dispatch and stores, a native calling convention, and code/class-lifetime
-management. This must also account for HotSpot packages without a Graal compiler.
+management. The first implementation targets GraalVM HotSpot; HotSpot packages without a
+Graal compiler are outside its critical path.
 
 SubstrateVM's
 [uninterruptible checker](https://github.com/oracle/graal/blob/7b025988a922a73286d1326e1eddc1ca39d3f569/substratevm/src/com.oracle.svm.hosted/src/com/oracle/svm/hosted/code/UninterruptibleAnnotationChecker.java)
@@ -158,3 +159,6 @@ Once the API is stable, consumers pin a release's
 archives. Qualification must identify the source revision and exercise both
 providers; a separately published interface JAR is insufficient. THC can then
 implement the carriers and migrate eligible slots against that version.
+
+The [collector-entry implementation plan](lifted-dispatch-plan.md) defines the
+bounded prototype, validation gates and delivery boundary.
