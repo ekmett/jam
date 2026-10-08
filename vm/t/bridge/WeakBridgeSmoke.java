@@ -81,34 +81,34 @@ public final class WeakBridgeSmoke {
     private static final class Thunk implements Lifted {
         volatile Lifted answer;
         @Override public Lifted resolve() { return answer; }
-        @Override public Lifted resolveField(int field) {
+        @Override public Lifted project(int field) {
             Lifted value = answer;
-            return value != null ? value.resolveField(field) : null;
+            return value != null ? value.project(field) : null;
         }
     }
 
     private record Product(Lifted field) implements Lifted {
         @Override public Lifted resolve() { return null; }
-        @Override public Lifted resolveField(int index) { return index == 0 ? field : null; }
+        @Override public Lifted project(int index) { return index == 0 ? field : null; }
     }
 
     // The language's I# constructor stores int directly, not a stock Integer box.
     private record Int(int value) implements Lifted {
         @Override public Lifted resolve() { return null; }
-        @Override public Lifted resolveField(int index) { return null; }
+        @Override public Lifted project(int index) { return null; }
     }
 
     private static void liftedAPI() {
         Thunk thunk = new Thunk();
-        check(thunk.resolve() == null && thunk.resolveField(0) == null, "unresolved means unavailable");
+        check(thunk.resolve() == null && thunk.project(0) == null, "unresolved means unavailable");
         Lifted value = new Int(42);
         thunk.answer = new Product(value);
-        check(thunk.resolveField(0) == value, "projection preserves an existing lifted reference");
+        check(thunk.project(0) == value, "projection preserves an existing lifted reference");
         thunk.answer = value;
         Lifted slot = thunk;
         slot = slot.resolve();
         check(slot == value && ((Int) slot).value() == 42, "terminal replacement fits the lifted slot");
-        check(slot.resolveField(0) == null, "primitive payload is not boxed by projection");
+        check(slot.project(0) == null, "primitive payload is not boxed by projection");
     }
 
     private static long bootstrap(Lifted answer, int[] calls, long[] handle) {

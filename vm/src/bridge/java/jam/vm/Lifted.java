@@ -36,5 +36,5 @@ public interface Lifted {
      * @param field the language-defined projection
      * @return the existing field reference, or null when unavailable
      */
-    Lifted resolveField(int field);
+    Lifted project(int field);
 }

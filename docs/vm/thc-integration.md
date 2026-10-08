@@ -24,12 +24,12 @@ The same API JAR supplies `jam.vm.Lifted`:
 ```java
 public interface Lifted {
     Lifted resolve();
-    Lifted resolveField(int field);
+    Lifted project(int field);
 }
 ```
 
 These are language calls outside collection. `resolve()` reports an already
-available replacement without evaluating it. `resolveField(n)` reports an
+available replacement without evaluating it. `project(n)` reports an
 existing reference-valued projection without forcing or boxing it. Null means
 unavailable; it does not distinguish a terminal constructor from an unresolved
 thunk. The language owns that distinction, field numbering, publication and
