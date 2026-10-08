@@ -39,7 +39,7 @@
     --thc-inline-code: #29322c; --thc-wash: #303d2c;
   }
 }
-* { box-sizing: border-box; }
+.thc-shell, .thc-shell *, .thc-guide, .thc-guide * { box-sizing: border-box; }
 .thc-shell { margin: 0; background: var(--thc-paper); color: var(--thc-ink); font: 15px/1.5 system-ui, sans-serif; }
 .thc-shell-layout { display: grid; grid-template-columns: 252px minmax(0, 1fr); height: 100dvh; min-height: 360px; }
 .thc-rail { display: flex; flex-direction: column; min-width: 0; overflow-y: auto; border-right: 1px solid var(--thc-line); background: var(--thc-pale); padding: 26px 18px 20px; }
