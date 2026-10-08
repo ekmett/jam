@@ -94,6 +94,8 @@ JAM_VM_API void jam_vm_finish(jam_vm *);
  * close reaches the least live-key fixed point, then retires the whole dead
  * batch before finalizers are traced. Java weak clearing occurs between close
  * and weak_finalizers; Java phantom processing follows weak_finalizers. */
+/* Returns a positive token, or zero on metadata allocation/token exhaustion.
+ * Failure leaves existing associations unchanged; no C++ exception escapes. */
 JAM_VM_API uint64_t jam_vm_weak_create(jam_vm *, uint32_t key, uint32_t value, uint32_t finalizer);
 JAM_VM_API uint32_t jam_vm_weak_value(jam_vm const *, uint64_t id);
 JAM_VM_API void jam_vm_weak_roots(jam_vm *, jam_vm_scan, void * context);

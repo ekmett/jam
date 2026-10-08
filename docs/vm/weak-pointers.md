@@ -141,7 +141,22 @@ both HotSpot and Native Image.
 
 Registration tokens are stable native IDs. They are not object addresses and
 do not serve as strong JNI handles to `K`, `V` or `F`. Dropping the token does
-not cancel finalization.
+not cancel finalization. Retired native records are recycled, while a generation
+in each token prevents an old token from naming a later registration. A slot
+whose generation would wrap is never reused. Registry storage tracks its
+concurrent high-water mark rather than the total number of registrations.
+
+Registration acquires record, live-index and tracing-buffer capacity before
+publishing a token. Failure leaves existing associations and their cleanup
+ownership unchanged. The C entry returns zero; the matching HotSpot and Native
+Image Java boundaries throw `OutOfMemoryError` after releasing the heap lock.
+There is no implicit retry, retirement or finalizer execution on failure.
+A language-side replacement must keep its existing cleanup ownership until the
+new registration succeeds.
+
+Registry traversal and retirement allocate no further metadata: fixed-point
+tracing borrows the buffer reserved at registration. This does not make the
+collector's tracing workers or other VM allocations immune to exhaustion.
 
 The public [Java API](https://github.com/ekmett/jam/blob/main/vm/src/bridge/java/jam/vm/Weak.java) exposes the protocol:
 
@@ -178,10 +193,8 @@ by the finalizer itself. `complete` ends that retention. See
 
 ## Remaining work
 
-The registry scans current associations repeatedly and never reuses token
-IDs. Retired entries no longer participate in GC scans, but still occupy metadata.
-A key-indexed work queue and safe
-reclamation would improve weak-heavy workloads without changing the laws above.
+The registry still scans current associations repeatedly. A key-indexed work
+queue could reduce that cost without changing the laws above.
 
 thc still needs primitive lowering, finalizer scheduling and exception integration.
 GHC C finalizers and weak-thread resurrection require further runtime work.
