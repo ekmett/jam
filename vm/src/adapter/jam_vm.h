@@ -23,6 +23,7 @@ extern "C" {
 typedef struct jam_vm jam_vm;
 typedef struct jam_vm_visit jam_vm_visit;
 typedef struct jam_vm_thread jam_vm_thread;
+typedef struct jam_vm_pin jam_vm_pin;
 typedef void (*jam_vm_scan)(void *, jam_vm_visit *, uint32_t);
 
 /* VM owns an inaccessible reservation (Windows: placeholders) through base+16GiB+prefix+young_bytes.
@@ -53,6 +54,21 @@ JAM_VM_API uint32_t jam_vm_allocate(jam_vm *, size_t words, int young); /* zero 
 JAM_VM_API size_t jam_vm_used(jam_vm const *, int young); /* cells, including guard prefix */
 JAM_VM_API size_t jam_vm_origin(jam_vm const *, int young); /* private ring origin */
 JAM_VM_API char const * jam_vm_compactor(jam_vm const *);
+
+/* Pin a complete moving object without collecting. Duplicate pins share a
+ * registration; release each acquisition. Native payload access uses address(),
+ * not the canonical Java address. Pin/unpin require the VM allocation lock.
+ * Native writers may alter primitive payload, never unbarriered references. */
+JAM_VM_API jam_vm_pin * jam_vm_pin_object(jam_vm *, uint32_t object, size_t words);
+JAM_VM_API void * jam_vm_pin_address(jam_vm_pin const *);
+JAM_VM_API void jam_vm_unpin(jam_vm *, jam_vm_pin *);
+/* Trace open pins before weak processing. Ordinary minor rules still apply. */
+JAM_VM_API void jam_vm_pin_roots(jam_vm *, jam_vm_scan, void * context);
+/* After finish, format these padding ranges before walking the object stream.
+ * Ranges are measured in cells and remain valid until the next begin. */
+JAM_VM_API size_t jam_vm_gap_count(jam_vm const *);
+JAM_VM_API uint32_t jam_vm_gap_at(jam_vm const *, size_t index);
+JAM_VM_API size_t jam_vm_gap_words(jam_vm const *, size_t index);
 
 /* begin -> any number of trace/liveness operations -> prepare -> root repairs
  * using forward -> finish. finish republishes the stable alias. VM root repair

@@ -52,6 +52,21 @@ uint32_t jam_vm_allocate(jam_vm * vm, size_t words, int young) { return vm->heap
 size_t jam_vm_used(jam_vm const * vm, int young) { return vm->heap.used(young); }
 size_t jam_vm_origin(jam_vm const * vm, int young) { return vm->heap.origin(young); }
 char const * jam_vm_compactor(jam_vm const * vm) { return vm->heap.compactor(); }
+jam_vm_pin * jam_vm_pin_object(jam_vm * vm, uint32_t at, size_t words) {
+  return reinterpret_cast<jam_vm_pin *>(vm->heap.pin_object(at, words));
+}
+void * jam_vm_pin_address(jam_vm_pin const * pin) {
+  return reinterpret_cast<thc::hosted_heap::pin const *>(pin)->address();
+}
+void jam_vm_unpin(jam_vm * vm, jam_vm_pin * pin) {
+  vm->heap.unpin(reinterpret_cast<thc::hosted_heap::pin *>(pin));
+}
+void jam_vm_pin_roots(jam_vm * vm, jam_vm_scan scan, void * context) {
+  vm->heap.trace_pins(scanner(scan, context));
+}
+size_t jam_vm_gap_count(jam_vm const * vm) { return vm->heap.gaps().size(); }
+uint32_t jam_vm_gap_at(jam_vm const * vm, size_t index) { return vm->heap.gaps()[index].at; }
+size_t jam_vm_gap_words(jam_vm const * vm, size_t index) { return vm->heap.gaps()[index].words; }
 void jam_vm_begin(jam_vm * vm, int minor) { vm->heap.begin(minor); }
 void jam_vm_trace(jam_vm * vm, uint32_t const * roots, size_t count,
                   jam_vm_scan scan, void * context, size_t workers) {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 package com.oracle.svm.core.jam;
 
+import com.oracle.svm.core.genscavenge.FillerObjectUtil;
 import java.lang.ref.Reference;
 import java.util.ArrayList;
 import java.util.List;
@@ -198,6 +199,11 @@ public final class JamHeap extends Heap {
 
     @Uninterruptible(reason = "Update metadata after publishing the collected arenas.")
     void finishCollection(boolean minor, boolean promoted) {
+        for (UnsignedWord i = Word.zero(); i.belowThan(JamNative.gapCount(handle)); i = i.add(1)) {
+            int at = JamNative.gapAt(handle, i);
+            Pointer address = base().add(Word.unsigned(at & 0xffffffffL).shiftLeft(3));
+            FillerObjectUtil.writeFillerObjectAt(address, JamNative.gapWords(handle, i).shiftLeft(3), false);
+        }
         Pointer previousOldTop = oldTop;
         oldTop = base().add(JamNative.used(handle, 0).shiftLeft(3));
         youngTop = base().add(Word.unsigned(YOUNG_OFFSET)).add(JamNative.used(handle, 1).shiftLeft(3));
