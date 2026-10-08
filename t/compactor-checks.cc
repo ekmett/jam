@@ -172,6 +172,43 @@ extern "C" void check_compactors() noexcept {
         check(packed_in_place[i].live == metadata[i].live);
         check(packed_in_place[i].destination == metadata[i].destination);
       }
+      // Independent cell-by-cell oracle for optional object starts. Padding is
+      // retained for alignment but never becomes a fabricated object start.
+      std::array<std::uint32_t, blocks> starts{}, starts_expected{};
+      for (unsigned block = 0; block != blocks; ++block) {
+        starts[block] = metadata[block].live & std::rotl(0x92492492u, static_cast<int>(pattern));
+        unsigned out = reference[block].destination;
+        for (unsigned bit = 0; bit != 32; ++bit) {
+          if (!(reference[block].live & (1u << bit))) continue;
+          if (starts[block] & (1u << bit)) starts_expected[out / 32] |= 1u << (out % 32);
+          ++out;
+        }
+      }
+      auto starts_actual = starts;
+      auto tracked_metadata = metadata;
+      variant.pack(tracked_metadata.data(), tracked_metadata.data(), blocks, flags,
+                   starts_actual.data(), starts_actual.data());
+      check(starts_actual == starts_expected);
+      for (unsigned block = 0; block != blocks; ++block)
+        check(tracked_metadata[block].pointers == packed_expected[block].pointers);
+      // Promotion appends into a different bitmap, including a partial old block.
+      for (unsigned prefix : {3u, 31u, 32u}) {
+        auto promoted = metadata;
+        std::array<heap_block, blocks + 2> output{};
+        std::array<std::uint32_t, blocks + 2> appended{}, appended_expected{};
+        appended[0] = appended_expected[0] = (std::uint32_t{1} << (prefix - 1));
+        for (unsigned block = 0; block != blocks; ++block) {
+          promoted[block].destination += prefix;
+          unsigned out = reference[block].destination + prefix;
+          for (unsigned bit = 0; bit != 32; ++bit) {
+            if (!(reference[block].live & (1u << bit))) continue;
+            if (starts[block] & (1u << bit)) appended_expected[out / 32] |= 1u << (out % 32);
+            ++out;
+          }
+        }
+        variant.pack(promoted.data(), output.data(), blocks, flags, starts.data(), appended.data());
+        check(appended == appended_expected);
+      }
       // The pointer-free path must pack every mask without interpreting data.
       auto pointer_free = metadata, reference_free = reference;
       for (auto & item : pointer_free) item.pointers = 0;

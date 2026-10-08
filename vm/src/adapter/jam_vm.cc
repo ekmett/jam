@@ -52,6 +52,15 @@ uint32_t jam_vm_allocate(jam_vm * vm, size_t words, int young) { return vm->heap
 size_t jam_vm_used(jam_vm const * vm, int young) { return vm->heap.used(young); }
 size_t jam_vm_origin(jam_vm const * vm, int young) { return vm->heap.origin(young); }
 char const * jam_vm_compactor(jam_vm const * vm) { return vm->heap.compactor(); }
+int jam_vm_track_starts(jam_vm * vm) { return vm->heap.track_starts(); }
+int jam_vm_tracks_starts(jam_vm const * vm) { return vm->heap.tracks_starts(); }
+void jam_vm_record_start(jam_vm * vm, uint32_t at) { vm->heap.record_start(at); }
+uint32_t const * jam_vm_start_bits(jam_vm const * vm, int young, size_t * count) {
+  auto bits = vm->heap.starts(young);
+  *count = bits.size();
+  return bits.data();
+}
+
 jam_vm_pin * jam_vm_pin_object(jam_vm * vm, uint32_t at, size_t words) {
   return reinterpret_cast<jam_vm_pin *>(vm->heap.pin_object(at, words));
 }
@@ -67,6 +76,21 @@ void jam_vm_pin_roots(jam_vm * vm, jam_vm_scan scan, void * context) {
 size_t jam_vm_gap_count(jam_vm const * vm) { return vm->heap.gaps().size(); }
 uint32_t jam_vm_gap_at(jam_vm const * vm, size_t index) { return vm->heap.gaps()[index].at; }
 size_t jam_vm_gap_words(jam_vm const * vm, size_t index) { return vm->heap.gaps()[index].words; }
+void jam_vm_remember(jam_vm * vm, uint32_t holder, uint64_t first,
+                     size_t count, size_t stride, int compressed) {
+  vm->heap.remember(holder, first, count, stride, compressed);
+}
+void jam_vm_forget(jam_vm * vm, uint64_t first, size_t count) {
+  vm->heap.forget(first, count);
+}
+void jam_vm_remember_derived(jam_vm * vm, uint32_t holder, uint64_t base_slot,
+                             uint64_t slot, int compressed) {
+  vm->heap.remember_derived(holder, base_slot, slot, compressed);
+}
+void jam_vm_remembered(jam_vm * vm, jam_vm_remembered_visit visit, void * context) {
+  for (auto const & entry : vm->heap.remembered_slots())
+    visit(context, entry.holder, entry.slot, entry.compressed, entry.base_slot);
+}
 void jam_vm_begin(jam_vm * vm, int minor) { vm->heap.begin(minor); }
 void jam_vm_trace(jam_vm * vm, uint32_t const * roots, size_t count,
                   jam_vm_scan scan, void * context, size_t workers) {

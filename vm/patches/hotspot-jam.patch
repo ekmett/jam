@@ -64,48 +64,69 @@
  endif
  
  ifneq ($(call check-jvm-feature, zgc), true)
---- a/src/hotspot/cpu/aarch64/gc/shared/cardTableBarrierSetAssembler_aarch64.cpp
-+++ b/src/hotspot/cpu/aarch64/gc/shared/cardTableBarrierSetAssembler_aarch64.cpp
-@@ -35,7 +35,7 @@
- void CardTableBarrierSetAssembler::store_check(MacroAssembler* masm, Register obj, Address dst) {
- 
-   BarrierSet* bs = BarrierSet::barrier_set();
--  assert(bs->kind() == BarrierSet::CardTableBarrierSet, "Wrong barrier set kind");
-+  assert(bs->is_a(BarrierSet::CardTableBarrierSet), "Wrong barrier set kind");
- 
-   __ lsr(obj, obj, CardTable::card_shift());
- 
---- a/src/hotspot/cpu/arm/gc/shared/cardTableBarrierSetAssembler_arm.cpp
-+++ b/src/hotspot/cpu/arm/gc/shared/cardTableBarrierSetAssembler_arm.cpp
-@@ -95,7 +95,7 @@
- void CardTableBarrierSetAssembler::store_check_part1(MacroAssembler* masm, Register card_table_base) {
-   // Check barrier set type (should be card table) and element size
-   BarrierSet* bs = BarrierSet::barrier_set();
--  assert(bs->kind() == BarrierSet::CardTableBarrierSet,
-+  assert(bs->is_a(BarrierSet::CardTableBarrierSet),
-          "Wrong barrier set kind");
- 
-   CardTableBarrierSet* ctbs = barrier_set_cast<CardTableBarrierSet>(bs);
-@@ -124,7 +124,7 @@
-   assert_different_registers(obj, card_table_base, tmp);
- 
-   BarrierSet* bs = BarrierSet::barrier_set();
--  assert(bs->kind() == BarrierSet::CardTableBarrierSet,
-+  assert(bs->is_a(BarrierSet::CardTableBarrierSet),
-          "Wrong barrier set kind");
- 
-   assert(CardTable::dirty_card_val() == 0, "Dirty card value must be 0 due to optimizations.");
---- a/src/hotspot/cpu/riscv/gc/shared/cardTableBarrierSetAssembler_riscv.cpp
-+++ b/src/hotspot/cpu/riscv/gc/shared/cardTableBarrierSetAssembler_riscv.cpp
-@@ -37,7 +37,7 @@
- void CardTableBarrierSetAssembler::store_check(MacroAssembler* masm, Register obj, Register tmp) {
-   assert_different_registers(obj, tmp);
-   BarrierSet* bs = BarrierSet::barrier_set();
--  assert(bs->kind() == BarrierSet::CardTableBarrierSet, "Wrong barrier set kind");
-+  assert(bs->is_a(BarrierSet::CardTableBarrierSet), "Wrong barrier set kind");
- 
-   __ srli(obj, obj, CardTable::card_shift());
- 
+--- a/src/hotspot/cpu/aarch64/gc/jam/jamBarrierSetAssembler_aarch64.cpp
++++ b/src/hotspot/cpu/aarch64/gc/jam/jamBarrierSetAssembler_aarch64.cpp
+@@ -0,0 +1,26 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include "asm/macroAssembler.inline.hpp"
++#include "gc/jam/jamBarrierSet.hpp"
++#include "gc/jam/jamBarrierSetAssembler.hpp"
++#define __ masm->
++void JamBarrierSetAssembler::oop_store_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
++                                         Address dst, Register val, Register tmp1, Register tmp2, Register tmp3) {
++  if ((decorators & IN_HEAP) != 0) {
++    __ push_call_clobbered_registers();
++    __ lea(rscratch2, dst);
++    __ stp(dst.base(), rscratch2, Address(pre(sp, -2 * wordSize)));
++    __ ldp(c_rarg0, c_rarg1, Address(post(sp, 2 * wordSize)));
++    __ mov(c_rarg2, 1);
++    __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), c_rarg0, c_rarg1, c_rarg2);
++    __ pop_call_clobbered_registers();
++  }
++  BarrierSetAssembler::store_at(masm, decorators, type, dst, val, tmp1, tmp2, tmp3);
++}
++void JamBarrierSetAssembler::gen_write_ref_array_post_barrier(MacroAssembler* masm, DecoratorSet,
++                                         Register start, Register count, Register, RegSet) {
++  __ push_call_clobbered_registers();
++  __ stp(start, count, Address(pre(sp, -2 * wordSize)));
++  __ ldp(c_rarg0, c_rarg1, Address(post(sp, 2 * wordSize)));
++  __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_array), c_rarg0, c_rarg1);
++  __ pop_call_clobbered_registers();
++}
+--- a/src/hotspot/cpu/x86/gc/jam/jamBarrierSetAssembler_x86.cpp
++++ b/src/hotspot/cpu/x86/gc/jam/jamBarrierSetAssembler_x86.cpp
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include "asm/macroAssembler.inline.hpp"
++#include "gc/jam/jamBarrierSet.hpp"
++#include "gc/jam/jamBarrierSetAssembler.hpp"
++#define __ masm->
++void JamBarrierSetAssembler::oop_store_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
++                                         Address dst, Register val, Register tmp1, Register tmp2, Register tmp3) {
++  if ((decorators & IN_HEAP) != 0) {
++    // Register before the store: the leaf call cannot safepoint and never loads the slot.
++    __ push_call_clobbered_registers();
++    __ push(dst.base());
++    __ lea(tmp1, dst);
++    __ push(tmp1);
++    __ pop(c_rarg1);
++    __ pop(c_rarg0);
++    __ movptr(c_rarg2, 1);
++    __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), c_rarg0, c_rarg1, c_rarg2);
++    __ pop_call_clobbered_registers();
++  }
++  BarrierSetAssembler::store_at(masm, decorators, type, dst, val, tmp1, tmp2, tmp3);
++}
++void JamBarrierSetAssembler::gen_write_ref_array_post_barrier(MacroAssembler* masm, DecoratorSet,
++                                         Register start, Register count, Register) {
++  __ push_call_clobbered_registers();
++  __ push(start);
++  __ push(count);
++  __ pop(c_rarg1);
++  __ pop(c_rarg0);
++  __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_array), c_rarg0, c_rarg1);
++  __ pop_call_clobbered_registers();
++}
 --- a/src/hotspot/os/windows/os_windows.cpp
 +++ b/src/hotspot/os/windows/os_windows.cpp
 @@ -3300,6 +3300,91 @@
@@ -227,9 +248,128 @@
    static void   initialize_system_info();
    static void   setmode_streams();
    static bool   is_windows_11_or_greater();
+--- a/src/hotspot/share/c1/c1_Runtime1.cpp
++++ b/src/hotspot/share/c1/c1_Runtime1.cpp
+@@ -39,6 +39,9 @@
+ #include "compiler/compilationPolicy.hpp"
+ #include "compiler/disassembler.hpp"
+ #include "compiler/oopMap.hpp"
++#if INCLUDE_JAMGC
++#include "gc/jam/jamBarrierSet.hpp"
++#endif
+ #include "gc/shared/barrierSet.hpp"
+ #include "gc/shared/c1/barrierSetC1.hpp"
+ #include "gc/shared/collectedHeap.hpp"
+@@ -324,6 +327,7 @@
+ #define FUNCTION_CASE(a, f) \
+   if ((intptr_t)a == CAST_FROM_FN_PTR(intptr_t, f))  return #f
+ 
++  JAMGC_ONLY(FUNCTION_CASE(entry, JamBarrierSet::record_narrow);)
+   FUNCTION_CASE(entry, os::javaTimeMillis);
+   FUNCTION_CASE(entry, os::javaTimeNanos);
+   FUNCTION_CASE(entry, SharedRuntime::OSR_migration_end);
+--- a/src/hotspot/share/gc/jam/c1/jamBarrierSetC1.cpp
++++ b/src/hotspot/share/gc/jam/c1/jamBarrierSetC1.cpp
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include "gc/jam/c1/jamBarrierSetC1.hpp"
++#include "gc/jam/jamBarrierSet.hpp"
++#include "c1/c1_LIRGenerator.hpp"
++#ifdef ASSERT
++#define __ gen->lir(__FILE__, __LINE__)->
++#else
++#define __ gen->lir()->
++#endif
++LIR_Opr JamBarrierSetC1::resolve_address(LIRAccess& access, bool resolve_in_register) {
++  bool write = (access.decorators() & ACCESS_WRITE) != 0;
++  return BarrierSetC1::resolve_address(access, resolve_in_register || (write && access.is_oop()));
++}
++void JamBarrierSetC1::post_barrier(LIRAccess& access, LIR_Opr, LIR_Opr) {
++  if ((access.decorators() & IN_HEAP) == 0) return;
++  LIRGenerator* gen = access.gen();
++  LIR_Opr slot = access.resolved_addr();
++  if (slot->is_address()) {
++    LIR_Opr pointer = gen->new_pointer_register();
++    __ leal(slot, pointer);
++    slot = pointer;
++  }
++  BasicTypeArray* signature = new BasicTypeArray(3);
++  signature->append(T_OBJECT);
++  signature->append(T_ADDRESS);
++  signature->append(T_LONG);
++  LIR_OprList* args = new LIR_OprList(3);
++  args->append(access.base().opr());
++  args->append(slot);
++  args->append(LIR_OprFact::longConst(1));
++  gen->call_runtime(signature, args, CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), voidType, nullptr);
++}
+--- a/src/hotspot/share/gc/jam/c1/jamBarrierSetC1.hpp
++++ b/src/hotspot/share/gc/jam/c1/jamBarrierSetC1.hpp
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#pragma once
++#include "gc/shared/c1/modRefBarrierSetC1.hpp"
++class JamBarrierSetC1 : public ModRefBarrierSetC1 {
++protected:
++  LIR_Opr resolve_address(LIRAccess& access, bool resolve_in_register) override;
++  void post_barrier(LIRAccess& access, LIR_Opr addr, LIR_Opr new_val) override;
++};
+--- a/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.cpp
++++ b/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.cpp
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include "gc/jam/c2/jamBarrierSetC2.hpp"
++#include "gc/jam/jamBarrierSet.hpp"
++#include "opto/graphKit.hpp"
++#include "opto/runtime.hpp"
++Node* JamBarrierSetC2::store_at_resolved(C2Access& access, C2AccessValue& val) const {
++  Node* store = BarrierSetC2::store_at_resolved(access, val);
++  if (access.is_oop() && (access.decorators() & (IN_HEAP | ON_UNKNOWN_OOP_REF)) != 0) {
++    assert(access.is_parse_access(), "Reference stores require a parse access");
++    post_barrier(static_cast<C2ParseAccess&>(access).kit(), access.base(), access.addr().node(), val.node(), true);
++  }
++  return store;
++}
++void JamBarrierSetC2::post_barrier(GraphKit* kit, Node* obj, Node* adr, Node*, bool) const {
++  const Type** fields = TypeTuple::fields(4);
++  fields[TypeFunc::Parms] = TypeInstPtr::BOTTOM;
++  fields[TypeFunc::Parms + 1] = TypeRawPtr::BOTTOM;
++  fields[TypeFunc::Parms + 2] = TypeLong::LONG;
++  fields[TypeFunc::Parms + 3] = Type::HALF;
++  const TypeFunc* type = TypeFunc::make(TypeTuple::make(TypeFunc::Parms + 4, fields), TypeTuple::make(TypeFunc::Parms, TypeTuple::fields(0)));
++  kit->make_runtime_call(GraphKit::RC_LEAF, type,
++      CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), "jam_remember", TypePtr::BOTTOM,
++      obj, adr, kit->longcon(1), kit->top());
++}
++
++void JamBarrierSetC2::clone_at_expansion(PhaseMacroExpand* phase, ArrayCopyNode* ac) const {
++  clone_in_runtime(phase, ac, CAST_FROM_FN_PTR(address, JamBarrierSet::clone), "jam_clone");
++}
++
++bool JamBarrierSetC2::is_gc_barrier_node(Node* node) const {
++  return node->is_CallLeaf() &&
++      node->as_CallLeaf()->entry_point() == CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow);
++}
+--- a/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.hpp
++++ b/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.hpp
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#pragma once
++#include "gc/shared/c2/modRefBarrierSetC2.hpp"
++class JamBarrierSetC2 : public ModRefBarrierSetC2 {
++protected:
++  Node* store_at_resolved(C2Access& access, C2AccessValue& val) const override;
++  void post_barrier(GraphKit* kit, Node* obj, Node* adr, Node* val, bool precise) const override;
++public:
++  bool is_gc_barrier_node(Node* node) const override;
++  void clone_at_expansion(PhaseMacroExpand* phase, ArrayCopyNode* ac) const override;
++  bool array_copy_requires_gc_barriers(bool, BasicType type, bool is_clone, bool, ArrayCopyPhase) const override {
++    return is_clone || is_reference_type(type);
++  }
++};
 --- a/src/hotspot/share/gc/jam/jamArguments.cpp
 +++ b/src/hotspot/share/gc/jam/jamArguments.cpp
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,98 @@
 +/*
 + * Copyright (c) 2017, 2018, Red Hat, Inc. All rights reserved.
 + * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -257,7 +397,6 @@
 +#include "gc/jam/jamArguments.hpp"
 +#include "gc/jam/jamHeap.hpp"
 +#include "gc/shared/gcArguments.hpp"
-+#include "gc/shared/cardTable.hpp"
 +#include "gc/shared/tlab_globals.hpp"
 +#include "logging/log.hpp"
 +#include "runtime/globals.hpp"
@@ -265,14 +404,14 @@
 +#include "runtime/java.hpp"
 +
 +size_t JamArguments::conservative_max_heap_alignment() {
-+  return MAX2(size_t(UseLargePages ? os::large_page_size() : os::vm_page_size()),
-+              size_t(CardTable::ct_max_alignment_constraint()));
++  return MAX2(size_t(os::vm_allocation_granularity()), size_t(os::vm_page_size()));
 +}
 +
 +void JamArguments::initialize() {
 +  GCArguments::initialize();
 +
 +  assert(UseJamGC, "Sanity");
++  FLAG_SET_ERGO(ReduceInitialCardMarks, false);
 +
 +  if (!UseCompressedOops || ObjectAlignmentInBytes != 8 || UseLargePages ||
 +      UseCompactObjectHeaders || AllocateHeapAt != nullptr) {
@@ -320,9 +459,8 @@
 +}
 +
 +void JamArguments::initialize_alignments() {
-+  CardTable::initialize_card_size();
 +  size_t page_size = UseLargePages ? os::large_page_size() : os::vm_page_size();
-+  size_t align = MAX3(os::vm_allocation_granularity(), page_size, CardTable::ct_max_alignment_constraint());
++  size_t align = MAX2(os::vm_allocation_granularity(), page_size);
 +  SpaceAlignment = align;
 +  HeapAlignment  = align;
 +}
@@ -376,7 +514,7 @@
 +#endif // SHARE_GC_JAM_JAMARGUMENTS_HPP
 --- a/src/hotspot/share/gc/jam/jamBarrierSet.cpp
 +++ b/src/hotspot/share/gc/jam/jamBarrierSet.cpp
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,133 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2018, Red Hat, Inc. All rights reserved.
@@ -406,21 +544,67 @@
 +#include "gc/jam/jamHeap.hpp"
 +#include "gc/jam/jamThreadLocalData.hpp"
 +#include "gc/shared/barrierSet.hpp"
-+#include "gc/shared/cardTableBarrierSetAssembler.hpp"
++#include "gc/jam/jamBarrierSetAssembler.hpp"
 +#include "runtime/javaThread.hpp"
++#include "oops/oop.inline.hpp"
++#include "oops/access.inline.hpp"
++#include "runtime/interfaceSupport.inline.hpp"
++#include "memory/iterator.inline.hpp"
++#include "utilities/ostream.hpp"
 +#ifdef COMPILER1
-+#include "gc/shared/c1/cardTableBarrierSetC1.hpp"
++#include "gc/jam/c1/jamBarrierSetC1.hpp"
 +#endif
 +#ifdef COMPILER2
-+#include "gc/shared/c2/cardTableBarrierSetC2.hpp"
++#include "gc/jam/c2/jamBarrierSetC2.hpp"
 +#endif
 +
-+JamBarrierSet::JamBarrierSet(CardTable* table) : CardTableBarrierSet(
-+          make_barrier_set_assembler<CardTableBarrierSetAssembler>(),
-+          make_barrier_set_c1<CardTableBarrierSetC1>(),
-+          make_barrier_set_c2<CardTableBarrierSetC2>(),
-+          table,
++JamBarrierSet::JamBarrierSet() : ModRefBarrierSet(
++          make_barrier_set_assembler<JamBarrierSetAssembler>(),
++          make_barrier_set_c1<JamBarrierSetC1>(),
++          make_barrier_set_c2<JamBarrierSetC2>(),
 +          BarrierSet::FakeRtti(BarrierSet::JamBarrierSet)) {}
++
++void JamBarrierSet::record(oop owner, void* slot, size_t count, bool compressed) {
++  JamHeap* heap = JamHeap::heap();
++  // Check the source, never the concurrently mutable value stored in the slot.
++  if (!heap->is_in_reserved(slot) || heap->is_in_young(slot)) return;
++  uintptr_t base = (uintptr_t)CompressedOops::base();
++  jam_vm_remember(heap->jam(), owner == nullptr ? 0 : CompressedOops::narrow_oop_value(owner),
++                  ((uintptr_t)slot - base) / 4, count, compressed ? 1 : 2, compressed);
++}
++
++void JamBarrierSet::forget(address start, address end) {
++  JamHeap* heap = JamHeap::heap();
++  if (start == end || !heap->is_in_reserved(start) || heap->is_in_young(start)) return;
++  assert(end >= start && is_aligned(start, 4) && is_aligned(end, 4), "retired slot range");
++  jam_vm_forget(heap->jam(), ((uintptr_t)start - (uintptr_t)CompressedOops::base()) / 4,
++                (end - start) / 4);
++}
++
++void JamBarrierSet::record_narrow(oopDesc* owner, void* slot, size_t count) {
++  record(cast_to_oop(owner), slot, count, true);
++}
++
++void JamBarrierSet::record_array(void* slot, size_t count) {
++  record(nullptr, slot, count, UseCompressedOops);
++}
++
++class JamRememberFields : public BasicOopIterateClosure {
++  oop _owner;
++public:
++  explicit JamRememberFields(oop owner) : _owner(owner) {}
++  void do_oop(narrowOop* slot) override { JamBarrierSet::record(_owner, slot, 1, true); }
++  void do_oop(oop* slot) override { JamBarrierSet::record(_owner, slot, 1, false); }
++  ReferenceIterationMode reference_iteration_mode() override { return DO_FIELDS; }
++};
++
++void JamBarrierSet::write_region(MemRegion mr) {
++  if (mr.is_empty() || JamHeap::heap()->is_in_young(mr.start())) return;
++  // The clone hook supplies one fully formatted object, not an allocation run.
++  oop owner = cast_to_oop(mr.start());
++  JamRememberFields fields(owner);
++  owner->oop_iterate(&fields);
++}
 +
 +void JamBarrierSet::on_thread_create(Thread *thread) {
 +  JamThreadLocalData::create(thread, JamHeap::heap()->jam());
@@ -446,7 +630,7 @@
 +}
 +
 +void JamBarrierSet::on_thread_attach(Thread* thread) {
-+  CardTableBarrierSet::on_thread_attach(thread);
++  ModRefBarrierSet::on_thread_attach(thread);
 +  // Threads::add for a Java-created thread executes on its creator. JNI
 +  // attachment and NonJavaThread startup execute on the attached thread.
 +  if (thread == Thread::current_or_null()) {
@@ -455,12 +639,18 @@
 +}
 +
 +void JamBarrierSet::on_thread_detach(Thread* thread) {
-+  CardTableBarrierSet::on_thread_detach(thread);
++  ModRefBarrierSet::on_thread_detach(thread);
 +  JamThreadLocalData::leave(thread);
 +}
++
++void JamBarrierSet::print_on(outputStream* st) const { st->print("Jam exact source slots"); }
++
++JRT_LEAF(void, JamBarrierSet::clone(oopDesc* src, oopDesc* dst, size_t words))
++  HeapAccess<>::clone(src, dst, words);
++JRT_END
 --- a/src/hotspot/share/gc/jam/jamBarrierSet.hpp
 +++ b/src/hotspot/share/gc/jam/jamBarrierSet.hpp
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,90 @@
 +/*
 + * Copyright (c) 2017, 2018, Red Hat, Inc. All rights reserved.
 + * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -488,14 +678,27 @@
 +#ifndef SHARE_GC_JAM_JAMBARRIERSET_HPP
 +#define SHARE_GC_JAM_JAMBARRIERSET_HPP
 +
-+#include "gc/shared/cardTableBarrierSet.hpp"
++#include "gc/shared/modRefBarrierSet.inline.hpp"
 +
-+// Reuse the VM's card barriers for the hosted jam generations.
-+class JamBarrierSet: public CardTableBarrierSet {
++// Remember exact source slots; target headers supply tracing policy.
++class JamBarrierSet: public ModRefBarrierSet {
 +  friend class VMStructs;
 +
 +public:
-+  explicit JamBarrierSet(CardTable* table);
++  JamBarrierSet();
++  void print_on(outputStream* st) const override;
++
++  static void record(oop owner, void* slot, size_t count, bool compressed);
++  static void forget(address start, address end);
++  static void record_narrow(oopDesc* owner, void* slot, size_t count);
++  static void clone(oopDesc* src, oopDesc* dst, size_t words);
++  static void record_array(void* slot, size_t count);
++  void write_region(MemRegion mr) override;
++  void write_region(JavaThread*, MemRegion mr) override { write_region(mr); }
++  void write_ref_array(HeapWord* start, size_t count) { record_array(start, count); }
++
++  template <DecoratorSet decorators, typename T>
++  void write_ref_field_post(T* slot) { record(nullptr, slot, 1, sizeof(T) == sizeof(narrowOop)); }
 +
 +  virtual void on_thread_create(Thread* thread);
 +  virtual void on_thread_destroy(Thread* thread);
@@ -504,7 +707,27 @@
 +  virtual void on_thread_detach(Thread* thread);
 +
 +  template <DecoratorSet decorators, typename BarrierSetT = JamBarrierSet>
-+  class AccessBarrier: public CardTableBarrierSet::AccessBarrier<decorators, BarrierSetT> {};
++  class AccessBarrier: public ModRefBarrierSet::AccessBarrier<decorators, BarrierSetT> {
++    typedef BarrierSet::AccessBarrier<decorators, BarrierSetT> Raw;
++  public:
++    static void oop_store_in_heap_at(oop base, ptrdiff_t offset, oop value) {
++      auto* slot = AccessInternal::oop_field_addr<decorators>(base, offset);
++      Raw::oop_store(slot, value);
++      record(base, slot, 1, sizeof(*slot) == sizeof(narrowOop));
++    }
++    static oop oop_atomic_xchg_in_heap_at(oop base, ptrdiff_t offset, oop value) {
++      auto* slot = AccessInternal::oop_field_addr<decorators>(base, offset);
++      oop result = Raw::oop_atomic_xchg(slot, value);
++      record(base, slot, 1, sizeof(*slot) == sizeof(narrowOop));
++      return result;
++    }
++    static oop oop_atomic_cmpxchg_in_heap_at(oop base, ptrdiff_t offset, oop expected, oop value) {
++      auto* slot = AccessInternal::oop_field_addr<decorators>(base, offset);
++      oop result = Raw::oop_atomic_cmpxchg(slot, expected, value);
++      if (result == expected) record(base, slot, 1, sizeof(*slot) == sizeof(narrowOop));
++      return result;
++    }
++  };
 +};
 +
 +template<>
@@ -518,9 +741,27 @@
 +};
 +
 +#endif // SHARE_GC_JAM_JAMBARRIERSET_HPP
+--- a/src/hotspot/share/gc/jam/jamBarrierSetAssembler.hpp
++++ b/src/hotspot/share/gc/jam/jamBarrierSetAssembler.hpp
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#pragma once
++#include "gc/shared/modRefBarrierSetAssembler.hpp"
++class JamBarrierSetAssembler : public ModRefBarrierSetAssembler {
++protected:
++  void oop_store_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
++                    Address dst, Register val, Register tmp1, Register tmp2, Register tmp3) override;
++#ifdef AARCH64
++  void gen_write_ref_array_post_barrier(MacroAssembler* masm, DecoratorSet decorators,
++                    Register start, Register count, Register tmp, RegSet saved_regs) override;
++#else
++  void gen_write_ref_array_post_barrier(MacroAssembler* masm, DecoratorSet decorators,
++                    Register start, Register count, Register tmp) override;
++#endif
++};
 --- a/src/hotspot/share/gc/jam/jamHeap.cpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.cpp
-@@ -0,0 +1,797 @@
+@@ -0,0 +1,754 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -550,8 +791,6 @@
 +#include "gc/jam/jamInitLogger.hpp"
 +#include "gc/jam/jamMemoryPool.hpp"
 +#include "gc/jam/jamThreadLocalData.hpp"
-+#include "gc/serial/serialBlockOffsetTable.hpp"
-+#include "gc/shared/cardTableBarrierSet.inline.hpp"
 +#include "classfile/classLoaderDataGraph.hpp"
 +#include "code/codeCache.hpp"
 +#include "compiler/oopMap.hpp"
@@ -587,17 +826,12 @@
 +#include "runtime/threads.hpp"
 +#include "runtime/vmThread.hpp"
 +#include "utilities/growableArray.hpp"
++#include "utilities/resizeableResourceHash.hpp"
++#include "classfile/javaClasses.inline.hpp"
++#include "oops/instanceKlass.hpp"
 +#include "utilities/ostream.hpp"
 +
 +static const size_t jam_young_displacement = size_t(1) << 34;
-+
-+class JamCardTable : public CardTable {
-+  JamHeap* _heap;
-+public:
-+  JamCardTable(MemRegion whole_heap, JamHeap* heap)
-+    : CardTable(whole_heap), _heap(heap) {}
-+  bool is_in_young(const void* p) const override { return _heap->is_in_young(p); }
-+};
 +
 +jint JamHeap::initialize() {
 +  size_t align = HeapAlignment;
@@ -650,11 +884,6 @@
 +  _young_space = new ContiguousSpace();
 +  _young_space->initialize(young_region, false, false);
 +  _young_space->set_top(_young_space->bottom());
-+  _old_starts = new SerialBlockOffsetTable(old_region, old_region.word_size());
-+  _card_table = new JamCardTable(reserved_region(), this);
-+  _card_table->initialize(old_region.start(), young_region.start());
-+  _card_table->resize_covered_region(old_region);
-+  _card_table->resize_covered_region(young_region);
 +  GCLocker::initialize();
 +
 +  // Precompute hot fields
@@ -670,8 +899,7 @@
 +  _last_heap_print = 0;
 +
 +  // Install barrier set
-+  JamBarrierSet* barriers = new JamBarrierSet(_card_table);
-+  barriers->initialize();
++  JamBarrierSet* barriers = new JamBarrierSet();
 +  BarrierSet::set_barrier_set(barriers);
 +
 +  // All done, print out the configuration
@@ -721,7 +949,6 @@
 +    if (at == 0) return nullptr;
 +    res = (HeapWord*)(CompressedOops::base() + size_t(at) * HeapWordSize);
 +    (young ? _young_space : _space)->set_top(res + size);
-+    if (!young) _old_starts->update_for_block(res, res + size);
 +  }
 +
 +  size_t used = this->used();
@@ -927,12 +1154,13 @@
 +  JamScanState* _state;
 +  jam_vm_visit* _visit;
 +  bool _follow;
++  oop _owner;
 +  uint64_t _slots[128];
 +  size_t _count;
 +public:
-+  JamFields(JamScanState* state, jam_vm_visit* visit, bool follow)
++  JamFields(JamScanState* state, jam_vm_visit* visit, bool follow, oop owner)
 +    : BasicOopIterateClosure(follow ? state->heap->ref_processor() : nullptr),
-+      _state(state), _visit(visit), _follow(follow), _count(0) {}
++      _state(state), _visit(visit), _follow(follow), _owner(owner), _count(0) {}
 +
 +  void flush() {
 +    if (_count != 0) {
@@ -944,6 +1172,7 @@
 +    guarantee(_state->heap->is_in_reserved(p), "Expected an in-heap narrow slot");
 +    uintptr_t delta = (uintptr_t)p - (uintptr_t)CompressedOops::base();
 +    guarantee(delta % sizeof(narrowOop) == 0, "Jam pointer slot must be aligned");
++    if (!_follow) JamBarrierSet::record(_owner, p, 1, true);
 +    if (!_follow && _state->minor && !_state->heap->is_in_young(p)) {
 +      _state->old_slots.append(p);
 +    }
@@ -953,6 +1182,7 @@
 +  void do_oop(oop* p) override {
 +    guarantee(_state->heap->is_in_reserved(p), "Expected an in-heap wide slot");
 +    if (!_follow) {
++      JamBarrierSet::record(_owner, p, 1, false);
 +      _state->wide_slots.append(p);
 +    } else {
 +      oop value = RawAccess<>::oop_load(p);
@@ -973,12 +1203,14 @@
 +  size_t words = obj->size();
 +  if (!jam_vm_claim(visit, at, words)) return;
 +
++  if (jam_vm_tracks_starts(state->heap->jam())) jam_vm_record_start(state->heap->jam(), at);
++
 +  // Relativize stack-internal pointers before the record becomes movable.
 +  ContinuationGCSupport::transform_stack_chunk(obj);
-+  JamFields declared(state, visit, false);
++  JamFields declared(state, visit, false, obj);
 +  obj->oop_iterate(&declared);
 +  declared.flush();
-+  JamFields followed(state, visit, true);
++  JamFields followed(state, visit, true, obj);
 +  obj->oop_iterate(&followed);
 +  followed.flush();
 +}
@@ -1006,69 +1238,34 @@
 +  jam_vm_trace(_jam, roots, count, jam_scan, _jam_scan_state, 1);
 +}
 +
-+void JamHeap::trace_dirty_owners() {
-+  if (_space->is_empty()) return;
-+  GrowableArray<uint32_t> owners(256, mtGC);
-+  HeapWord* scanned_end = _space->bottom();
-+  CardTable::CardValue* end = _card_table->byte_after(_space->top() - 1);
-+  for (CardTable::CardValue* card = _card_table->byte_for(_space->bottom()); card < end; ++card) {
-+    if (*card == CardTable::clean_card_val()) continue;
-+    HeapWord* card_start = _card_table->addr_for(card);
-+    HeapWord* card_end = MIN2(card_start + CardTable::card_size_in_words(), _space->top());
-+    if (card_end <= scanned_end) continue;
-+    HeapWord* object = _old_starts->block_start_reaching_into_card(card_start);
-+    // The BOT names the first block reaching into a card. Earlier dirty cards
-+    // can already have submitted this object; discovery must see each owner once.
-+    object = MAX2(object, scanned_end);
-+    while (object < card_end) {
-+      oop value = cast_to_oop(object);
-+      HeapWord* next = object + value->size();
-+      owners.append(CompressedOops::narrow_oop_value(value));
-+      object = next;
++static void jam_remembered(void* raw, uint32_t holder, uint64_t slot_offset,
++                           int compressed, uint64_t base_slot) {
++  JamScanState* state = static_cast<JamScanState*>(raw);
++  address slot = CompressedOops::base() + slot_offset * sizeof(narrowOop);
++  guarantee(base_slot == 0, "HotSpot stack chunks relativize derived references before publication");
++  oop target;
++  if (compressed) {
++    state->old_slots.append((narrowOop*)slot);
++    target = RawAccess<>::oop_load((narrowOop*)slot);
++  } else {
++    state->wide_slots.append((oop*)slot);
++    target = RawAccess<>::oop_load((oop*)slot);
++  }
++  if (target == nullptr) return;
++  if (holder != 0) {
++    oop owner = CompressedOops::decode_not_null(CompressedOops::narrow_oop_cast(holder));
++    if (owner->klass()->is_instance_klass()) {
++      ReferenceType type = InstanceKlass::cast(owner->klass())->reference_type();
++      if (type != REF_NONE && slot == cast_from_oop<address>(owner) + java_lang_ref_Reference::referent_offset() &&
++          state->heap->ref_processor()->discover_reference(owner, type)) return;
 +    }
-+    scanned_end = object;
 +  }
-+  if (owners.length() != 0) {
-+    jam_vm_trace_old(_jam, owners.adr_at(0), owners.length(), jam_scan, _jam_scan_state);
-+  }
++  uint32_t at = CompressedOops::narrow_oop_value(target);
++  state->heap->trace_external(&at, 1);
 +}
 +
-+class JamRemember : public BasicOopIterateClosure {
-+  JamHeap* _heap;
-+  CardTable* _cards;
-+  bool _verify;
-+  oop _owner;
-+  template<class T> void apply(T* p) {
-+    oop value = RawAccess<>::oop_load(p);
-+    if (value != nullptr && _heap->is_in_young(value)) {
-+      if (_verify) {
-+        guarantee(*_cards->byte_for(p) != CardTable::clean_card_val() ||
-+                  *_cards->byte_for(_owner) != CardTable::clean_card_val(),
-+                  "Old-to-young edge at " PTR_FORMAT " lacks a card mark", p2i(p));
-+      } else {
-+        *_cards->byte_for(p) = CardTable::dirty_card_val();
-+      }
-+    }
-+  }
-+public:
-+  JamRemember(JamHeap* heap, CardTable* cards, bool verify = false)
-+    : _heap(heap), _cards(cards), _verify(verify), _owner(nullptr) {}
-+  void set_owner(oop owner) { _owner = owner; }
-+  void do_oop(oop* p) override { apply(p); }
-+  void do_oop(narrowOop* p) override { apply(p); }
-+  ReferenceIterationMode reference_iteration_mode() override { return DO_FIELDS; }
-+};
-+
-+void JamHeap::rebuild_old_metadata(bool rebuild_cards) {
-+  _card_table->clear_MemRegion(MemRegion(_space->bottom(), _space->end()));
-+  JamRemember remember(this, _card_table);
-+  for (HeapWord* object = _space->bottom(); object < _space->top();) {
-+    oop value = cast_to_oop(object);
-+    HeapWord* next = object + value->size();
-+    _old_starts->update_for_block(object, next);
-+    if (rebuild_cards) value->oop_iterate(&remember);
-+    object = next;
-+  }
++void JamHeap::trace_remembered_slots() {
++  jam_vm_remembered(_jam, jam_remembered, _jam_scan_state);
 +}
 +
 +class JamRoots : public OopClosure {
@@ -1129,15 +1326,23 @@
 +};
 +
 +class JamAdjust : public OopClosure {
++  ResizeableResourceHashtable<void*, bool, AnyObj::C_HEAP, mtGC> _seen{1009, 0x3fffffff};
++  bool _minor;
 +  template<class T> void apply(T* p) {
++    JamHeap* heap = JamHeap::heap();
++    if (sizeof(T) == sizeof(narrowOop) && heap->is_in_reserved(p) &&
++        (!_minor || heap->is_in_young(p))) return;
 +    T value = RawAccess<>::oop_load(p);
-+    if (CompressedOops::is_null(value)) return;
++    if (CompressedOops::is_null(value) || _seen.get(p) != nullptr) return;
++    _seen.put(p, true);
++    _seen.maybe_grow();
 +    uint32_t at = CompressedOops::narrow_oop_value(value);
 +    uint32_t next = jam_vm_forward(JamHeap::heap()->jam(), at);
 +    oop target = next == 0 ? nullptr : cast_to_oop(CompressedOops::base() + size_t(next) * HeapWordSize);
 +    RawAccess<>::oop_store(p, target);
 +  }
 +public:
++  explicit JamAdjust(bool minor) : _minor(minor) {}
 +  void do_oop(oop* p) override { apply(p); }
 +  void do_oop(narrowOop* p) override { apply(p); }
 +};
@@ -1248,7 +1453,7 @@
 +  _jam_scan_state = &state;
 +  jam_vm_begin(_jam, minor);
 +  _ref_processor->start_discovery(clear_all_soft_refs);
-+  if (minor) trace_dirty_owners();
++  if (minor) trace_remembered_slots();
 +  jam_vm_weak_roots(_jam, jam_scan, &state);
 +  JamRoots roots;
 +  jam_roots(&roots, false);
@@ -1270,7 +1475,7 @@
 +    guarantee(jam_vm_prepare(_jam, false), "In-generation compaction must fit");
 +  }
 +  COMPILER2_OR_JVMCI_PRESENT(DerivedPointerTable::set_active(false));
-+  JamAdjust adjust;
++  JamAdjust adjust(minor);
 +  jam_roots(&adjust, true);
 +  WeakProcessor::oops_do(&adjust);
 +  _ref_processor->weak_oops_do(&adjust);
@@ -1286,7 +1491,6 @@
 +                                   jam_vm_used(_jam, true) * HeapWordSize));
 +  // Promoted bases must be inside the published old space before validation.
 +  COMPILER2_OR_JVMCI_PRESENT(DerivedPointerTable::update_pointers());
-+  if (!minor || promoted) rebuild_old_metadata(!minor);
 +  if (minor) ++_minor_collections; else ++_major_collections;
 +  if (promoted) ++_promotions;
 +  log_debug(gc)("Jam collections: minor=%zu, promotion=%zu, major=%zu; old=%zu, young=%zu bytes",
@@ -1310,17 +1514,11 @@
 +  // object boundary equals top(), in addition to Universe's external roots.
 +  _space->verify();
 +  _young_space->verify();
-+  JamRemember cards(this, _card_table, true);
-+  for (HeapWord* object = _space->bottom(); object < _space->top();) {
-+    oop value = cast_to_oop(object);
-+    cards.set_owner(value);
-+    value->oop_iterate(&cards);
-+    object += value->size();
-+  }
++
 +}
 --- a/src/hotspot/share/gc/jam/jamHeap.hpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.hpp
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,168 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -1359,7 +1557,6 @@
 +#include "jam_vm.h"
 +
 +class ReferenceProcessor;
-+class SerialBlockOffsetTable;
 +struct JamScanState;
 +
 +class JamHeap : public CollectedHeap {
@@ -1370,8 +1567,6 @@
 +  GCMemoryManager _memory_manager;
 +  ContiguousSpace* _space;
 +  ContiguousSpace* _young_space;
-+  CardTable* _card_table;
-+  SerialBlockOffsetTable* _old_starts;
 +  size_t _minor_collections;
 +  size_t _promotions;
 +  size_t _major_collections;
@@ -1393,8 +1588,6 @@
 +          _memory_manager("Jam Heap"),
 +          _space(nullptr),
 +          _young_space(nullptr),
-+          _card_table(nullptr),
-+          _old_starts(nullptr),
 +          _minor_collections(0),
 +          _promotions(0),
 +          _major_collections(0),
@@ -1489,8 +1682,7 @@
 +private:
 +  void print_heap_info(size_t used) const;
 +  void print_metaspace_info() const;
-+  void trace_dirty_owners();
-+  void rebuild_old_metadata(bool rebuild_cards);
++  void trace_remembered_slots();
 +
 +};
 +
@@ -2264,26 +2456,6 @@
  #if INCLUDE_G1GC
  #include "gc/g1/g1BarrierSet.inline.hpp"
  #endif
---- a/src/hotspot/share/gc/shared/cardTable.cpp
-+++ b/src/hotspot/share/gc/shared/cardTable.cpp
-@@ -43,7 +43,7 @@
- uint CardTable::_card_size_in_words = 0;
- 
- void CardTable::initialize_card_size() {
--  assert(UseG1GC || UseParallelGC || UseSerialGC || UseShenandoahGC,
-+  assert(UseG1GC || UseParallelGC || UseSerialGC || UseShenandoahGC || UseJamGC,
-          "Initialize card size should only be called by card based collectors.");
- 
-   _card_size = GCCardSizeInBytes;
-@@ -135,7 +135,7 @@
- }
- 
- void CardTable::resize_covered_region(MemRegion new_region) {
--  assert(UseSerialGC || UseParallelGC, "only these two collectors");
-+  assert(UseSerialGC || UseParallelGC || UseJamGC, "requires two card-covered generations");
-   assert(_whole_heap.contains(new_region),
-          "attempt to cover area not in reserved area");
-   assert(_covered[0].start() != nullptr, "precondition");
 --- a/src/hotspot/share/gc/shared/collectedHeap.hpp
 +++ b/src/hotspot/share/gc/shared/collectedHeap.hpp
 @@ -191,7 +191,8 @@
@@ -2617,7 +2789,17 @@
  void JVMCIGlobals::check_jvmci_supported_gc() {
 --- a/src/hotspot/share/jvmci/vmStructs_jvmci.cpp
 +++ b/src/hotspot/share/jvmci/vmStructs_jvmci.cpp
-@@ -672,6 +672,7 @@
+@@ -26,6 +26,9 @@
+ #include "code/compiledIC.hpp"
+ #include "compiler/compileBroker.hpp"
+ #include "gc/shared/collectedHeap.hpp"
++#if INCLUDE_JAMGC
++#include "gc/jam/jamBarrierSet.hpp"
++#endif
+ #include "jvmci/jvmciCodeInstaller.hpp"
+ #include "jvmci/jvmciCompilerToVM.hpp"
+ #include "jvmci/jvmciRuntime.hpp"
+@@ -672,6 +675,7 @@
    declare_constant(CollectedHeap::Parallel)                               \
    declare_constant(CollectedHeap::G1)                                     \
    declare_constant(CollectedHeap::Epsilon)                                \
@@ -2625,6 +2807,14 @@
    declare_constant(CollectedHeap::Z)                                      \
    declare_constant(CollectedHeap::Shenandoah)                             \
                                                                            \
+@@ -854,6 +858,7 @@
+ 
+ 
+ #define VM_ADDRESSES(declare_address, declare_preprocessor_address, declare_function, declare_function_with_value) \
++  JAMGC_ONLY(declare_function(JamBarrierSet::record_narrow))                \
+   declare_function(SharedRuntime::register_finalizer)                     \
+   declare_function(SharedRuntime::exception_handler_for_return_address)   \
+   declare_function(SharedRuntime::OSR_migration_end)                      \
 --- a/src/hotspot/share/memory/memoryReserver.cpp
 +++ b/src/hotspot/share/memory/memoryReserver.cpp
 @@ -83,6 +83,12 @@
@@ -2656,6 +2846,67 @@
          fatal("cannot protect protection page");
        }
        log_debug(gc, heap, coops)("Protected page at the reserved heap base: "
+--- a/src/hotspot/share/oops/stackChunkOop.inline.hpp
++++ b/src/hotspot/share/oops/stackChunkOop.inline.hpp
+@@ -43,6 +43,9 @@
+ #include "runtime/registerMap.hpp"
+ #include "runtime/smallRegisterMap.inline.hpp"
+ #include "utilities/macros.hpp"
++#if INCLUDE_JAMGC
++#include "gc/jam/jamBarrierSet.hpp"
++#endif
+ #include CPU_HEADER_INLINE(stackChunkOop)
+ 
+ DEF_HANDLE_CONSTR(stackChunk, is_stackChunk_noinline)
+@@ -65,7 +68,17 @@
+ inline void stackChunkOopDesc::set_bottom(int value)    { jdk_internal_vm_StackChunk::set_bottom(this, value); }
+ 
+ inline int stackChunkOopDesc::sp() const                { return jdk_internal_vm_StackChunk::sp(as_oop()); }
+-inline void stackChunkOopDesc::set_sp(int value)        { jdk_internal_vm_StackChunk::set_sp(this, value); }
++inline void stackChunkOopDesc::set_sp(int value) {
++#if INCLUDE_JAMGC
++  if (UseJamGC && value > sp()) {
++    intptr_t* first = start_address() + MAX2(0, sp() - frame::metadata_words_at_bottom);
++    intptr_t* last = value == bottom() ? end_address()
++        : start_address() + MAX2(0, value - frame::metadata_words_at_bottom);
++    JamBarrierSet::forget((address)first, (address)last);
++  }
++#endif
++  jdk_internal_vm_StackChunk::set_sp(this, value);
++}
+ 
+ inline address stackChunkOopDesc::pc() const            { return jdk_internal_vm_StackChunk::pc(as_oop()); }
+ inline void stackChunkOopDesc::set_pc(address value)    { jdk_internal_vm_StackChunk::set_pc(this, value); }
+--- a/src/hotspot/share/runtime/continuationFreezeThaw.cpp
++++ b/src/hotspot/share/runtime/continuationFreezeThaw.cpp
+@@ -2448,6 +2448,9 @@
+   assert(is_aligned(start, wordSize), "should be aligned: " PTR_FORMAT, p2i(start));
+   assert(is_aligned(end, VMRegImpl::stack_slot_size), "should be aligned: " PTR_FORMAT, p2i(end));
+ 
++  JAMGC_ONLY(if (UseJamGC) JamBarrierSet::forget(start, end);)
++  if (!_cont.tail()->has_bitmap()) return;
++
+   // we need to clear the bits that correspond to arguments as they reside in the caller frame
+   // or they will keep objects that are otherwise unreachable alive.
+ 
+@@ -2565,7 +2568,7 @@
+   if (!is_bottom_frame) {
+     // can only fix caller once this frame is thawed (due to callee saved regs)
+     _cont.tail()->fix_thawed_frame(caller, SmallRegisterMap::instance());
+-  } else if (_cont.tail()->has_bitmap() && locals > 0) {
++  } else if ((_cont.tail()->has_bitmap() JAMGC_ONLY(|| UseJamGC)) && locals > 0) {
+     assert(hf.is_heap_frame(), "should be");
+     address start = (address)(heap_frame_bottom - locals);
+     address end = (address)heap_frame_bottom;
+@@ -2641,7 +2644,7 @@
+   if (!is_bottom_frame) {
+     // can only fix caller once this frame is thawed (due to callee saved regs); this happens on the stack
+     _cont.tail()->fix_thawed_frame(caller, SmallRegisterMap::instance());
+-  } else if (_cont.tail()->has_bitmap() && added_argsize > 0) {
++  } else if ((_cont.tail()->has_bitmap() JAMGC_ONLY(|| UseJamGC)) && added_argsize > 0) {
+     address start = (address)(heap_frame_top + ContinuationHelper::CompiledFrame::size(hf) + frame::metadata_words_at_top);
+     int stack_args_slots = f.cb()->as_nmethod()->num_stack_arg_slots(false /* rounded */);
+     int argsize_in_bytes = stack_args_slots * VMRegImpl::stack_slot_size;
 --- a/src/hotspot/share/runtime/thread.cpp
 +++ b/src/hotspot/share/runtime/thread.cpp
 @@ -235,6 +235,7 @@

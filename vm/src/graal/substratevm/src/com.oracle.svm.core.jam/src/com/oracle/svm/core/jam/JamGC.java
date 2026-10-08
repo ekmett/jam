@@ -63,9 +63,10 @@ import jdk.graal.compiler.api.replacements.Fold;
 final class JamGC implements GC {
     private static final CEntryPointLiteral<CFunctionPointer> SCAN = CEntryPointLiteral.create(
                     JamGC.class, "scan", JamScanContext.class, Pointer.class, int.class);
+    private static final CEntryPointLiteral<CFunctionPointer> REMEMBERED = CEntryPointLiteral.create(
+                    JamGC.class, "remembered", JamScanContext.class, int.class, long.class, int.class, long.class);
     private final JamHeap heap;
     private final CollectionOperation operation = new CollectionOperation();
-    private final JamNativeList objects = new JamNativeList();
     private final JamNativeList references = new JamNativeList();
     private final JamNativeList roots = new JamNativeList();
     private final JamNativeList derived = new JamNativeList();
@@ -74,9 +75,7 @@ final class JamGC implements GC {
     private final ImageSnapshotVisitor imageSnapshotVisitor = new ImageSnapshotVisitor();
     private final ImageSnapshotRoots imageSnapshotRoots = new ImageSnapshotRoots();
     private final FieldVisitor fieldVisitor = new FieldVisitor();
-    private final RepairVisitor repairVisitor = new RepairVisitor();
     private final ImageVisitor imageVisitor = new ImageVisitor();
-    private final OldVisitor oldVisitor = new OldVisitor();
     private final JamCodeRoots codeRoots = new JamCodeRoots(this);
     private final RuntimeCodeCacheCleaner codeCleaner = new RuntimeCodeCacheCleaner();
     final JamReferenceQueue referenceQueue = new JamReferenceQueue();
@@ -171,7 +170,7 @@ final class JamGC implements GC {
         pins().removeClosedObjectsAndGetFirstOpenObject();
         minor = !data.getMajor();
         clearSoft = data.getClearSoft();
-        objects.clear(); references.clear(); roots.clear(); derived.clear();
+        references.clear(); roots.clear(); derived.clear();
         context = StackValue.get(JamScanContext.class);
         context.setIsolate(CurrentIsolate.getIsolate());
         context.setThread(CurrentIsolate.getCurrentThread());
@@ -181,7 +180,7 @@ final class JamGC implements GC {
             VMThreadLocalSupport.singleton().walk(thread, rootVisitor);
         }
         heap.walkImageHeapRoots(imageVisitor);
-        if (minor) heap.walkDirtyOldObjects(oldVisitor);
+        if (minor) JamNative.remembered(heap.nativeHeap(), REMEMBERED.getFunctionPointer(), context);
         JamNative.pinRoots(heap.nativeHeap(), SCAN.getFunctionPointer(), context);
         JamNative.weakRoots(heap.nativeHeap(), SCAN.getFunctionPointer(), context);
         RuntimeCodeInfoMemory.singleton().walkRuntimeMethodsDuringGC(codeRoots);
@@ -197,12 +196,6 @@ final class JamGC implements GC {
         boolean promoted = minor && JamNative.prepare(heap.nativeHeap(), 1) != 0;
         if (!promoted) VMError.guarantee(JamNative.prepare(heap.nativeHeap(), 0) != 0, "Retaining collection must fit");
         repairRoots();
-        for (long i = 0; i < objects.size(); i++) {
-            int at = (int) objects.get(i);
-            Object object = heap.decode(at);
-            InteriorObjRefWalker.walkObjectInline(object, repairVisitor);
-            if (object instanceof Reference<?>) repairReference((Reference<?>) object, at);
-        }
         repairDerived();
         JamNative.finish(heap.nativeHeap());
         heap.finishCollection(minor, promoted);
@@ -240,7 +233,7 @@ final class JamGC implements GC {
         Object object = heap.decode(at);
         UnsignedWord bytes = LayoutEncoding.getSizeFromObjectInGC(object);
         if (JamNative.claim(visitor, at, bytes.unsignedShiftRight(3)) == 0) return;
-        objects.add(at & 0xffffffffL);
+        if (heap.tracksStarts()) JamNative.recordStart(heap.nativeHeap(), at);
         Pointer previous = scanner;
         scanner = visitor;
         InteriorObjRefWalker.walkObjectInline(object, fieldVisitor);
@@ -251,6 +244,7 @@ final class JamGC implements GC {
             CLongPointer slots = StackValue.get(Long.BYTES);
             slots.write(slot.subtract(heap.base()).unsignedShiftRight(2).rawValue());
             JamNative.fields(visitor, slots, Word.unsigned(1), 0);
+            heap.remember(reference, slot, 1, 4, true);
             if (!clearSoft && reference instanceof SoftReference<?>) traceTarget(ReferenceInternals.getReferentPointer(reference), visitor);
         }
         scanner = previous;
@@ -347,13 +341,25 @@ final class JamGC implements GC {
         }
     }
 
-    @Uninterruptible(reason = "Only nonmoving old referent slots need explicit narrow repair.")
-    private void repairReference(Reference<?> reference, int at) {
-        if (minor && at >= 0) {
-            Pointer slot = ReferenceInternals.getReferentFieldAddress(reference);
-            Pointer before = ReferenceInternals.getReferentPointer(reference);
-            Pointer after = forward(before);
-            if (before.notEqual(after)) DerivedReferenceSupport.writeReference(slot, after, true);
+    @CEntryPoint(include = Enabled.class, publishAs = CEntryPoint.Publish.NotPublished)
+    @CEntryPointOptions(prologue = ScannerPrologue.class, epilogue = CEntryPointOptions.NoEpilogue.class)
+    @Uninterruptible(reason = "Consume exact old source slots under the VM safepoint.")
+    private static void remembered(JamScanContext context, int owner, long offset, int compressed, long baseOffset) {
+        JamGC gc = get();
+        Object holder = owner == 0 ? null : gc.heap.decode(owner);
+        Pointer slot = gc.heap.base().add(Word.unsigned(offset).shiftLeft(2));
+        if (baseOffset != 0) {
+            Pointer base = gc.heap.base().add(Word.unsigned(baseOffset).shiftLeft(2));
+            gc.addRoot(base, compressed != 0);
+            gc.addDerived(base, slot, compressed != 0);
+            return;
+        }
+        gc.recordRoot(slot, compressed != 0);
+        if (holder instanceof Reference<?> reference && slot.equal(ReferenceInternals.getReferentFieldAddress(reference))) {
+            gc.references.add(owner & 0xffffffffL);
+            if (!gc.clearSoft && reference instanceof SoftReference<?>) gc.traceTarget(ReferenceInternals.getReferentPointer(reference), Word.nullPointer());
+        } else {
+            gc.traceTarget(ReferenceAccess.singleton().readObjectAsUntrackedPointer(slot, compressed != 0), Word.nullPointer());
         }
     }
 
@@ -380,6 +386,7 @@ final class JamGC implements GC {
     private final class FieldVisitor implements UninterruptibleObjectReferenceVisitor {
         @Override @Uninterruptible(reason = "Batch narrow field declarations into Jam's pointer masks.")
         public void visitObjectReferences(Pointer first, boolean compressed, int stride, Object holder, int count) {
+            heap.remember(holder, first, count, stride, compressed);
             CLongPointer slots = StackValue.get(128 * Long.BYTES);
             for (int start = 0; start < count; start += 128) {
                 int n = Math.min(128, count - start);
@@ -387,31 +394,21 @@ final class JamGC implements GC {
                     for (int j = 0; j < n; j++) slots.write(j, first.add(Word.unsigned(start + j).multiply(stride)).subtract(heap.base()).unsignedShiftRight(2).rawValue());
                     JamNative.fields(scanner, slots, Word.unsigned(n), 1);
                 } else {
-                    for (int j = 0; j < n; j++) traceTarget(ReferenceAccess.singleton().readObjectAsUntrackedPointer(first.add(Word.unsigned(start + j).multiply(stride)), false), scanner);
+                    for (int j = 0; j < n; j++) {
+                        Pointer slot = first.add(Word.unsigned(start + j).multiply(stride));
+                        recordRoot(slot, false);
+                        traceTarget(ReferenceAccess.singleton().readObjectAsUntrackedPointer(slot, false), scanner);
+                    }
                 }
             }
         }
         @Override @Uninterruptible(reason = "Trace the base, never an interior address.")
         public void visitDerivedReferenceBase(Pointer slot, boolean compressed, int stride, Object holder) { visitObjectReferences(slot, compressed, stride, holder, 1); }
         @Override @Uninterruptible(reason = "Save continuation-derived references for source repair.")
-        public void visitDerivedReference(Pointer base, Pointer slot, boolean compressed, Object holder) { addDerived(base, slot, compressed); }
-    }
-
-    private final class RepairVisitor implements UninterruptibleObjectReferenceVisitor {
-        @Override @Uninterruptible(reason = "Repair wide fields and nonmoving old fields; SIMD repairs collected narrow fields.")
-        public void visitObjectReferences(Pointer first, boolean compressed, int stride, Object holder, int count) {
-            if (compressed && (!minor || heap.isYoung(Word.objectToUntrackedPointer(holder)))) return;
-            for (int i = 0; i < count; i++) {
-                Pointer slot = first.add(Word.unsigned(i).multiply(stride));
-                Pointer before = ReferenceAccess.singleton().readObjectAsUntrackedPointer(slot, compressed);
-                Pointer after = forward(before);
-                if (before.notEqual(after)) DerivedReferenceSupport.writeReference(slot, after, compressed);
-            }
+        public void visitDerivedReference(Pointer base, Pointer slot, boolean compressed, Object holder) {
+            addDerived(base, slot, compressed);
+            heap.rememberDerived(holder, base, slot, compressed);
         }
-        @Override @Uninterruptible(reason = "Repair an ordinary base slot.")
-        public void visitDerivedReferenceBase(Pointer slot, boolean compressed, int stride, Object holder) { visitObjectReferences(slot, compressed, stride, holder, 1); }
-        @Override @Uninterruptible(reason = "Derived values are repaired from their saved displacement.")
-        public void visitDerivedReference(Pointer base, Pointer slot, boolean compressed, Object holder) { }
     }
 
     private final class ImageVisitor implements UninterruptibleObjectVisitor {
@@ -454,15 +451,6 @@ final class JamGC implements GC {
         }
     }
 
-    private final class OldVisitor implements UninterruptibleObjectVisitor {
-        @Override @Uninterruptible(reason = "The heap enumerates each dirty old owner once.", callerMustBe = true)
-        public void visitObject(Object object) {
-            CIntPointer owner = StackValue.get(Integer.BYTES);
-            owner.write(heap.encode(object));
-            JamNative.traceOld(heap.nativeHeap(), owner, Word.unsigned(1), SCAN.getFunctionPointer(), context);
-        }
-    }
-
     @Uninterruptible(reason = Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     UninterruptibleObjectReferenceVisitor rootVisitor() { return rootVisitor; }
     @Uninterruptible(reason = Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
@@ -490,5 +478,5 @@ final class JamGC implements GC {
     @Uninterruptible(reason = "Reference queue locking.")
     public Reference<?> getAndClearReferencePendingList() { return referenceQueue.getAndClearReferencePendingList(); }
     @Uninterruptible(reason = "Isolate tear down.")
-    void tearDown() { objects.release(); references.release(); roots.release(); derived.release(); }
+    void tearDown() { references.release(); roots.release(); derived.release(); }
 }

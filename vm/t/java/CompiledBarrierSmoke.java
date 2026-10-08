@@ -99,7 +99,7 @@ public final class CompiledBarrierSmoke {
         }
         check(JamWeak.collections(0) == minors + 4, "four real minor collections");
         check(JamWeak.collections(1) == promotions && JamWeak.collections(2) == majors,
-              "neither promotion nor full tracing hides missing cards");
+              "neither promotion nor full tracing hides missing barriers");
         Reference.reachabilityFence(cas);
         Reference.reachabilityFence(swap);
         Reference.reachabilityFence(arrays);

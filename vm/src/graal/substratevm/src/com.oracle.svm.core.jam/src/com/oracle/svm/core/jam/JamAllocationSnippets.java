@@ -68,7 +68,7 @@ public final class JamAllocationSnippets implements Snippets {
         int layoutEncoding = hubNonNull.getLayoutEncoding();
         UnsignedWord size = LayoutEncoding.getPureInstanceAllocationSize(layoutEncoding);
         Word objectHeader = encodeAsObjectHeader(hubNonNull, rememberedSet, false);
-        return alloc().formatObject(objectHeader, size, memory, fillContents, emitMemoryBarrier, false, snippetCounters);
+        return JamHeap.get().recordFormattedObject(alloc().formatObject(objectHeader, size, memory, fillContents, emitMemoryBarrier, false, snippetCounters));
     }
 
     @Snippet
@@ -79,7 +79,7 @@ public final class JamAllocationSnippets implements Snippets {
         int layoutEncoding = hubNonNull.getLayoutEncoding();
         UnsignedWord size = LayoutEncoding.getArrayAllocationSize(layoutEncoding, length);
         Word objectHeader = encodeAsObjectHeader(hubNonNull, rememberedSet, unaligned);
-        return alloc().formatArray(objectHeader, size, length, memory, fillContents, emitMemoryBarrier, false, supportsBulkZeroing, supportsOptimizedFilling, snippetCounters);
+        return JamHeap.get().recordFormattedObject(alloc().formatArray(objectHeader, size, length, memory, fillContents, emitMemoryBarrier, false, supportsBulkZeroing, supportsOptimizedFilling, snippetCounters));
     }
 
     @Snippet
@@ -89,7 +89,7 @@ public final class JamAllocationSnippets implements Snippets {
         int layoutEncoding = hubNonNull.getLayoutEncoding();
         UnsignedWord size = LayoutEncoding.getArrayAllocationSize(layoutEncoding, length);
         Word objectHeader = encodeAsObjectHeader(hubNonNull, rememberedSet, unaligned);
-        return alloc().formatStoredContinuation(objectHeader, size, length, memory, emitMemoryBarrier, ipOffset, snippetCounters);
+        return JamHeap.get().recordFormattedObject(alloc().formatStoredContinuation(objectHeader, size, length, memory, emitMemoryBarrier, ipOffset, snippetCounters));
     }
 
     @Snippet
@@ -101,8 +101,8 @@ public final class JamAllocationSnippets implements Snippets {
         Word objectHeader = encodeAsObjectHeader(hubNonNull, rememberedSet, unaligned);
         int layoutEncoding = hubNonNull.getLayoutEncoding();
         UnsignedWord allocationSize = LayoutEncoding.getArrayAllocationSize(layoutEncoding, arrayLength);
-        return alloc().formatPod(objectHeader, hubNonNull, allocationSize, arrayLength, refMapNonNull, memory, fillContents, emitMemoryBarrier, false, supportsBulkZeroing, supportsOptimizedFilling,
-                        snippetCounters);
+        return JamHeap.get().recordFormattedObject(alloc().formatPod(objectHeader, hubNonNull, allocationSize, arrayLength, refMapNonNull, memory, fillContents, emitMemoryBarrier, false, supportsBulkZeroing, supportsOptimizedFilling,
+                        snippetCounters));
     }
 
     private static Word encodeAsObjectHeader(DynamicHub hub, boolean rememberedSet, boolean unaligned) {

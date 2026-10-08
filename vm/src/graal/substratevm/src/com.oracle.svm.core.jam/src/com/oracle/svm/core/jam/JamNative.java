@@ -12,6 +12,7 @@ import org.graalvm.nativeimage.c.function.CLibrary;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.nativeimage.c.type.CLongPointer;
+import org.graalvm.nativeimage.c.type.WordPointer;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import static org.graalvm.nativeimage.c.function.CFunction.Transition.NO_TRANSITION;
@@ -69,6 +70,20 @@ final class JamNative {
     static native int gapAt(Pointer heap, UnsignedWord index);
     @CFunction(value = "jam_vm_gap_words", transition = NO_TRANSITION)
     static native UnsignedWord gapWords(Pointer heap, UnsignedWord index);
+    @CFunction(value = "jam_vm_remember", transition = NO_TRANSITION)
+    static native void remember(Pointer heap, int holder, long first, UnsignedWord count, UnsignedWord stride, int compressed);
+    @CFunction(value = "jam_vm_remember_derived", transition = NO_TRANSITION)
+    static native void rememberDerived(Pointer heap, int holder, long base, long slot, int compressed);
+    @CFunction(value = "jam_vm_remembered", transition = NO_TRANSITION)
+    static native void remembered(Pointer heap, CFunctionPointer visitor, JamScanContext context);
+    @CFunction(value = "jam_vm_track_starts", transition = NO_TRANSITION)
+    static native int trackStarts(Pointer heap);
+    @CFunction(value = "jam_vm_start_bits", transition = NO_TRANSITION)
+    static native CIntPointer startBits(Pointer heap, int young, WordPointer count);
+    @CFunction(value = "jam_vm_tracks_starts", transition = NO_TRANSITION)
+    static native int tracksStarts(Pointer heap);
+    @CFunction(value = "jam_vm_record_start", transition = NO_TRANSITION)
+    static native void recordStart(Pointer heap, int object);
     @CFunction(value = "jam_vm_begin", transition = NO_TRANSITION)
     static native void begin(Pointer heap, int minor);
     @CFunction(value = "jam_vm_trace", transition = NO_TRANSITION)
