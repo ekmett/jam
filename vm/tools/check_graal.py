@@ -35,11 +35,11 @@ exports = ['--add-modules=jdk.internal.vm.ci',
 subprocess.run([str(home / 'bin/javac'), *exports, '-d', str(classes),
                 str(root / 't/graal/InvalidationReasonSmoke.java')], check=True)
 flags = [
-    '-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
+    '-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UnlockDiagnosticVMOptions', '-XX:+UseJamGC',
     '-XX:+EnableJVMCI', '-XX:+UseJVMCICompiler', '-XX:+UseJVMCINativeLibrary',
     '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC', '-XX:JamWorkers=4',
     '-Xbatch', '-XX:-TieredCompilation', '-XX:CompileThreshold=1000',
-    '-XX:+UnlockDiagnosticVMOptions', '-XX:+LogCompilation', '-Xlog:gc=debug',
+    '-XX:+LogCompilation', '-Xlog:gc=debug',
     '-Djdk.graal.CompilationFailureAction=ExitVM', '-Djdk.graal.ShowConfiguration=info',
     '-Djdk.graal.DumpPath=' + str(evidence / 'graal-dumps'),
     '--enable-native-access=ALL-UNNAMED',

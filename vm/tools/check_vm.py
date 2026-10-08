@@ -28,7 +28,7 @@ build_jni_test(javac.parent.parent, native, collector=True)
 subprocess.run([str(javac), '-cp', str(jar), '-d', str(classes),
                 *map(str, sorted((root / 't/java').glob('*.java'))),
                 str(root / 't/bridge/JNIWeakSmoke.java')], check=True)
-flags = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
+flags = ['-Xshare:off', '-Xms32m', '-Xmx32m', '-XX:+UnlockExperimentalVMOptions', '-XX:+UnlockDiagnosticVMOptions', '-XX:+UseJamGC',
          '-XX:JamWorkers=4', '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC', '-Xlog:gc',
          '--enable-native-access=ALL-UNNAMED',
          '-Djava.library.path=' + os.pathsep.join(map(str, (root / 'build/bridge/lib', NATIVE_BUILD, native))),
@@ -53,7 +53,7 @@ for mode, compiler in (
         ('c1', ['-Xbatch', '-XX:TieredStopAtLevel=1', '-XX:+PrintCompilation']),
         ('c2', ['-Xbatch', '-XX:-TieredCompilation', '-XX:CompileThreshold=1000', '-XX:+PrintCompilation'])):
     methods = ('store', 'arrayStore', 'unsafeStore', 'largeStore', 'copy')
-    run(f'GenerationSmoke-{mode}', 'GenerationSmoke', [*compiler, '-XX:+UnlockDiagnosticVMOptions',
+    run(f'GenerationSmoke-{mode}', 'GenerationSmoke', [*compiler,
         f'-XX:LogFile={evidence / (prefix + "-compiler-" + mode + ".log")}',
         *('-XX:CompileCommand=dontinline,GenerationSmoke::' + method for method in methods)])
     run(f'CompiledBarrierSmoke-{mode}', 'CompiledBarrierSmoke', [*compiler,

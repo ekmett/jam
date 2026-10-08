@@ -15,9 +15,9 @@ def main():
     environment = graal_environment(parser.parse_args().java_home)
     verify_sources(environment)
     run_mx('compiler', ['--max-cpus', environment.get('JAM_JOBS', '3'), 'build', '--build-logs=silent'], environment)
-    run_mx('compiler', ['unittest', '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC', '-Xshare:off',
+    run_mx('compiler', ['unittest', '-XX:+UnlockExperimentalVMOptions', '-XX:+UnlockDiagnosticVMOptions', '-XX:+UseJamGC', '-Xshare:off',
                        '-Xms128m', '-Xmx128m', '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC',
-                       '-XX:+TraceDerivedPointers', '-Xlog:gc=debug',
+                       '-Xlog:gc=debug',
                        'GraalHotSpotVMConfigAccessTest', 'WriteBarrierAdditionTest', 'DeferredBarrierAdditionTest',
                        'DerivedOopTest', 'PointerTrackingTest'], environment)
 
