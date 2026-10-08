@@ -109,10 +109,49 @@ may still contain safepoint polls, resolution paths or deoptimization points.
 SubstrateVM must enforce equivalent restrictions through its uninterruptible
 call graph, including every possible virtual implementation.
 
-No compilation route is selected yet. Establish feasibility before exposing the
-interface as supported or asking consumers to migrate their storage. If this
-cannot be provided on both VMs, report the limitation and revisit the design;
-a finite set of thunk descriptors is not an implementation of these methods.
+### Source investigation
+
+HotSpot's normal `JavaCallWrapper` requires a Java thread, rejects VM-thread
+entry, and performs a thread-state transition that can block. Calling an
+ordinary compiled method directly does not remove its Java-thread assumptions.
+See [JavaCalls](https://github.com/openjdk/jdk/blob/6c48f4ed707bf0b15f9b6098de30db8aae6fa40f/src/hotspot/share/runtime/javaCalls.cpp).
+
+Graal's runtime-stub backend is a candidate for a separate entry. Its
+[stub checks](https://github.com/oracle/graal/blob/7b025988a922a73286d1326e1eddc1ca39d3f569/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/stubs/Stub.java)
+reject ordinary Java calls, embedded object/metadata constants, exception
+handlers and speculative assumptions. These checks do not establish collector
+safety: runtime calls are still possible, including paths we must reject.
+There is no existing Jam path that compiles an application's resolver into
+such an entry. We would need graph validation, collector-specific lowering of
+dispatch and stores, a native calling convention, and code/class-lifetime
+management. This must also account for HotSpot packages without a Graal compiler.
+
+SubstrateVM's
+[uninterruptible checker](https://github.com/oracle/graal/blob/7b025988a922a73286d1326e1eddc1ca39d3f569/substratevm/src/com.oracle.svm.hosted/src/com/oracle/svm/hosted/code/UninterruptibleAnnotationChecker.java)
+rejects allocations and Java monitor entry, checks overrides and callees, and
+restricts class initialization. It is not a no-throw/no-block guarantee.
+`ImplicitExceptions.throwCachedNullPointerException` and `VMMutex.lockNoTransition`
+are counterexamples in the VM itself. Uninterruptible code also omits ordinary
+stack-overflow checks. An annotation cannot make recursive selector dispatch safe.
+
+The candidate validation boundary is a closed, AOT call graph on SubstrateVM
+and separately compiled collector entries on HotSpot. Check every possible
+implementation and reachable helper. Reject annotation escape hatches, unchecked
+native calls, exception/deoptimization paths and unbounded recursive dispatch;
+allow only audited collector-safe foreign operations. Require class initialization
+and code installation before collection, and validate collector stores separately.
+Keep chain traversal and cycle handling in the collector; each resolver step
+needs bounded execution. SubstrateVM qualification must keep its annotation
+checker enabled, including avoiding the experimental reachability-analysis mode
+that skips it.
+
+This is a source-validated architectural gap, not a working dispatch prototype
+or a proof that the design is impossible. The next runtime experiment must
+compile a language-authored resolver into a separate collector entry, exercise
+it from the real scanner, and reject representative unsafe implementations.
+Until that succeeds on both providers, the interface remains proposed and
+consumers should defer storage migration. A finite set of thunk descriptors is
+not an implementation of these methods.
 
 Once the API is stable, consumers pin a release's
 [runtime manifest](distribution.md), the matching bridge JAR and provider
