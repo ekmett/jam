@@ -20,7 +20,7 @@ flags = ['-Xshare:off', '-Xms32m', '-Xmx32m', '--enable-native-access=ALL-UNNAME
          '-Djava.library.path=' + str(root / 'build/bridge/lib'), '-cp',
          os.pathsep.join((str(classes), str(root / 'build/bridge/jam-vm.jar')))]
 cases = [
-    ('jam', vm, ['-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
+    ('jam', vm, ['-XX:+UnlockExperimentalVMOptions', '-XX:+UnlockDiagnosticVMOptions', '-XX:+UseJamGC',
                  '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC'], [], 'Weak bridge passed'),
     ('epsilon', vm, ['-XX:+UnlockExperimentalVMOptions', '-XX:+UseEpsilonGC'],
      ['unavailable'], 'Weak bridge unavailable as expected'),

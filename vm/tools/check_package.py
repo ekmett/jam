@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory(prefix='jam-package-check-') as temporary:
                     str(root / 't/bridge/WeakBridgeSmoke.java')], check=True)
     result = run([
         str(java_tool(home, 'java')), '-Xshare:off', '-Xms32m', '-Xmx32m',
-        '-XX:+UnlockExperimentalVMOptions', '-XX:+UseJamGC',
+        '-XX:+UnlockExperimentalVMOptions', '-XX:+UnlockDiagnosticVMOptions', '-XX:+UseJamGC',
         '-XX:+VerifyBeforeGC', '-XX:+VerifyAfterGC', '--enable-native-access=ALL-UNNAMED',
         *(['-Djam.runtime.audit=true'] if windows else []),
         '-Djava.library.path=' + str(native_library), '-cp', os.pathsep.join((str(classes), str(jar))),
