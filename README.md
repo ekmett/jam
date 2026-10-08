@@ -91,6 +91,8 @@ lives here too; the default build is still just the C++ library.
 
 ## License and contact
 
+<img align="right" src="assets/images/marley-jammin.png" width="200" alt="A smiling sanitation worker with a broom" title="We be JAMmin">
+
 See [LICENSE.md](LICENSE.md) for the dual BSD-2-Clause/Apache-2.0 license and
 individual source notices for retained upstream terms.
 

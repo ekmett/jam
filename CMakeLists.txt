@@ -200,6 +200,8 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_GENERATE_HTML YES)
   set(DOXYGEN_GENERATE_LATEX NO)
   set(DOXYGEN_GENERATE_XML YES)
+  set(DOXYGEN_PROJECT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/favicon.png")
+  set(DOXYGEN_HTML_EXTRA_STYLESHEET "${CMAKE_CURRENT_SOURCE_DIR}/docs/site.css")
   set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
   set(DOXYGEN_FILE_PATTERNS "*.ccm" "*.cc" "*.md")
   set(DOXYGEN_EXTENSION_MAPPING "ccm=C++")
@@ -239,6 +241,12 @@ if(JAM_BUILD_DOCS)
     ${jam_vm_guides} vm/README.md vm/NOTICE.md
     docs/simd.md docs/collector.md docs/single-base.md docs/hosting.md docs/building.md
     COMMENT "Build jam API documentation")
+  # Keep README image paths valid in both GitHub and the generated main page.
+  add_custom_command(TARGET jam-docs POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+      "${CMAKE_CURRENT_SOURCE_DIR}/assets/images"
+      "${CMAKE_CURRENT_BINARY_DIR}/docs/html/assets/images"
+    VERBATIM)
   # Removed declarations must not leave stale pages in the generated reference.
   add_custom_target(jam-docs-clean
     COMMAND "${CMAKE_COMMAND}" -E rm -rf
