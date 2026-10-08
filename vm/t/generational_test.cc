@@ -198,6 +198,41 @@ static void concurrent_old_pin() {
   check(__atomic_load_n(payload, __ATOMIC_RELAXED) == writes.load(std::memory_order_acquire),
         "old backing retains concurrent native writes across retaining/promoting minors");
 }
+static void concurrent_alias_pin() {
+  heap h(4);
+  check(jam_vm_allocate(h.vm, h.page / 4, 1), "dead prefix allocation");
+  auto pinned = h.make(true, 0);
+  auto * pin = jam_vm_pin_object(h.vm, pinned, 3);
+  auto * const alias = static_cast<object *>(jam_vm_pin_address(pin));
+  auto * const payload = &alias->identity;
+  std::atomic<bool> stop{false};
+  std::atomic<uint64_t> writes{0};
+  std::thread native([&] {
+    uint64_t n = 0;
+    while (!stop.load(std::memory_order_relaxed)) {
+      __atomic_store_n(payload, ++n, __ATOMIC_RELAXED);
+      writes.store(n, std::memory_order_release);
+    }
+  });
+  while (!writes.load(std::memory_order_acquire)) std::this_thread::yield();
+  for (unsigned n = 0; n != 24; ++n) {
+    h.make(true, 999);
+    jam_vm_begin(h.vm, n % 3 != 0);
+    jam_vm_pin_roots(h.vm, heap::scan, &h);
+    check(jam_vm_prepare(h.vm, n % 3 == 2), "pinned major/retaining/promoting preparation");
+    pinned = jam_vm_forward(h.vm, pinned);
+    jam_vm_finish(h.vm);
+    check(jam_vm_pin_address(pin) == alias, "side alias survives canonical republication");
+    check(h.at(pinned).header == alias->header, "published canonical pin header intact");
+  }
+  stop.store(true, std::memory_order_relaxed);
+  native.join();
+  check(__atomic_load_n(payload, __ATOMIC_RELAXED) == writes.load(std::memory_order_acquire),
+        "pin keeps final native write across all collection modes");
+  check(h.at(pinned).identity == writes.load(std::memory_order_acquire),
+        "republished canonical mapping shares pinned backing");
+  jam_vm_unpin(h.vm, pin);
+}
 static void thread_scopes() {
   heap first(2), second(2);
   auto * a = jam_vm_thread_create(first.vm);
@@ -243,5 +278,5 @@ static void thread_scopes() {
 }
 int main(int argc, char **) {
   cycles(1, argc > 1); cycles(4, argc > 1); capacity_and_retry(); mixed_weak_batch();
-  permanent_references(); concurrent_old_pin(); thread_scopes();
+  permanent_references(); concurrent_old_pin(); concurrent_alias_pin(); thread_scopes();
 }

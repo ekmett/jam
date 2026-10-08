@@ -25,7 +25,7 @@ import com.oracle.svm.core.hub.RuntimeClassLoading;
 import com.oracle.svm.core.image.ImageHeapLayouter;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.core.os.CommittedMemoryProvider;
-import com.oracle.svm.guest.staging.util.UserError;
+import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.HostedConfiguration;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import jdk.graal.compiler.graph.Node;
@@ -44,7 +44,10 @@ final class JamFeature implements InternalFeature {
         UserError.guarantee(!ImageLayerBuildingSupport.buildingImageLayer(), "Jam does not yet support layered images");
         UserError.guarantee(!RuntimeClassLoading.isSupported(), "Jam does not yet support dynamic class loading");
         UserError.guarantee(JamOptions.JamWorkers.getValue() > 0, "JamWorkers must be positive");
-        ImageSingletons.add(ObjectLayout.class, HostedConfiguration.createObjectLayout(IdentityHashMode.OBJECT_HEADER));
+        ObjectLayout layout = HostedConfiguration.createObjectLayout(IdentityHashMode.OBJECT_HEADER);
+        UserError.guarantee(layout.getMinRuntimeHeapInstanceSize() == Long.BYTES,
+                        "Jam pin padding requires eight-byte minimum instances; additional object-header bytes are unsupported");
+        ImageSingletons.add(ObjectLayout.class, layout);
         ImageSingletons.add(BarrierSetProvider.class, new JamBarrierSetProvider());
         ImageSingletons.add(GCRelatedMXBeans.class, new JamRelatedMXBeans());
         ImageSingletons.add(CommittedMemoryProvider.class, new JamCommittedMemoryProvider());

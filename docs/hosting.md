@@ -109,3 +109,43 @@ Linux, aliases may instead remain until the reservation is released, but must
 never be accessed after the heap dies. `storage.old()` and `storage.young()`
 expose used cells, capacity and ring origins; `storage.compactor_name()` reports
 the selected kernel.
+
+## Pins
+
+`host.pin_object(at, words)` registers a complete object and returns a stable
+registration. `pin->address()` is a side alias of its backing pages; it remains
+valid until the matching `host.unpin(pin)`. Repeated pins of one object share a
+registration and must each be released. The managed offset can change:
+`pin->position()` follows it. Include `host.visit_pins(callback)` in the strong
+root walk before resolving weak references.
+
+Several objects can share a pinned physical page. They retain their relative
+positions while the collector remaps that page into its new canonical location.
+Native code may concurrently write primitive payload through the side alias;
+it must not write managed references without the runtime's barriers. Collection
+repairs the traced reference slots but does not copy pinned payload.
+
+Tracing first determines which objects are really live. Only after it drains
+does pin placement fill occupancy bits for retained gaps. Forwarding ranks use
+that expanded occupancy; weak-target survival uses the original claims. Bytes
+retained around a pin are not resurrected objects, and their untraced fields
+are never treated as pointers.
+
+The extra claims array costs 32 bits per 256-byte mini-page during pinned
+collection. Together with the 64-bit pointer mask, 32-bit occupancy mask,
+32-bit forwarding base and alignment nibble, this is 20.5 bytes per mini-page.
+Without moving pins, claims and occupancy share the existing mask and no extra
+array is allocated. A minor with only old pins keeps the ordinary SIMD path.
+After `finish()`, `host.gaps()` identifies destination padding that an object-stream
+runtime must format as fillers before walking the heap.
+Republish canonical windows after movement, including old space after pinned
+promotion. The native side aliases stay fixed.
+
+Collections that move pins currently stage movable survivors and splice backing
+runs serially. A run can require several mapping calls, especially when earlier
+collections have fragmented the backing map.
+
+A gap can be as small as one eight-byte cell. The Native Image integration uses
+its ordinary filler objects and therefore requires an eight-byte minimum instance
+size, as in its default compressed-header layout. Image building rejects extra
+object-header bytes that would make those fillers too large.

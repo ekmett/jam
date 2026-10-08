@@ -226,6 +226,19 @@ public:
       scan(visit, at);
     }, workers, old_owners);
   }
+  using pin = jam::heap::host::pin;
+  /// \brief Register a complete movable object; native access uses the side alias.
+  [[nodiscard]] pin * pin_object(std::uint32_t at, std::size_t count) noexcept { return host.pin_object(at, count); }
+  /// \brief Release one stable-address registration outside collection.
+  void unpin(pin * value) noexcept { host.unpin(value); }
+  /// \brief Trace registrations before resolving reference policy.
+  template<class Scan> void trace_pins(Scan && scan) noexcept {
+    std::vector<std::uint32_t> roots;
+    host.visit_pins([&](std::uint32_t at) noexcept { roots.push_back(at); });
+    trace(roots, scan);
+  }
+  /// \brief Retained padding to format before walking the collected Java heap.
+  [[nodiscard]] auto gaps() const noexcept { return host.gaps(); }
   /// \brief Query epoch liveness after all tracing workers have drained.
   [[nodiscard]] bool marked(std::uint32_t at) const noexcept { return immortal(at) || host.marked(at); }
   /// \brief Freeze destinations and repair the registry; failed promotion changes no handles.
@@ -238,8 +251,13 @@ public:
   [[nodiscard]] std::uint32_t forward(std::uint32_t at) const noexcept {
     return immortal(at) ? at : host.forward(at);
   }
-  /// \brief Move and republish only rotated rings before the host resumes mutators.
-  /// Minors, including promotion, preserve old mappings for concurrent native pins.
-  void finish() noexcept { host.finish(); publish(!minor); collecting = false; }
+  /// \brief Move and republish changed canonical windows; native side aliases remain fixed.
+  void finish() noexcept {
+    bool old_moved = !minor;
+    if (minor) host.visit_pins([&](std::uint32_t at) noexcept { old_moved |= (at & young_bit) != 0; });
+    host.finish();
+    publish(old_moved);
+    collecting = false;
+  }
 };
 }
