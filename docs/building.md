@@ -113,14 +113,14 @@ host with the baseline, including mixed-generation forwarding.
 
 ## Documentation
 
-With Doxygen 1.18+ and Graphviz installed:
+With Doxygen 1.18+, Graphviz, Pandoc 3.8+ and Python 3 installed:
 
 ```sh
 cmake -S . -B build -DJAM_BUILD_DOCS=ON
 cmake --build build --target jam-docs
 ```
 
-Open `build/docs/html/index.html`. It includes the README, these guides, API
+Open `build/site/index.html`. It includes the README, these guides, API
 contracts and source links. XML is in `build/docs/xml`. Warnings fail the build;
 each run replaces generated output so deleted declarations leave no stale pages.
 

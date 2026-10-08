@@ -194,6 +194,8 @@ if(JAM_BUILD_BENCHMARKS)
 endif()
 if(JAM_BUILD_DOCS)
   find_package(Doxygen 1.18 REQUIRED COMPONENTS doxygen dot)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(PANDOC_EXECUTABLE pandoc REQUIRED)
   set(DOXYGEN_PROJECT_NAME jam)
   set(DOXYGEN_PROJECT_BRIEF "A compacting generational garbage collector for C++26")
   set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/docs")
@@ -201,7 +203,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_GENERATE_LATEX NO)
   set(DOXYGEN_GENERATE_XML YES)
   set(DOXYGEN_PROJECT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/favicon.png")
-  set(DOXYGEN_HTML_EXTRA_STYLESHEET "${CMAKE_CURRENT_SOURCE_DIR}/docs/site.css")
+
   set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
   set(DOXYGEN_FILE_PATTERNS "*.ccm" "*.cc" "*.md")
   set(DOXYGEN_EXTENSION_MAPPING "ccm=C++")
@@ -253,6 +255,11 @@ if(JAM_BUILD_DOCS)
       "${CMAKE_CURRENT_BINARY_DIR}/docs/html" "${CMAKE_CURRENT_BINARY_DIR}/docs/xml"
     VERBATIM)
   add_dependencies(jam-docs jam-docs-clean)
+  add_custom_command(TARGET jam-docs POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/docs/site/build.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/docs/html"
+      "${CMAKE_CURRENT_BINARY_DIR}/site" --name jam --pandoc "${PANDOC_EXECUTABLE}"
+    VERBATIM)
 endif()
 
 install(TARGETS jam EXPORT jamTargets

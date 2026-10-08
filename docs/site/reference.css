@@ -1,0 +1,85 @@
+/* SPDX-FileCopyrightText: 2026 Edward Kmett
+ * SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
+ * Typography and palette adapted from thc's docs/site/site.css. */
+html:root {
+  --font-family-title: Georgia, "Times New Roman", serif;
+  --font-family-monospace: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --font-family-nav: system-ui, sans-serif;
+  --page-background-color: var(--thc-paper);
+  --page-foreground-color: var(--thc-ink);
+  --page-link-color: var(--thc-link);
+  --page-visited-link-color: var(--thc-link);
+  --page-external-link-color: var(--thc-link);
+  --header-background-color: var(--thc-paper);
+  --header-separator-color: var(--thc-line);
+  --title-separator-color: var(--thc-line);
+  --group-header-color: var(--thc-heading);
+  --nav-background-color: var(--thc-pale);
+  --nav-text-normal-color: var(--thc-ink);
+  --nav-foreground-color: var(--thc-heading);
+  --nav-border-color: var(--thc-line);
+  --nav-menu-active-bg: var(--thc-wash);
+  --nav-splitbar-bg-color: var(--thc-line);
+  --fragment-background-color: var(--thc-code);
+  --fragment-foreground-color: var(--thc-ink);
+  --fragment-border-color: var(--thc-line);
+  --memdecl-background-color: var(--thc-pale);
+  --memdecl-foreground-color: var(--thc-ink);
+  --memdecl-border-color: var(--thc-line);
+  --memdef-border-color: var(--thc-line);
+  --memdef-title-background-color: var(--thc-wash);
+  --memdef-proto-background-color: var(--thc-pale);
+  --memdef-proto-text-color: var(--thc-ink);
+  --table-cell-border-color: var(--thc-line);
+  --table-header-background-color: var(--thc-pale);
+  --table-header-foreground-color: var(--thc-ink);
+}
+#titlearea { padding: 16px 24px; box-sizing: border-box; }
+#projectname { font: 32px/1.2 var(--font-family-title); color: var(--thc-heading); }
+#projectbrief, #projectnumber { color: var(--thc-muted); }
+#nav-tree .item { padding: 4px 0; }
+#nav-tree .selected { background: var(--thc-wash); text-shadow: none; }
+#nav-tree .selected a { color: var(--thc-heading); }
+.tabs, .tabs2, .tabs3, .tablist li, .tablist a {
+  background-image: none;
+  text-shadow: none;
+}
+div.header { padding: 20px 24px 12px; }
+div.title { font: 38px/1.2 var(--font-family-title); color: var(--thc-heading); }
+div.contents { margin: 24px clamp(16px, 4vw, 56px) 64px; }
+.contents > .textblock {
+  max-width: 808px;
+  margin: 0 auto;
+  font: 18px/1.75 Georgia, "Times New Roman", serif;
+}
+.textblock h1, .textblock h2, .textblock h3 {
+  font-family: var(--font-family-title);
+  font-weight: 400;
+  line-height: 1.25;
+  color: var(--thc-heading);
+  margin-top: 36px;
+}
+.textblock h1 { font-size: 32px; }
+.textblock h2 { font-size: 28px; }
+.textblock h3 { font-size: 23px; }
+/* Doxygen gives paragraphs their own UI font instead of inheriting prose. */
+.textblock p, .textblock ul, .textblock ol, .textblock li,
+.textblock dl, .textblock dt, .textblock dd { font: inherit; }
+.textblock p { margin: 18px 0; }
+.textblock li { margin: 6px 0; }
+.textblock code { font-size: .82em; }
+div.fragment { padding: 18px 22px; border-radius: 4px; overflow-x: auto; }
+div.line { font-size: 14px; line-height: 1.65; }
+.textblock table.markdownTable { display: block; overflow-x: auto; font-size: 15px; }
+.textblock img { max-width: 100%; height: auto; }
+a:focus-visible, input:focus-visible, button:focus-visible {
+  outline: 2px solid var(--thc-link);
+  outline-offset: 3px;
+}
+@media (max-width: 540px) {
+  #titlearea { padding: 12px 16px; }
+  div.header { padding: 16px; }
+  div.contents { margin: 16px 16px 40px; }
+  .contents > .textblock { font-size: 17px; }
+  div.fragment { padding: 12px; }
+}
