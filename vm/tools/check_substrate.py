@@ -51,6 +51,15 @@ def run(label, command, timeout=300, expected=None, trace_libraries=False, rejec
     return output
 
 
+queue_classes = work / 'queue-classes'
+queue_classes.mkdir(exist_ok=True)
+run('queue-javac', [java_tool(home, 'javac'), '-d', queue_classes,
+                    root / 't/builder/QueueLifecycleTest.java'])
+run('queue-lifecycle', [java_tool(home, 'java'), '-ea', '-cp',
+    os.pathsep.join(map(str, (queue_classes, *sorted(home.rglob('*.jar'))))),
+    'QueueLifecycleTest'], expected='VM operation queue lifecycle passed:')
+
+
 run('javac', [java_tool(home, 'javac'), '--add-modules', 'org.graalvm.nativeimage',
                '-cp', jar, '-d', classes, *sorted((root / 't/substrate').glob('*.java')),
                root / 't/bridge/WeakBridgeSmoke.java', root / 't/bridge/JNIWeakSmoke.java'])
