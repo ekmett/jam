@@ -8,6 +8,8 @@ CMake checks the C++26 features and platform page size. It fetches a pinned
 [native](https://github.com/ekmett/native) for SIMD and target dispatch.
 [Hint](https://github.com/ekmett/hint) supplies the textual `<hint.h>` attribute
 catalog through `hint::hint`; Native fetches a pinned Hint revision.
+[work](https://github.com/ekmett/work) supplies the shared worker pool and typed
+gigs through `work::work`.
 To use an existing checkout, set `FETCHCONTENT_SOURCE_DIR_JAM_NATIVE=/path/to/native`.
 
 ```sh
@@ -45,7 +47,8 @@ add_executable(example example.cc)
 target_link_libraries(example PRIVATE jam::jam)
 ```
 
-Set `CMAKE_PREFIX_PATH` to the installation prefixes for Jam, native and Hint.
+Set `CMAKE_PREFIX_PATH` to the installation prefixes for Jam, native, Hint and
+work.
 Jam installs its module sources; CMake regenerates consumer BMIs after
 installation or relocation. The compiler, standard library, exception mode and
 extension mode must match the module build. `jam::jam` supplies C++26.
@@ -68,14 +71,13 @@ importable modules, so a consumer can name the layer it needs:
 | --- | --- | --- |
 | `jam.units` | Space quantities, conversions and literals | None |
 | `jam.mapping` | OS reservations and circular mappings | None |
-| `jam.work` | Worker pool and marking frontier | None |
 | `jam.packed` | Rank metadata and compactor interface | None |
-| `jam.heap` | Heap, pointers, roots, tracing and collection | Units, mapping, work, packed |
+| `jam.heap` | Heap, pointers, roots, tracing and collection | Units, mapping, packed; external work |
 | `jam.simd` | SIMD pointer storage and gathers | Jam |
 | `jam` | Scalar API and current-heap convenience functions | Heap, units |
 | `jam.unqualified` | Scalar API with names in scope | Jam |
 
-Mapping, scheduling and packing live in `jam::detail`; their module names
+Mapping and packing live in `jam::detail`; their module names
 provide compilation boundaries, not a promise of stable public internals.
 `jam.packed` imports only `native.isa` in its interface. Its SIMD kernels compile
 separately against `native`, alongside code that uses the compactor interface.
@@ -88,8 +90,10 @@ builds all its providers; targeted imports shorten dependency chains without
 pruning that target's source list.
 
 Tracing declarations, heap lifecycle, collection, root bookkeeping and finalizers
-compile in `jam.heap`; there are no module partitions. Worker-pool
-bodies compile in `jam.work`. Neither adds a separate implementation unit.
+compile in `jam.heap`; there are no module partitions. Scheduling lives in the
+independent `work` module. Each marking pass creates a typed gig; its batch
+handler binds the heap once, drains tracing jobs, and permits child submissions
+after the external seed set closes. VM caller-only passes stay on their caller.
 Pointer decoding, barriers, allocation and tracing templates stay available for
 inlining. `jam.heap` provides explicit heap operations; `jam` adds `mk`,
 `mk_weak`, bulk array assignment and the current-heap `collect` functions.

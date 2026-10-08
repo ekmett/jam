@@ -69,10 +69,13 @@ a 30-microsecond mean. A successful attempt donates the older half of the queue
 to a randomly selected idle worker. A chain has no independent branch to donate;
 a tree usually does.
 
-The donor reserves an idle mailbox with CAS, writes the batch, and publishes with
-release ordering. The recipient acquires it. Returning to idle releases the inbox
-for reuse. Termination accounting includes transfers in flight. Local queue
-operations need no synchronization; claims on shared heap metadata still do.
+Marking runs as a typed gig in [work](https://github.com/ekmett/work). Each batch
+binds the heap once and drains a private stack. A donor reserves an idle lane
+and transfers its batch under the gig mutex; the pool dispatches that lane to
+an executor. Termination accounting includes queued and running lanes, so
+children remain accepted after external submission closes. Local queue
+operations need no synchronization; handoffs, completion and claims on shared
+heap metadata still do.
 
 This follows the sender-initiated work in
 [Acar, Charguéraud and Rainey](https://www.chargueraud.org/research/2013/ppopp/full.pdf)

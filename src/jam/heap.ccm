@@ -40,7 +40,7 @@ extern "C" long __builtin_expect(long, long) noexcept;
 
 export module jam.heap;
 import jam.mapping;
-import jam.work;
+import work;
 import jam.packed;
 export import jam.units;
 namespace jam {
@@ -605,13 +605,12 @@ public:
     friend class heap;
     template<class T> friend struct jam::tracer;
     heap & arena;
-    detail::frontier<trace_job> & pending;
-    std::size_t worker;
+    work::context<trace_job> & pending;
     void const * record = nullptr;
     offset record_offset = 0;
     std::size_t record_bytes = 0;
-    visitor(heap & h, detail::frontier<trace_job> & tasks, std::size_t id) noexcept
-        : arena(h), pending(tasks), worker(id) {}
+    visitor(heap & h, work::context<trace_job> & tasks) noexcept
+        : arena(h), pending(tasks) {}
 
     [[nodiscard]] hint_inline std::size_t pointer_slot(void const * field) const noexcept {
       auto const address = reinterpret_cast<std::uintptr_t>(field);
@@ -625,7 +624,7 @@ public:
     template<class T>
     hint_inline void enqueue(ptr<T> const & value) noexcept {
       static_assert(traceable<T>, "reference target must support tracing");
-      if (value && (!arena.minor_collection || value.is_young())) pending.push(worker, {value.get(), &heap::template trace_record<T>});
+      if (value && (!arena.minor_collection || value.is_young())) pending.push({value.get(), &heap::template trace_record<T>});
     }
 
     // One mask window bounds stack use even for large, sparsely described records.
@@ -782,12 +781,12 @@ public:
       arena.pointer(cell, slot);
       auto const target = arena.field(cell, slot);
       if (target != null && (!arena.minor_collection || (target & young_bit)))
-        pending.push(worker, {target, nullptr});
+        pending.push({target, nullptr});
       return target;
     }
     /// \brief Enqueue an external/wide target without declaring a narrow source slot.
     hint_inline void target(offset at) noexcept {
-      if (at && (!arena.minor_collection || (at & young_bit))) pending.push(worker, {at, nullptr});
+      if (at && (!arena.minor_collection || (at & young_bit))) pending.push({at, nullptr});
     }
     /// \brief Walk an embedded value without claiming cells again.
     /// Parts share the current allocation's pointer mask. Tuple views may name
@@ -820,7 +819,7 @@ public:
     }
     /// \brief Service overdue stochastic donations without leaving this walker.
     /// Long cooperative hooks should poll periodically after enqueueing branches.
-    hint_inline void poll() noexcept { pending.communicate(worker); }
+    hint_inline void poll() noexcept { pending.poll(); }
   };
 
 private:
@@ -878,7 +877,7 @@ public:
     struct settings { std::size_t page_words, reserved, minimum, bytes; generation_options policy; };
     generation_options const policy;
     detail::compactor const & compactor;
-    detail::work_pool & workers;
+    work::pool & workers;
     std::size_t const page_word_count;
     std::size_t const reserve_word_count;
     std::size_t const minimum_capacity;
@@ -905,7 +904,7 @@ public:
           && config.shrink_shift < std::numeric_limits<std::size_t>::digits;
     }
     [[nodiscard]] static settings configure(generation_options config);
-    explicit generation(settings s, detail::compactor const & c, detail::work_pool & w, std::byte * address) noexcept;
+    explicit generation(settings s, detail::compactor const & c, work::pool & w, std::byte * address) noexcept;
     [[nodiscard]] static constexpr unsigned exponent(std::size_t bytes) noexcept {
       if (!std::has_single_bit(bytes) || bytes < 8 || bytes > 64u)
         detail::heap_failure("unsupported record alignment");
@@ -962,7 +961,7 @@ public:
     }
     void resize(std::size_t words) noexcept;
 
-    generation(generation_options config, detail::compactor const & c, detail::work_pool & w, std::byte * address);
+    generation(generation_options config, detail::compactor const & c, work::pool & w, std::byte * address);
 
   public:
     /// \brief Capacity in eight-byte cells, including the reserve. \ingroup jam_heap
@@ -1120,7 +1119,7 @@ public:
   };
 private:
   detail::compactor const compactor = detail::choose_compactor();
-  detail::work_pool workers;
+  work::pool workers;
   detail::generation_reservation reservation;
   generation arena;
   generation nursery;
@@ -1452,22 +1451,18 @@ private:
   void drain_jobs(Trace & trace, std::vector<trace_job> & initial, std::size_t marker_limit) noexcept {
     if (initial.empty()) return;
     auto const marker_count = std::min(marker_limit, workers.available_workers());
-    detail::frontier<trace_job> pending{marker_count, initial};
-    struct context {
-      heap * arena;
-      std::remove_reference_t<Trace> * trace;
-      detail::frontier<trace_job> * pending;
-    } state{this, std::addressof(trace), &pending};
-    workers.run(marker_count, [](void * raw, std::size_t worker) noexcept {
-      auto & state = *static_cast<context *>(raw);
-      heap_scope binding{*state.arena};
-      visitor visit{*state.arena, *state.pending, worker};
+    auto group = workers.gig<trace_job>([this, &trace](work::context<trace_job> & pending) noexcept {
+      heap_scope binding{*this};
+      visitor visit{*this, pending};
       trace_job job;
-      while (state.pending->pop(worker, job)) {
+      while (pending.pop(job)) {
         if (job.trace) job.trace(visit, job.at);
-        else std::invoke(*state.trace, visit, job.at);
+        else std::invoke(trace, visit, job.at);
       }
-    }, &state);
+    }, {.concurrency = marker_count, .caller_only = marker_count == 1});
+    group.push(std::span<trace_job const>{initial});
+    group.close();
+    group.join();
     initial.clear();
   }
   hint_inline void seed_job(std::vector<trace_job> & initial, trace_job job) noexcept {
@@ -1882,7 +1877,7 @@ heap::generation::settings heap::generation::configure(generation_options config
   return {page / 8, reserve / 8, 2 * reserve / 8, capacity, config};
 }
 
-heap::generation::generation(settings s, detail::compactor const & c, detail::work_pool & w, std::byte * address) noexcept
+heap::generation::generation(settings s, detail::compactor const & c, work::pool & w, std::byte * address) noexcept
     : policy(s.policy), compactor(c), workers(w),
       page_word_count(s.page_words), reserve_word_count(s.reserved),
       minimum_capacity(s.minimum), storage(s.bytes, address, units::bytes{s.policy.maximum}.count()),
@@ -1903,7 +1898,7 @@ void heap::generation::resize(std::size_t words) noexcept {
   view_base = reinterpret_cast<word *>(storage.data()) + origin;
 }
 
-heap::generation::generation(generation_options config, detail::compactor const & c, detail::work_pool & w, std::byte * address)
+heap::generation::generation(generation_options config, detail::compactor const & c, work::pool & w, std::byte * address)
     : generation(configure(config), c, w, address) {}
 
 void heap::generation::clear_marks() noexcept {
@@ -2007,10 +2002,10 @@ void heap::generation::move_to(word * target, detail::forwarding_tables tables) 
         }
       }
     };
-    workers.run(std::min(workers.available_workers(), wave_pages),
-      [](void * context, std::size_t i) noexcept {
-        (*static_cast<decltype(task) *>(context))(i);
-      }, &task);
+    auto group = workers.gig<std::size_t>(task);
+    for (std::size_t i = 0; i != std::min(workers.available_workers(), wave_pages); ++i) group.push(i);
+    group.close();
+    group.join();
   } else for (std::size_t page = 0; page < source_pages; ++page) move_page(page);
 }
 

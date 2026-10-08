@@ -96,6 +96,10 @@ FetchContent_Declare(jam_native
   GIT_REPOSITORY https://github.com/ekmett/native.git
   GIT_TAG 385b740751005952434d10e4ee1c1d3fd1f4766b)
 FetchContent_MakeAvailable(jam_native)
+FetchContent_Declare(work
+  GIT_REPOSITORY https://github.com/ekmett/work.git
+  GIT_TAG bd8160ef2091dc8e914a2259900bb8439affd4d5)
+FetchContent_MakeAvailable(work)
 
 find_package(Threads REQUIRED)
 include(GNUInstallDirs)
@@ -108,13 +112,13 @@ set_target_properties(jam PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_COD
 set(jam_interfaces
   src/jam.ccm src/jam_unqualified.ccm
   src/jam/heap.ccm src/jam/mapping.ccm
-  src/jam/packed.ccm src/jam/work.ccm src/jam/units.ccm src/jam/simd.ccm)
+  src/jam/packed.ccm src/jam/units.ccm src/jam/simd.ccm)
 set(jam_implementations
   src/jam/mapping_impl.cc src/jam/packed_impl.cc)
 target_sources(jam PUBLIC FILE_SET modules TYPE CXX_MODULES
   BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src" FILES ${jam_interfaces})
 target_sources(jam PRIVATE ${jam_implementations})
-target_link_libraries(jam PUBLIC Threads::Threads native::native hint::hint)
+target_link_libraries(jam PUBLIC Threads::Threads native::native hint::hint work::work)
 target_compile_definitions(jam PUBLIC JAM_PAGE_BYTES=${JAM_PAGE_BYTES})
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   block()
