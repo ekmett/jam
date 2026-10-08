@@ -24,6 +24,7 @@ static void *vm_symbol(char const *name) {
 }
 #endif
 
+static void (JNICALL *weak_register_indirection)(JNIEnv *, jclass, jclass, jstring, jint, jstring);
 static jlong (JNICALL *weak_create)(JNIEnv *, jclass, jobject, jobject, jobject);
 static jobject (JNICALL *weak_deref)(JNIEnv *, jclass, jlong);
 static jobject (JNICALL *weak_take)(JNIEnv *, jclass, jlongArray);
@@ -38,6 +39,8 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 
   // Resolve at load time so a stock JVM reports a Java linkage error instead
   // of aborting on a missing lazy-bound JVM symbol at the first guest call.
+  weak_register_indirection = (void (JNICALL *)(JNIEnv *, jclass, jclass, jstring, jint, jstring))
+    vm_symbol("JVM_JamWeakRegisterIndirection");
   weak_create = (jlong (JNICALL *)(JNIEnv *, jclass, jobject, jobject, jobject))
     vm_symbol("JVM_JamWeakCreate");
   weak_deref = (jobject (JNICALL *)(JNIEnv *, jclass, jlong))
@@ -50,7 +53,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     vm_symbol("JVM_JamWeakComplete");
   collections = (jlong (JNICALL *)(JNIEnv *, jclass, jint))
     vm_symbol("JVM_JamCollections");
-  if (!weak_create || !weak_deref || !weak_take || !weak_finalize || !weak_complete || !collections) {
+  if (!weak_register_indirection || !weak_create || !weak_deref || !weak_take || !weak_finalize || !weak_complete || !collections) {
     jclass error = (*env)->FindClass(env, "java/lang/UnsatisfiedLinkError");
     if (error) (*env)->ThrowNew(env, error, "jam-vm requires a JVM exporting the Jam weak hooks");
     return JNI_ERR;
@@ -60,6 +63,11 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 
 JNIEXPORT void JNICALL Java_jam_vm_Weak_checkAvailable(JNIEnv *env, jclass klass) {
   (void)collections(env, klass, 2);
+}
+
+JNIEXPORT void JNICALL Java_jam_vm_Weak_registerIndirection(JNIEnv *env, jclass klass,
+    jclass carrier, jstring state_field, jint completed_state, jstring referent_field) {
+  weak_register_indirection(env, klass, carrier, state_field, completed_state, referent_field);
 }
 
 JNIEXPORT jlong JNICALL Java_jam_vm_Weak_create(JNIEnv *env, jclass klass,

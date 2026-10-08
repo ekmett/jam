@@ -24,6 +24,7 @@ typedef struct jam_vm jam_vm;
 typedef struct jam_vm_visit jam_vm_visit;
 typedef struct jam_vm_thread jam_vm_thread;
 typedef void (*jam_vm_scan)(void *, jam_vm_visit *, uint32_t);
+typedef uint32_t (*jam_vm_resolve)(void *context, uint64_t descriptor, uint32_t key);
 
 /* VM owns an inaccessible reservation (Windows: placeholders) through base+16GiB+prefix+young_bytes.
  * Old objects start at base+prefix; young objects at base+16GiB+prefix.
@@ -79,6 +80,16 @@ JAM_VM_API void jam_vm_finish(jam_vm *);
  * batch before finalizers are traced. Java weak clearing occurs between close
  * and weak_finalizers; Java phantom processing follows weak_finalizers. */
 JAM_VM_API uint64_t jam_vm_weak_create(jam_vm *, uint32_t key, uint32_t value, uint32_t finalizer);
+/* descriptor is VM-owned immutable metadata, never an unrooted managed pointer.
+ * Zero selects an ordinary key. Register descriptors before creating their keys. */
+JAM_VM_API uint64_t jam_vm_weak_create_indirect(jam_vm *, uint32_t key, uint32_t value,
+                                               uint32_t finalizer, uint64_t descriptor);
+/* Stopped-mutator phase, before weak_close and any reclamation. Resolve active
+ * indirect keys without marking or allocating; return key for opaque/null state.
+ * A changed key permanently drops its descriptor. Its replacement must already
+ * be canonical: resolve(resolve(k)) == resolve(k). VM field reads must be safe
+ * even for unmarked wrappers. Descriptor storage outlives its registrations. */
+JAM_VM_API void jam_vm_weak_retarget(jam_vm *, jam_vm_resolve, void *context);
 JAM_VM_API uint32_t jam_vm_weak_value(jam_vm const *, uint64_t id);
 JAM_VM_API void jam_vm_weak_roots(jam_vm *, jam_vm_scan, void * context);
 JAM_VM_API void jam_vm_weak_close(jam_vm *, jam_vm_scan, void * context);

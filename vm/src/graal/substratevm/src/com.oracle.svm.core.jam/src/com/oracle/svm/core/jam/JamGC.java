@@ -63,6 +63,8 @@ import jdk.graal.compiler.api.replacements.Fold;
 final class JamGC implements GC {
     private static final CEntryPointLiteral<CFunctionPointer> SCAN = CEntryPointLiteral.create(
                     JamGC.class, "scan", JamScanContext.class, Pointer.class, int.class);
+    private static final CEntryPointLiteral<CFunctionPointer> RESOLVE_WEAK = CEntryPointLiteral.create(
+                    JamGC.class, "resolveWeak", JamScanContext.class, long.class, int.class);
     private final JamHeap heap;
     private final CollectionOperation operation = new CollectionOperation();
     private final JamNativeList objects = new JamNativeList();
@@ -190,6 +192,7 @@ final class JamGC implements GC {
         if (minor) heap.walkDirtyOldObjects(oldVisitor);
         JamNative.weakRoots(heap.nativeHeap(), SCAN.getFunctionPointer(), context);
         RuntimeCodeInfoMemory.singleton().walkRuntimeMethodsDuringGC(codeRoots);
+        JamNative.weakRetarget(heap.nativeHeap(), RESOLVE_WEAK.getFunctionPointer(), context);
         JamNative.weakClose(heap.nativeHeap(), SCAN.getFunctionPointer(), context);
         long weakLimit = references.size();
         processReferences(0, weakLimit, false);
@@ -237,6 +240,11 @@ final class JamGC implements GC {
     @CEntryPointOptions(prologue = ScannerPrologue.class, epilogue = CEntryPointOptions.NoEpilogue.class)
     @Uninterruptible(reason = "Synchronous single-threaded Jam scanner callback.")
     static void scan(JamScanContext context, Pointer visitor, int at) { get().scanObject(visitor, at); }
+
+    @CEntryPoint(include = Enabled.class, publishAs = CEntryPoint.Publish.NotPublished)
+    @CEntryPointOptions(prologue = ScannerPrologue.class, epilogue = CEntryPointOptions.NoEpilogue.class)
+    @Uninterruptible(reason = "Read a registered indirection before any source object is reclaimed; never mark it.")
+    static int resolveWeak(JamScanContext context, long descriptor, int key) { return JamWeakIndirections.resolve(descriptor, key); }
 
     @Uninterruptible(reason = "Claim the entire object before enumerating fields.")
     private void scanObject(Pointer visitor, int at) {

@@ -16,6 +16,12 @@ final class Target_jam_vm_Weak {
     @Substitute private static void loadNativeLibrary() { }
     @Substitute public static void checkAvailable() { }
 
+    /** Calls are intrinsified with constant carrier and field names during image analysis. */
+    @Substitute
+    public static void registerIndirection(Class<?> carrier, String stateField, int completedState, String referentField) {
+        throw new IllegalArgumentException("Native Image requires constant indirection carrier and field names");
+    }
+
     @Substitute
     public static long create(Object key, Object value, Runnable finalizer) {
         if (key == null) throw new NullPointerException("weak key");
@@ -69,7 +75,7 @@ final class JamWeakSupport {
         JamHeap heap = JamHeap.get();
         heap.lock().lockNoTransition();
         try {
-            return JamNative.weakCreate(heap.nativeHeap(), heap.encode(key), heap.encode(value), heap.encode(finalizer));
+            return JamNative.weakCreateIndirect(heap.nativeHeap(), heap.encode(key), heap.encode(value), heap.encode(finalizer), JamWeakIndirections.descriptor(key));
         } finally {
             heap.lock().unlock();
         }

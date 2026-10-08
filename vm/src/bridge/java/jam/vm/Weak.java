@@ -43,6 +43,39 @@ public final class Weak {
     public static native void checkAvailable();
 
     /**
+     * Describe a terminal indirection used as a weak key, before creating any
+     * associations for that exact class. Subclasses do not inherit the rule.
+     *
+     * <p>The state must be a declared, nonstatic {@code volatile int} field;
+     * the referent must be a declared, nonstatic {@code Object} field. Publish
+     * the nonnull referent before writing the terminal completed state. That
+     * state and referent must never change afterward, and the referent must
+     * not itself require indirection resolution. Other states and null referents
+     * leave the key opaque. Collection replaces only the association's key,
+     * without retaining or rewriting the wrapper. Identical registrations are
+     * idempotent; conflicting rules for the same class are rejected.
+     *
+     * <p>Native Image requires constant class and field-name arguments so it
+     * can retain the fields and resolve their target layout during image
+     * construction. Malformed descriptors are rejected at image build time.
+     * The resulting registration runs in each isolate at runtime, before its
+     * first association for that class. Keep this call in runtime initialization,
+     * not in a hosted feature or a build-time class initializer. The Jam feature
+     * retains the named fields; no reflection configuration is required.
+     * On the JVM they throw {@link IllegalArgumentException} at registration.
+     * This does not invoke Java code or force evaluation during collection.
+     *
+     * @param carrier exact class whose weak keys may become indirections
+     * @param stateField declared volatile int field publishing completion
+     * @param completedState terminal state value
+     * @param referentField declared Object field containing the replacement
+     * @throws NullPointerException if the class or a field name is null
+     * @throws IllegalArgumentException if the fields or rule are invalid
+     */
+    public static native void registerIndirection(Class<?> carrier, String stateField,
+                                                   int completedState, String referentField);
+
+    /**
      * Register {@code key ⇒ (value, finalizer)} without strong JNI roots.
      * A live key retains the value and finalizer. Their own return edges to the
      * key cannot activate this association. No finalizer ordering is promised.

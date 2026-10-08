@@ -7,6 +7,7 @@ import argparse
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -45,6 +46,12 @@ def run(label, command, timeout=300, expected=None, trace_libraries=False, rejec
         result = subprocess.run(list(map(str, command)), cwd=root, env=runtime_environment,
                                 text=True, capture_output=True, timeout=timeout)
     output = result.stdout + result.stderr
+    if result.returncode != 0:
+        # Parser failures can put the underlying rejection only in this report.
+        for name in re.findall(r"Please inspect the generated error report at: '([^'\r\n]+)'", output):
+            report = root / name
+            if report.is_file():
+                output += f'\n--- Native Image error report: {name} ---\n' + report.read_text()
     (evidence / f'substrate-{label}.log').write_text(output + f'\nexit={result.returncode}\n')
     if (result.returncode == 0 if reject else result.returncode != 0) or expected is not None and expected not in output:
         raise SystemExit(f'{label} failed (exit {result.returncode}):\n{output[-8000:]}')
@@ -53,7 +60,8 @@ def run(label, command, timeout=300, expected=None, trace_libraries=False, rejec
 
 run('javac', [java_tool(home, 'javac'), '--add-modules', 'org.graalvm.nativeimage',
                '-cp', jar, '-d', classes, *sorted((root / 't/substrate').glob('*.java')),
-               root / 't/bridge/WeakBridgeSmoke.java', root / 't/bridge/JNIWeakSmoke.java'])
+               root / 't/bridge/WeakBridgeSmoke.java', root / 't/bridge/JNIWeakSmoke.java',
+               root / 't/java/IndirectionValidationSmoke.java'])
 jni_library = build_jni_test(home, work / 'jni')
 jni_metadata = classes / 'META-INF/native-image/jam-vm/jni-weak/jni-config.json'
 jni_metadata.parent.mkdir(parents=True, exist_ok=True)
@@ -72,13 +80,18 @@ else:
 executable = work / ('substrate-smoke.exe' if windows else 'substrate-smoke')
 run('image-build', [*image_options,
                     '--initialize-at-build-time=IsolateSmoke$EntryPoints',
-                    '--initialize-at-run-time=JNIWeakSmoke',
+                    '--initialize-at-run-time=JNIWeakSmoke,WeakBridgeSmoke$Indirections',
                     '--enable-native-access=ALL-UNNAMED',
                     '-Djam.pin.include=' + str(root / 't/substrate'),
                     '-Djam.pin.library=' + str(work),
                     '-cp', os.pathsep.join(map(str, (classes, jar))),
                     'SubstrateSmoke', executable], timeout=1200,
     expected='Garbage collector: Jam')
+
+run('indirection-build-rejection', [*image_options,
+     '-cp', os.pathsep.join(map(str, (classes, jar))),
+     'IndirectionValidationSmoke', work / 'invalid-indirection'], timeout=1200,
+    expected='Weak indirection', reject=True)
 
 def relocate(executable):
     # Windows loads adjacent DLLs; Unix images use their sibling runtime directory.

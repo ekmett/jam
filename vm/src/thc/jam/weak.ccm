@@ -14,18 +14,31 @@ export namespace thc {
 /// liveness predicate treats old keys as live. IDs never move or get reused.
 /// \pre Registry access is serialized with mutators and the collection epoch.
 class weak_registry {
-  enum class state { active, queued, running, dead };
+  enum class state : std::uint8_t { active, queued, running, dead };
   struct association {
     std::uint32_t key, value, finalizer;
     state status = state::active;
     bool activated = false;
+    std::uint64_t descriptor = 0;
+    std::size_t slot = 0;
   };
   std::vector<association> entries;
+  // Stable tokens index entries. Only current associations participate in GC;
+  // retiring one removes it from this dense index in constant time.
+  std::vector<std::size_t> live;
+  std::size_t indirect_count = 0;
+  void remove(association const & entry) noexcept {
+    live[entry.slot] = live.back();
+    entries[live.back()].slot = entry.slot;
+    live.pop_back();
+  }
 public:
   /// \brief Register a conditional value and an optional managed finalizer.
   [[nodiscard]] std::uint64_t create(std::uint32_t key, std::uint32_t value,
-                                    std::uint32_t finalizer) noexcept {
-    entries.push_back({key, value, finalizer});
+                                    std::uint32_t finalizer, std::uint64_t descriptor = 0) noexcept {
+    entries.push_back({key, value, finalizer, state::active, false, descriptor, live.size()});
+    live.push_back(entries.size() - 1);
+    indirect_count += descriptor != 0;
     return entries.size();
   }
   /// \brief Read an active value; retirement permanently makes this return null.
@@ -35,13 +48,30 @@ public:
     return entry.status == state::active ? entry.value : 0;
   }
   /// \brief Reset live-key activation at the start of a marking epoch.
-  void begin() noexcept { for (auto & entry : entries) entry.activated = false; }
+  void begin() noexcept { for (auto index : live) entries[index].activated = false; }
+  /// \brief Resolve active indirect keys without adding any marking roots.
+  /// A changed key is canonical and permanently releases its descriptor.
+  template<class Resolve> void retarget(Resolve && resolve) noexcept {
+    if (!indirect_count) return;
+    for (auto index : live) {
+      auto & entry = entries[index];
+      if (entry.status != state::active || !entry.descriptor) continue;
+      auto const key = resolve(entry.descriptor, entry.key);
+      if (key && key != entry.key) {
+        entry.key = key;
+        entry.descriptor = 0;
+        --indirect_count;
+      }
+    }
+  }
   /// \brief Retain queued and running finalizers, including during nested GC.
   template<class Trace> void roots(Trace && trace) const noexcept {
     std::vector<std::uint32_t> roots;
-    for (auto const & entry : entries)
+    for (auto index : live) {
+      auto const & entry = entries[index];
       if (entry.status == state::queued || entry.status == state::running)
         roots.push_back(entry.finalizer);
+    }
     trace(std::span<std::uint32_t const>{roots});
   }
   /// \brief Reach the least live-key fixed point, then freeze every dead decision.
@@ -51,7 +81,8 @@ public:
     std::vector<std::uint32_t> roots;
     do {
       roots.clear();
-      for (auto & entry : entries) {
+      for (auto index : live) {
+        auto & entry = entries[index];
         if (entry.status != state::active || entry.activated || !marked(entry.key)) continue;
         entry.activated = true;
         roots.push_back(entry.value);
@@ -59,15 +90,20 @@ public:
       }
       trace(std::span<std::uint32_t const>{roots});
     } while (!roots.empty());
-    for (auto & entry : entries) {
-      if (entry.status != state::active || entry.activated) continue;
+    for (std::size_t slot = 0; slot != live.size();) {
+      auto & entry = entries[live[slot]];
+      if (entry.status != state::active || entry.activated) { ++slot; continue; }
       entry.status = entry.finalizer ? state::queued : state::dead;
       entry.key = entry.value = 0;
+      indirect_count -= entry.descriptor != 0;
+      entry.descriptor = 0;
+      if (entry.status == state::dead) remove(entry); else ++slot;
     }
   }
   /// \brief Repair the registry after successful forwarding-table preparation.
   template<class Forward> void forward(Forward && forward) noexcept {
-    for (auto & entry : entries) {
+    for (auto index : live) {
+      auto & entry = entries[index];
       entry.key = forward(entry.key);
       entry.value = forward(entry.value);
       entry.finalizer = forward(entry.finalizer);
@@ -75,7 +111,7 @@ public:
   }
   /// \brief Claim one queued finalizer exactly once; zero means the queue is empty.
   [[nodiscard]] std::uint32_t take(std::uint64_t & id) noexcept {
-    for (std::size_t n = 0; n != entries.size(); ++n) {
+    for (auto n : live) {
       auto & entry = entries[n];
       if (entry.status != state::queued) continue;
       entry.status = state::running;
@@ -92,6 +128,9 @@ public:
     if (entry.status != state::active && entry.status != state::queued) return 0;
     entry.status = entry.finalizer ? state::running : state::dead;
     entry.key = entry.value = 0;
+    indirect_count -= entry.descriptor != 0;
+    entry.descriptor = 0;
+    if (entry.status == state::dead) remove(entry);
     return entry.finalizer;
   }
   /// \brief Release a claimed finalizer root after the guest runtime finishes it.
@@ -101,6 +140,7 @@ public:
     if (entry.status != state::running) return;
     entry.status = state::dead;
     entry.finalizer = 0;
+    remove(entry);
   }
 };
 }

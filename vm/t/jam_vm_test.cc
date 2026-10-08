@@ -120,8 +120,10 @@ static void generalized_weaks() {
   check(at(base, jam_vm_weak_value(vm, w2))->identity == 4, "fixed-point value forwarded");
   uint64_t id1, id2;
   uint32_t pending1 = jam_vm_weak_take(vm, &id1), pending2 = jam_vm_weak_take(vm, &id2);
-  check(id1 == batch1 && id2 == batch2, "same-key associations both retire in one batch");
-  check(at(base, pending1)->identity == 8 && at(base, pending2)->identity == 9, "finalizers forwarded");
+  check((id1 == batch1 && id2 == batch2) || (id1 == batch2 && id2 == batch1),
+        "same-key associations both retire in one batch without ordering guarantees");
+  check(at(base, pending1)->identity == (id1 == batch1 ? 8 : 9) &&
+        at(base, pending2)->identity == (id2 == batch1 ? 8 : 9), "finalizers forwarded");
   uint64_t none;
   check(!jam_vm_weak_take(vm, &none), "finalizers claimed at most once");
   jam_vm_begin(vm, 0);

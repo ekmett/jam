@@ -35,9 +35,9 @@ Use [jam.vm.Weak](thc-integration.md) to register weak associations and install
 JVM runnables. Any caller can pump the shared queue. There is no automatic
 finalizer thread or wakeup notification; the caller supplies the pump schedule.
 
-Tokens are local to a JVM or Native Image isolate and never reused. Dead
-registrations currently retain metadata, so native memory use grows with
-lifetime registrations. Allocation
+Tokens are local to a JVM or Native Image isolate and never reused. Retired
+registrations are excluded from collection scans, but their token records still
+retain metadata, so native memory use grows with lifetime registrations. Allocation
 failure while growing that metadata terminates instead of throwing Java
 `OutOfMemoryError`. Keep this in mind for long-running, weak-heavy workloads.
 
