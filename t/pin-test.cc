@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
@@ -43,11 +44,12 @@ constexpr offset young_bit = 0x80000000u;
 constexpr std::size_t page_words = JAM_PAGE_BYTES / 8;
 struct node { offset strong, weak; std::uint64_t value; };
 
-void pinned_collection(bool minor, bool promote) {
+void pinned_collection(bool minor, bool promote, bool tracking = false) {
   jam::generation_options g{.capacity = jam::units::pages{12}, .reserve = jam::units::pages{2},
                            .maximum = jam::units::pages{12}, .shrink_shift = 0};
   jam::heap storage{{.old = g, .young = g, .workers = 1}};
   jam::heap::host host{storage, page_words};
+  if (tracking) host.track_starts();
   auto at = [&](offset p) noexcept -> node & { return *reinterpret_cast<node *>(&storage[p]); };
   auto make = [&](std::uint64_t value) noexcept {
     auto const p = host.allocate(generation::young, 2);
@@ -74,6 +76,7 @@ void pinned_collection(bool minor, bool promote) {
     std::array<offset, 2> roots{p->position(), q->position()};
     host.trace(roots, [&](jam::heap::visitor & visit, offset r) noexcept {
       if (!visit.claim(r, 2)) return;
+      if (tracking) host.record_start(r);
       storage.pointer(r, 0); storage.pointer(r, 1);
       visit.target(at(r).strong);
     });
@@ -85,6 +88,17 @@ void pinned_collection(bool minor, bool promote) {
     }
     auto const next = host.forward(p->position()), next_other = host.forward(q->position());
     host.finish();
+    if (tracking) {
+      unsigned count = 0;
+      for (auto which : {generation::old, generation::young})
+        for (auto bits : host.starts(which)) count += std::popcount(bits);
+      check(count == 2, "pin padding has no fabricated starts");
+      for (auto object : {next, next_other}) {
+        auto bits = host.starts(object & young_bit ? generation::young : generation::old);
+        auto local = object & ~young_bit;
+        check((bits[local / 32] >> (local % 32)) & 1u, "pinned start follows canonical object");
+      }
+    }
     check(p->position() == next && q->position() == next_other, "registration follows canonical movement");
     check(p->address() == address && q->address() == other, "native aliases stay fixed");
     check(address->value == 42 + pass && other->value == 43, "pinned payload survives remapping");
@@ -173,6 +187,9 @@ int main() {
   mapping_aliases();
   pinned_boundaries();
   pinned_retry();
+  pinned_collection(false, false, true);
+  pinned_collection(true, false, true);
+  pinned_collection(true, true, true);
   pinned_collection(false, false);
   pinned_collection(true, false);
   pinned_collection(true, true);

@@ -56,7 +56,10 @@ struct forwarding_tables {
 struct compactor {
   void (*move_impl)(std::uint64_t const *, std::uint64_t *, heap_block const *,
                     std::size_t, std::size_t, forwarding_tables, std::uint8_t const *) noexcept;
-  void (*pack_impl)(heap_block const *, heap_block *, std::size_t, std::uint8_t const *) noexcept;
+  void (*pack_impl)(heap_block const *, heap_block *, std::size_t, std::uint8_t const *,
+                    std::uint32_t const *, std::uint32_t *) noexcept;
+  void (*pack_starts_impl)(heap_block const *, heap_block *, std::size_t,
+                           std::uint8_t const *, std::uint32_t const *, std::uint32_t *) noexcept;
   native::isa<> requirement;
   char const * name;
   void move(std::uint64_t const * source, std::uint64_t * target, heap_block const * metadata,
@@ -70,7 +73,15 @@ struct compactor {
   }
   void pack(heap_block const * metadata, heap_block * output, std::size_t count,
             std::uint8_t const * alignment = nullptr) const noexcept {
-    pack_impl(metadata, output, count, alignment);
+    pack_impl(metadata, output, count, alignment, nullptr, nullptr);
+  }
+  /// \brief Relocate VM-defined cell-start bits in the existing metadata pass.
+  /// Source starts are a subset of claimed cells. Separate output is OR-appended;
+  /// identical input/output requires leftward placement, just like pointer masks.
+  void pack(heap_block const * metadata, heap_block * output, std::size_t count,
+            std::uint8_t const * alignment, std::uint32_t const * starts,
+            std::uint32_t * destination_starts) const noexcept {
+    pack_starts_impl(metadata, output, count, alignment, starts, destination_starts);
   }
 };
 }

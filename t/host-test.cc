@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com>
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +43,7 @@ struct fixture {
   offset make(generation g, std::uint64_t id, offset next = 0) noexcept {
     auto p = host.allocate(g, 2);
     at(p) = {next, 0, id};
+    if (host.tracks_starts()) host.record_start(p);
     return p;
   }
   void trace(offset p, bool old_owners = false, unsigned workers = 1) noexcept {
@@ -49,10 +51,50 @@ struct fixture {
     host.trace({&p, 1}, [&](jam::heap::visitor & visit, offset q) noexcept {
       if (workers == 1) check(std::this_thread::get_id() == caller, "serial trace stays on caller");
       if (!(old_owners && !(q & young_bit)) && !visit.claim(q, 2, alignment)) return;
+      if (host.tracks_starts()) host.record_start(q);
       visit.field(q, 0); visit.field(q, 1);
     }, workers, old_owners);
   }
 };
+void tracked_starts(unsigned workers) {
+  fixture f(workers);
+  check(f.host.starts(generation::old).empty() && f.host.starts(generation::young).empty(),
+        "ordinary host allocates no start bitmap");
+  // Enable after allocation: the next major discovers existing starts.
+  static_cast<void>(f.make(generation::old, 99));
+  auto young = f.make(generation::young, 42);
+  auto old = f.make(generation::old, 41, young);
+  f.host.track_starts();
+  f.host.track_starts(); // Enabling twice must not replace the side channel.
+  auto verify = [&] {
+    unsigned count = 0;
+    for (auto which : {generation::old, generation::young})
+      for (auto bits : f.host.starts(which)) count += std::popcount(bits);
+    check(count == 2, "only actual live objects have start bits");
+    for (auto at : {old, young}) {
+      auto bits = f.host.starts(at & young_bit ? generation::young : generation::old);
+      auto local = at & ~young_bit;
+      check((bits[local / 32] >> (local % 32)) & 1u, "start bit follows its object");
+    }
+  };
+  f.host.begin(false); f.trace(old, false, workers);
+  check(f.host.prepare(), "tracked major fits");
+  old = f.host.forward(old); young = f.host.forward(young);
+  f.host.finish(); verify();
+  for (bool promote : {false, true}) {
+    static_cast<void>(f.make(generation::young, 999));
+    f.host.begin(true); f.trace(young, false, workers);
+    check(f.host.prepare(promote), "tracked minor fits");
+    young = f.host.forward(young);
+    f.at(old).left = young;
+    f.host.finish(); verify();
+  }
+  f.host.begin(false);
+  check(f.host.prepare(), "empty tracked major fits");
+  f.host.finish();
+  for (auto which : {generation::old, generation::young})
+    for (auto bits : f.host.starts(which)) check(!bits, "dead objects leave no stale starts");
+}
 void cycles(unsigned workers) {
   fixture f(workers);
   static_cast<void>(f.make(generation::old, 999));
@@ -252,6 +294,7 @@ void publication() {
 #endif
 }
 int main() {
+  tracked_starts(1); tracked_starts(4);
   cycles(1); cycles(4); retry_and_subdivision(8); retry_and_subdivision(64); external_targets();
   publication();
 #if !defined(_WIN32)

@@ -44,12 +44,7 @@ import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 
 import jdk.graal.compiler.core.common.spi.ForeignCallDescriptor;
 
-/**
- * This class contains the {@link SubstrateForeignCallTarget}s for the allocation slow path. These
- * methods are {@link Uninterruptible} to ensure that newly allocated objects are either placed in
- * the young generation or that all their covered cards are marked as dirty. This allows the
- * compiler to safely eliminate GC write barriers for initializing writes, which reduces code size.
- */
+/** Allocation slow paths; initializing reference stores carry exact slot barriers. */
 @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 public class JamAllocationSupport implements GCAllocationSupport {
     private static final SubstrateForeignCallDescriptor SLOW_NEW_INSTANCE = SnippetRuntime.findForeignCall(JamAllocationSupport.class, "slowNewInstance", NO_SIDE_EFFECT);
@@ -109,12 +104,11 @@ public class JamAllocationSupport implements GCAllocationSupport {
     }
 
     @SubstrateForeignCallTarget(stubCallingConvention = false)
-    @Uninterruptible(reason = "The newly allocated object must be young or all its covered cards must be dirty.")
+    @Uninterruptible(reason = "Return the formatted object without an intervening collection.")
     private static Object slowNewInstance(Word objectHeader) {
         StackOverflowCheck.singleton().makeYellowZoneAvailable();
         try {
             Object result = slowNewInstanceInterruptibly(objectHeader);
-            JamHeap.get().dirtyAllReferencesOf(result);
             return result;
         } finally {
             StackOverflowCheck.singleton().protectYellowZone();
@@ -122,12 +116,11 @@ public class JamAllocationSupport implements GCAllocationSupport {
     }
 
     @SubstrateForeignCallTarget(stubCallingConvention = false)
-    @Uninterruptible(reason = "The newly allocated object must be young or all its covered cards must be dirty.")
+    @Uninterruptible(reason = "Return the formatted object without an intervening collection.")
     private static Object slowNewArray(Word objectHeader, int length) {
         StackOverflowCheck.singleton().makeYellowZoneAvailable();
         try {
             Object result = slowNewArrayLikeObjectInterruptibly(objectHeader, length, null);
-            JamHeap.get().dirtyAllReferencesOf(result);
             return result;
         } finally {
             StackOverflowCheck.singleton().protectYellowZone();
@@ -135,12 +128,11 @@ public class JamAllocationSupport implements GCAllocationSupport {
     }
 
     @SubstrateForeignCallTarget(stubCallingConvention = false)
-    @Uninterruptible(reason = "The newly allocated object must be young or all its covered cards must be dirty.")
+    @Uninterruptible(reason = "Return the formatted object without an intervening collection.")
     private static Object slowNewPodInstance(Word objectHeader, int arrayLength, byte[] referenceMap) {
         StackOverflowCheck.singleton().makeYellowZoneAvailable();
         try {
             Object result = slowNewArrayLikeObjectInterruptibly(objectHeader, arrayLength, referenceMap);
-            JamHeap.get().dirtyAllReferencesOf(result);
             return result;
         } finally {
             StackOverflowCheck.singleton().protectYellowZone();

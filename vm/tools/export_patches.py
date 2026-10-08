@@ -23,7 +23,9 @@ def difference(before, after, name):
 with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
     members = {m.name.split('/', 1)[1]: m for m in archive.getmembers() if '/' in m.name and m.isfile()}
     paths = [p for directory in ['epsilon', 'jam']
-             for p in (root / 'upstream/jdk25/src/hotspot/share/gc' / directory).glob('*') if p.is_file()]
+             for p in (root / 'upstream/jdk25/src/hotspot/share/gc' / directory).rglob('*') if p.is_file()]
+    paths += [p for arch in ['x86', 'aarch64']
+              for p in (root / 'upstream/jdk25/src/hotspot/cpu' / arch / 'gc/jam').rglob('*') if p.is_file()]
     paths += [root / 'upstream/jdk25' / p for p in [
         'make/autoconf/jvm-features.m4',
         'make/hotspot/lib/JvmFeatures.gmk',
@@ -33,6 +35,10 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
         'src/hotspot/share/utilities/macros.hpp',
         'src/hotspot/share/gc/shared/gc_globals.hpp',
         'src/hotspot/share/gc/shared/collectedHeap.hpp',
+        'src/hotspot/share/gc/shared/memAllocator.cpp',
+        'src/hotspot/share/services/heapDumper.cpp',
+        'src/hotspot/share/prims/jvmtiTagMap.cpp',
+        'src/hotspot/share/runtime/vmOperations.cpp',
         'src/hotspot/share/gc/shared/gcConfig.cpp',
         'src/hotspot/share/gc/shared/barrierSet.hpp',
         'src/hotspot/share/gc/shared/barrierSetConfig.hpp',
@@ -54,10 +60,14 @@ with tarfile.open(root / 'upstream/jdk25.tar.gz') as archive:
         'src/hotspot/cpu/arm/gc/shared/cardTableBarrierSetAssembler_arm.cpp',
         'src/hotspot/share/gc/shared/cardTable.cpp',
         'src/hotspot/share/gc/shared/gcVMOperations.cpp',
+        'src/hotspot/share/gc/shared/gcVMOperations.hpp',
         'src/hotspot/share/gc/shared/referenceProcessor.cpp',
         'src/hotspot/share/gc/shared/referenceProcessor.hpp',
         'src/hotspot/share/runtime/vmOperation.hpp',
         'src/hotspot/share/runtime/thread.cpp',
+        'src/hotspot/share/c1/c1_Runtime1.cpp',
+        'src/hotspot/share/oops/stackChunkOop.inline.hpp',
+        'src/hotspot/share/runtime/continuationFreezeThaw.cpp',
         'src/jdk.hotspot.agent/share/classes/sun/jvm/hotspot/gc/epsilon/EpsilonHeap.java',
         'src/jdk.hotspot.agent/share/classes/sun/jvm/hotspot/gc/jam/JamHeap.java',
         'src/hotspot/share/include/jvm.h']]

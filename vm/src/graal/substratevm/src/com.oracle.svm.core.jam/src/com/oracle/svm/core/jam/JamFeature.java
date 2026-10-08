@@ -80,5 +80,6 @@ final class JamFeature implements InternalFeature {
     @Override public void registerForeignCalls(SubstrateForeignCallsProvider foreignCalls) {
         JamAllocationSupport.registerForeignCalls(foreignCalls);
         JamThreadContext.registerForeignCalls(foreignCalls);
+        JamBarrierSnippets.registerForeignCalls(foreignCalls);
     }
 }

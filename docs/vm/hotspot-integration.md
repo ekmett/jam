@@ -64,7 +64,8 @@ The C interface separates tracing from movement:
 | --- | --- |
 | `jam_vm_begin` | Select minor or major and reset collected-generation marks and pointer declarations |
 | `jam_vm_trace` | Trace roots through jam; ordinary old roots are live but untraversed during a minor |
-| `jam_vm_trace_old` | Scan distinct dirty old owners during a minor, on one registered VM thread |
+| `jam_vm_remember` / `jam_vm_remembered` | Register exact old source slots; snapshot them at a safepoint |
+| `jam_vm_forget` | Retire slots discarded by continuation thaw without reading their contents |
 | `jam_vm_claim` | Claim the complete object extent before scanning its fields |
 | `jam_vm_fields` | Declare batches of four-byte slot indices, optionally following their targets |
 | `jam_vm_targets` | Trace targets without declaring narrow slots, including targets from wide fields |
@@ -115,15 +116,17 @@ Jam's side metadata supplies forwarding; it does not borrow the object header.
 
 ## Remembered sets and pinning
 
-`JamBarrierSet` derives from `CardTableBarrierSet`. Interpreter, C1, C2, Unsafe,
-volatile and arraycopy stores use HotSpot's existing card barriers. The card
-table reserves coverage across the address span but commits only the actual
-generation ranges.
+`JamBarrierSet` derives from `ModRefBarrierSet`. Interpreter, C1, C2, Graal,
+Unsafe, volatile and arraycopy stores publish exact source locations. Runtime
+field stores and atomics preserve their holder; raw array ranges are known
+strong slots. The barrier records locations without reading their current target.
 
-`SerialBlockOffsetTable` locates old object starts for dirty cards. Whole owners
-are scanned and deduplicated, because compiled instance barriers can dirty the
-head card. Retaining minors keep the cards, successful full-nursery promotion
-clears them, and majors rebuild them from the resulting graph.
+A retaining minor replays the sparse set with Java reference policy, keeping
+surviving old-to-young entries for subsequent minors. Successful promotion clears
+the set. Major marking records it again while visiting old fields, and preparation
+relocates those source indices. There is no card table or block-offset table.
+Continuation retirement removes stale slots at the existing stack/argument
+retirement sites. See [architecture](architecture.md) for the pass boundaries.
 
 JNI critical regions use the pinned JDK's `GCLocker`. `JamHeap::pin_object` and
 `unpin_object` enter and leave it. Collection blocks before acquiring the heap
@@ -146,10 +149,10 @@ Java and generalized weak policy both use jam's actual marks and movement.
 
 ## Compiler support
 
-Interpreter, C1 and C2 use Jam's card barriers. The
+Interpreter, C1 and C2 record exact old-to-young source slots. The
 [Graal patch](https://github.com/ekmett/jam/blob/main/vm/patches/graal-jam.patch) recognizes Jam's exported collector
-identity and selects the generic card-table barrier set. Both Java Graal and
-libgraal use that selection. The VM checks the actual compiler's GC support
+identity and lowers stores and array copies to the same remembered-slot API.
+Both Java Graal and libgraal use that lowering. The VM checks the actual compiler's GC support
 before installing Java code, including code returned by a libgraal isolate.
 An unmodified compiler cannot silently treat Jam as Serial GC.
 
