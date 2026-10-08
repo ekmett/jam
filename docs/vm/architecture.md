@@ -191,5 +191,5 @@ and [Native Image](native-image.md) for the SubstrateVM layout and pinning rules
 The implementation uses Jam's
 [heap](https://github.com/ekmett/jam/blob/main/src/jam/heap.ccm),
 [compactor](https://github.com/ekmett/jam/blob/main/src/jam/packed.ccm)
-and [work scheduler](https://github.com/ekmett/jam/blob/main/src/jam/work.ccm).
+and [work scheduler](https://github.com/ekmett/work/blob/main/src/work.ccm).
 The [source manifest](https://github.com/ekmett/jam/blob/main/vm/config/source-pins.json) records the exact inputs.
