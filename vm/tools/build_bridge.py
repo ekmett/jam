@@ -42,7 +42,9 @@ def build(java_home):
                      "/Fe" + str(stage / "lib" / library), "/link", "/IMPLIB:" + str(stage / "jam_bridge.lib")]
         else:
             flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-                        "-fvisibility=hidden", *(["-dynamiclib"] if system == "Darwin" else ["-shared", "-fPIC"]),
+                        "-fvisibility=hidden", *(["-dynamiclib", "-mmacosx-version-min=" +
+                           os.environ.get("MACOSX_DEPLOYMENT_TARGET", "15.5")]
+                          if system == "Darwin" else ["-shared", "-fPIC"]),
                         "-I" + str(jdk / "include"),
                         "-I" + str(jdk / "include" / include), "-I" + str(stage / "include"),
                         str(ROOT / "src/bridge/jam_bridge.c"), "-o", str(stage / "lib" / library),

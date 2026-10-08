@@ -59,6 +59,9 @@ if(JAM_BUILD_TESTS)
   add_test(NAME jam-release-runtime-test
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/t/release-runtime-test.py")
   set_tests_properties(jam-release-runtime-test PROPERTIES LABELS vm)
+  add_test(NAME jam-macos-deployment-test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/t/macos-deployment-test.py")
+  set_tests_properties(jam-macos-deployment-test PROPERTIES LABELS vm)
 endif()
 set(jam_vm_environment "JAM_NATIVE_BUILD=${PROJECT_BINARY_DIR}")
 foreach(runtime jdk graalvm)
