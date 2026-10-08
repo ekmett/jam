@@ -5,8 +5,8 @@
 
 This is the bounded implementation plan for [lifted tracing](lifted-tracing.md),
 not a supported API. Target Jam-patched **GraalVM HotSpot and SubstrateVM**.
-A HotSpot package without Graal is outside this experiment. Keep the terminal
-weak-key implementation and its qualification independent.
+A HotSpot package without Graal is outside this experiment. Weak-key resolution
+uses this same protocol without marking its endpoint.
 
 The first deliverable is a real collector call to compiled language-authored
 methods. Stop at a failed feasibility gate and report the failing mechanism.

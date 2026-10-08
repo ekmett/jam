@@ -85,7 +85,7 @@ Collector stores must preserve relocation and generational bookkeeping, includin
 
 Ordinary `invokeinterface`/JavaCalls from a HotSpot collector callback is not a valid implementation. Jam must provide a verified/generated collector entry for language-defined resolution methods. For SubstrateVM, use an equivalent verified uninterruptible call graph. The entry must neither allocate, safepoint, block, initialize classes, throw, deoptimize, nor evaluate guest code. Compile/validate implementations and their reachable helpers before they can be invoked during collection. Include class-loader and code-lifetime ownership.
 
-The intent is language-owned semantics, not a growing VM switch over THC thunk/constructor classes. If the required method dispatch cannot be supplied safely, report that design gap before replacing it with narrower descriptors. Existing completed-WHNF weak descriptors can ship independently but do not deliver this interface.
+The intent is language-owned semantics, not a growing VM switch over THC thunk/constructor classes. If the required method dispatch cannot be supplied safely, report that design gap before replacing it with narrower descriptors. Do not introduce a separate weak-key field-descriptor API; weak keys must use the same language-owned resolution protocol without marking the endpoint.
 
 ## THC integration and delivery
 
@@ -95,8 +95,6 @@ The intent is language-owned semantics, not a growing VM switch over THC thunk/c
 4. Qualify observable behavior with compact, intentional checks: ordinary value/unresolved thunk, a chain ending in an unresolved thunk, selector retention of only the chosen field, cycle termination, old-to-young relocation, and weak liveness through an independently live endpoint. Exercise both providers and relevant THC modes, with independent GHC results where applicable. Reuse existing producers; no giant matrix or additional acquisition harness.
 
 Measure collector overhead and record build duration alongside qualification.
-The terminal weak-key descriptor hook is separate work and does not qualify
-this protocol.
 
 ## Next dispatch decision
 

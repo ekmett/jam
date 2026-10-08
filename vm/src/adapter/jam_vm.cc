@@ -68,15 +68,6 @@ void jam_vm_finish(jam_vm * vm) { vm->heap.finish(); }
 uint64_t jam_vm_weak_create(jam_vm * vm, uint32_t key, uint32_t value, uint32_t finalizer) {
   return vm->heap.weaks().create(key, value, finalizer);
 }
-uint64_t jam_vm_weak_create_indirect(jam_vm * vm, uint32_t key, uint32_t value,
-                                     uint32_t finalizer, uint64_t descriptor) {
-  return vm->heap.weaks().create(key, value, finalizer, descriptor);
-}
-void jam_vm_weak_retarget(jam_vm * vm, jam_vm_resolve resolve, void * context) {
-  vm->heap.weaks().retarget([=](uint64_t descriptor, uint32_t key) noexcept {
-    return resolve(context, descriptor, key);
-  });
-}
 uint32_t jam_vm_weak_value(jam_vm const * vm, uint64_t id) { return vm->heap.weaks().value(id); }
 void jam_vm_weak_roots(jam_vm * vm, jam_vm_scan scan, void * context) {
   vm->heap.weaks().roots(tracer(vm, scan, context));

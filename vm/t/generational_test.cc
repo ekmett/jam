@@ -141,52 +141,6 @@ static void mixed_weak_batch() {
   jam_vm_weak_complete(h.vm, id);
   check(!jam_vm_weak_finalize(h.vm, id), "completed finalizer cannot run twice");
 }
-static void indirect_weak_keys() {
-  for (bool minor : {false, true}) for (bool old_wrapper : {false, true}) {
-    heap h(2);
-    auto representative = h.make(true, 101);
-    auto wrapper = h.make(!old_wrapper, 0);
-    auto value = h.make(true, 102);
-    auto token = jam_vm_weak_create_indirect(h.vm, wrapper, value, 0, 17);
-    // Completion happens after registration. The wrapper need not be live.
-    h.at(wrapper).left = representative;
-    h.at(wrapper).identity = 2;
-    struct context { heap * owner; unsigned calls = 0; } state{&h};
-    auto resolve = [](void * raw, uint64_t descriptor, uint32_t key) -> uint32_t {
-      auto & c = *static_cast<context *>(raw);
-      check(descriptor == 17, "registration binds its descriptor");
-      ++c.calls;
-      auto const & object = c.owner->at(key);
-      return object.identity == 2 && object.left ? object.left : key;
-    };
-    jam_vm_begin(h.vm, minor);
-    h.trace(representative);
-    jam_vm_weak_retarget(h.vm, resolve, &state);
-    check(state.calls == 1, "indirection resolved once before weak closure");
-    if (!minor || !old_wrapper) check(!jam_vm_marked(h.vm, wrapper), "retargeting does not retain wrapper");
-    h.weak_close();
-    check(jam_vm_marked(h.vm, value), "independently live representative retains weak value");
-    check(jam_vm_prepare(h.vm, 0), "retargeted weak preparation");
-    representative = jam_vm_forward(h.vm, representative);
-    jam_vm_finish(h.vm);
-    check(h.at(jam_vm_weak_value(h.vm, token)).identity == 102, "retargeted value forwarded");
-    // The descriptor is retired after resolution, so it never interprets the
-    // representative's layout, including after movement and wrapper reclamation.
-    jam_vm_begin(h.vm, 0);
-    h.trace(representative);
-    jam_vm_weak_retarget(h.vm, resolve, &state);
-    check(state.calls == 1, "resolved key never runs the old descriptor again");
-    h.weak_close();
-    check(jam_vm_prepare(h.vm, 0), "second retargeted weak preparation");
-    jam_vm_finish(h.vm);
-    jam_vm_begin(h.vm, 0);
-    jam_vm_weak_retarget(h.vm, resolve, &state);
-    h.weak_close();
-    check(!jam_vm_weak_value(h.vm, token), "weak dies when representative loses independent liveness");
-    check(jam_vm_prepare(h.vm, 0), "dead representative preparation");
-    jam_vm_finish(h.vm);
-  }
-}
 static void permanent_references() {
   heap h(4);
   // Permanent image objects need no accessible backing for collector metadata.
@@ -289,5 +243,5 @@ static void thread_scopes() {
 }
 int main(int argc, char **) {
   cycles(1, argc > 1); cycles(4, argc > 1); capacity_and_retry(); mixed_weak_batch();
-  indirect_weak_keys(); permanent_references(); concurrent_old_pin(); thread_scopes();
+  permanent_references(); concurrent_old_pin(); thread_scopes();
 }

@@ -46,7 +46,7 @@ def run(name, test, options=()):
     print('\n'.join(lines[-2:]), flush=True)
 
 
-for test in ('HeapSmoke', 'WeakSmoke', 'BoundarySmoke', 'IndirectionValidationSmoke'):
+for test in ('HeapSmoke', 'WeakSmoke', 'BoundarySmoke'):
     run(test, test)
 for mode, compiler in (
         ('interpreter', ['-Xint']),

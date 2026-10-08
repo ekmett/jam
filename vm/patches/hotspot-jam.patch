@@ -520,7 +520,7 @@
 +#endif // SHARE_GC_JAM_JAMBARRIERSET_HPP
 --- a/src/hotspot/share/gc/jam/jamHeap.cpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.cpp
-@@ -0,0 +1,798 @@
+@@ -0,0 +1,797 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -1253,7 +1253,6 @@
 +  JamRoots roots;
 +  jam_roots(&roots, false);
 +  roots.trace(this);
-+  retarget_weak_keys();
 +  jam_vm_weak_close(_jam, jam_scan, &state);
 +
 +  JamRefProc task;
@@ -1321,7 +1320,7 @@
 +}
 --- a/src/hotspot/share/gc/jam/jamHeap.hpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.hpp
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,174 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -1452,7 +1451,6 @@
 +  jam_vm* jam() const { return _jam; }
 +  ReferenceProcessor* ref_processor() const { return _ref_processor; }
 +  void trace_external(uint32_t const* roots, size_t count);
-+  void retarget_weak_keys();
 +
 +  // Heap walking support
 +  void object_iterate(ObjectClosure* cl) override;
@@ -1967,25 +1965,19 @@
 +#endif // SHARE_GC_JAM_JAMTHREADLOCALDATA_HPP
 --- a/src/hotspot/share/gc/jam/jamWeak.cpp
 +++ b/src/hotspot/share/gc/jam/jamWeak.cpp
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,101 @@
 +// SPDX-FileCopyrightText: 2026 Edward Kmett
 +// SPDX-License-Identifier: GPL-2.0-only
 +
-+#include "classfile/javaClasses.inline.hpp"
-+#include "classfile/symbolTable.hpp"
 +#include "classfile/vmSymbols.hpp"
 +#include "gc/jam/jamHeap.hpp"
 +#include "jvm.h"
 +#include "oops/compressedOops.inline.hpp"
-+#include "oops/instanceKlass.hpp"
-+#include "oops/oop.inline.hpp"
 +#include "oops/typeArrayOop.inline.hpp"
-+#include "runtime/fieldDescriptor.inline.hpp"
 +#include "runtime/handles.inline.hpp"
 +#include "runtime/interfaceSupport.inline.hpp"
 +#include "runtime/jniHandles.inline.hpp"
 +#include "runtime/mutexLocker.hpp"
-+#include "runtime/safepoint.hpp"
 +
 +static JamHeap* jam_weak_heap(TRAPS) {
 +  if (!UseJamGC) {
@@ -2003,94 +1995,6 @@
 +  return CompressedOops::decode(CompressedOops::narrow_oop_cast(value));
 +}
 +
-+// Immutable descriptors live for the VM lifetime. The global class mirror
-+// keeps the exact Klass (including its defining loader) and offsets valid.
-+struct JamIndirection : public CHeapObj<mtGC> {
-+  InstanceKlass* klass;
-+  jobject mirror;
-+  int state_offset;
-+  jint completed_state;
-+  int referent_offset;
-+  JamIndirection* next;
-+};
-+
-+static JamIndirection* jam_indirections = nullptr;
-+
-+static JamIndirection* jam_indirection(Klass* klass) {
-+  assert(Heap_lock->owned_by_self(), "Descriptor lookup requires the heap lock");
-+  // ponytail: a few registered carriers; use a klass map if this list grows.
-+  for (JamIndirection* d = jam_indirections; d != nullptr; d = d->next) {
-+    if (d->klass == klass) return d;
-+  }
-+  return nullptr;
-+}
-+
-+static uint32_t jam_resolve_indirection(void* context, uint64_t descriptor, uint32_t key) {
-+  JamIndirection* d = reinterpret_cast<JamIndirection*>(uintptr_t(descriptor));
-+  oop carrier = jam_weak_object(key);
-+  assert(carrier->klass() == d->klass, "Descriptor belongs to the exact key class");
-+  if (carrier->int_field_acquire(d->state_offset) != d->completed_state) return key;
-+  oop referent = carrier->obj_field(d->referent_offset);
-+  return referent == nullptr ? key : CompressedOops::narrow_oop_value(referent);
-+}
-+
-+void JamHeap::retarget_weak_keys() {
-+  assert(SafepointSynchronize::is_at_safepoint(), "Must stop mutators");
-+  // Inspect even unmarked carriers before weak closure or reclamation. In a
-+  // minor collection the replacement's generation determines key liveness.
-+  jam_vm_weak_retarget(jam(), jam_resolve_indirection, nullptr);
-+}
-+
-+JVM_ENTRY(void, JVM_JamWeakRegisterIndirection(JNIEnv* env, jclass ignored,
-+                                              jclass carrier, jstring state_field,
-+                                              jint completed_state, jstring referent_field))
-+  jam_weak_heap(CHECK);
-+  if (carrier == nullptr || state_field == nullptr || referent_field == nullptr) {
-+    THROW_MSG(vmSymbols::java_lang_NullPointerException(), "indirection descriptor");
-+  }
-+  Handle mirror(THREAD, JNIHandles::resolve(carrier));
-+  Klass* klass = java_lang_Class::as_Klass(mirror());
-+  if (klass == nullptr || !klass->is_instance_klass()) {
-+    THROW_MSG(vmSymbols::java_lang_IllegalArgumentException(), "carrier must be an instance class");
-+  }
-+  InstanceKlass* ik = InstanceKlass::cast(klass);
-+  TempNewSymbol state_name = java_lang_String::as_symbol_or_null(JNIHandles::resolve(state_field));
-+  TempNewSymbol referent_name = java_lang_String::as_symbol_or_null(JNIHandles::resolve(referent_field));
-+  fieldDescriptor state;
-+  fieldDescriptor referent;
-+  if (state_name == nullptr || referent_name == nullptr ||
-+      !ik->find_local_field(state_name, vmSymbols::int_signature(), &state) ||
-+      state.is_static() || !state.is_volatile() ||
-+      !ik->find_local_field(referent_name, vmSymbols::object_signature(), &referent) ||
-+      referent.is_static()) {
-+    THROW_MSG(vmSymbols::java_lang_IllegalArgumentException(),
-+              "carrier must declare a volatile int state and an Object referent instance field");
-+  }
-+  bool conflict = false;
-+  {
-+    MutexLocker lock(Heap_lock);
-+    JamIndirection* existing = jam_indirection(ik);
-+    if (existing != nullptr) {
-+      conflict = existing->state_offset != state.offset() ||
-+                 existing->completed_state != completed_state ||
-+                 existing->referent_offset != referent.offset();
-+    } else {
-+      JamIndirection* d = new JamIndirection();
-+      d->klass = ik;
-+      d->mirror = JNIHandles::make_global(mirror);
-+      d->state_offset = state.offset();
-+      d->completed_state = completed_state;
-+      d->referent_offset = referent.offset();
-+      d->next = jam_indirections;
-+      jam_indirections = d;
-+    }
-+  }
-+  // Exception construction may call Java and must not hold Heap_lock.
-+  if (conflict) {
-+    THROW_MSG(vmSymbols::java_lang_IllegalArgumentException(), "conflicting indirection descriptor");
-+  }
-+JVM_END
-+
 +JVM_ENTRY(jlong, JVM_JamWeakCreate(JNIEnv* env, jclass ignored,
 +                                 jobject key, jobject value, jobject finalizer))
 +  JamHeap* heap = jam_weak_heap(CHECK_0);
@@ -2099,9 +2003,8 @@
 +  }
 +  MutexLocker lock(Heap_lock);
 +  // Acquiring the lock may safepoint; resolve all arguments only afterward.
-+  JamIndirection* d = jam_indirection(JNIHandles::resolve(key)->klass());
-+  return jlong(jam_vm_weak_create_indirect(heap->jam(), jam_weak_offset(key),
-+      jam_weak_offset(value), jam_weak_offset(finalizer), uint64_t(uintptr_t(d))));
++  return jlong(jam_vm_weak_create(heap->jam(), jam_weak_offset(key),
++                                  jam_weak_offset(value), jam_weak_offset(finalizer)));
 +JVM_END
 +
 +JVM_ENTRY(jobject, JVM_JamWeakDeref(JNIEnv* env, jclass ignored, jlong token))
@@ -2624,7 +2527,7 @@
    ZGC_ONLY(VM_LONG_CONSTANTS_Z(declare_constant))
 --- a/src/hotspot/share/include/jvm.h
 +++ b/src/hotspot/share/include/jvm.h
-@@ -117,6 +117,33 @@
+@@ -117,6 +117,29 @@
  
  JNIEXPORT void JNICALL
  JVM_GC(void);
@@ -2633,10 +2536,6 @@
 + * managed objects are passed only through ordinary JNI local references. */
 +JNIEXPORT jlong JNICALL
 +JVM_JamWeakCreate(JNIEnv *env, jclass ignored, jobject key, jobject value, jobject finalizer);
-+
-+JNIEXPORT void JNICALL
-+JVM_JamWeakRegisterIndirection(JNIEnv *env, jclass ignored, jclass carrier,
-+                               jstring state_field, jint completed_state, jstring referent_field);
 +
 +JNIEXPORT jobject JNICALL
 +JVM_JamWeakDeref(JNIEnv *env, jclass ignored, jlong token);

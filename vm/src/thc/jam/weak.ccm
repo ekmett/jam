@@ -19,14 +19,12 @@ class weak_registry {
     std::uint32_t key, value, finalizer;
     state status = state::active;
     bool activated = false;
-    std::uint64_t descriptor = 0;
     std::size_t slot = 0;
   };
   std::vector<association> entries;
   // Stable tokens index entries. Only current associations participate in GC;
   // retiring one removes it from this dense index in constant time.
   std::vector<std::size_t> live;
-  std::size_t indirect_count = 0;
   void remove(association const & entry) noexcept {
     live[entry.slot] = live.back();
     entries[live.back()].slot = entry.slot;
@@ -35,10 +33,9 @@ class weak_registry {
 public:
   /// \brief Register a conditional value and an optional managed finalizer.
   [[nodiscard]] std::uint64_t create(std::uint32_t key, std::uint32_t value,
-                                    std::uint32_t finalizer, std::uint64_t descriptor = 0) noexcept {
-    entries.push_back({key, value, finalizer, state::active, false, descriptor, live.size()});
+                                    std::uint32_t finalizer) noexcept {
+    entries.push_back({key, value, finalizer, state::active, false, live.size()});
     live.push_back(entries.size() - 1);
-    indirect_count += descriptor != 0;
     return entries.size();
   }
   /// \brief Read an active value; retirement permanently makes this return null.
@@ -49,21 +46,6 @@ public:
   }
   /// \brief Reset live-key activation at the start of a marking epoch.
   void begin() noexcept { for (auto index : live) entries[index].activated = false; }
-  /// \brief Resolve active indirect keys without adding any marking roots.
-  /// A changed key is canonical and permanently releases its descriptor.
-  template<class Resolve> void retarget(Resolve && resolve) noexcept {
-    if (!indirect_count) return;
-    for (auto index : live) {
-      auto & entry = entries[index];
-      if (entry.status != state::active || !entry.descriptor) continue;
-      auto const key = resolve(entry.descriptor, entry.key);
-      if (key && key != entry.key) {
-        entry.key = key;
-        entry.descriptor = 0;
-        --indirect_count;
-      }
-    }
-  }
   /// \brief Retain queued and running finalizers, including during nested GC.
   template<class Trace> void roots(Trace && trace) const noexcept {
     std::vector<std::uint32_t> roots;
@@ -95,8 +77,6 @@ public:
       if (entry.status != state::active || entry.activated) { ++slot; continue; }
       entry.status = entry.finalizer ? state::queued : state::dead;
       entry.key = entry.value = 0;
-      indirect_count -= entry.descriptor != 0;
-      entry.descriptor = 0;
       if (entry.status == state::dead) remove(entry); else ++slot;
     }
   }
@@ -128,8 +108,6 @@ public:
     if (entry.status != state::active && entry.status != state::queued) return 0;
     entry.status = entry.finalizer ? state::running : state::dead;
     entry.key = entry.value = 0;
-    indirect_count -= entry.descriptor != 0;
-    entry.descriptor = 0;
     if (entry.status == state::dead) remove(entry);
     return entry.finalizer;
   }

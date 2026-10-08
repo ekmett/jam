@@ -77,10 +77,6 @@ final class JamNative {
     static native void fields(Pointer visitor, CLongPointer slots, UnsignedWord count, int follow);
     @CFunction(value = "jam_vm_weak_create", transition = NO_TRANSITION)
     static native long weakCreate(Pointer heap, int key, int value, int finalizer);
-    @CFunction(value = "jam_vm_weak_create_indirect", transition = NO_TRANSITION)
-    static native long weakCreateIndirect(Pointer heap, int key, int value, int finalizer, long descriptor);
-    @CFunction(value = "jam_vm_weak_retarget", transition = NO_TRANSITION)
-    static native void weakRetarget(Pointer heap, CFunctionPointer resolver, JamScanContext context);
     @CFunction(value = "jam_vm_weak_value", transition = NO_TRANSITION)
     static native int weakValue(Pointer heap, long id);
     @CFunction(value = "jam_vm_weak_roots", transition = NO_TRANSITION)

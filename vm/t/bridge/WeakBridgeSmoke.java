@@ -50,61 +50,6 @@ public final class WeakBridgeSmoke {
         return new Batch(first, second, new WeakReference<>(key));
     }
 
-    private static class Indirect {
-        private volatile int state;
-        private Object value;
-    }
-    private static final class IndirectChild extends Indirect { }
-    private static final class Indirections {
-        static {
-            Weak.registerIndirection(Indirect.class, "state", 2, "value");
-            Weak.registerIndirection(Indirect.class, "state", 2, "value");
-        }
-        static void initialize() { }
-    }
-    private record Alias(long token, WeakReference<Object> wrapper) { }
-    private static Alias alias(Object representative, boolean completed, boolean backedge) {
-        return alias(new Indirect(), representative, completed, backedge);
-    }
-    private static Alias alias(Indirect key, Object representative, boolean completed, boolean backedge) {
-        Object value = backedge ? new Object[]{representative} : new byte[64];
-        long token = Weak.create(key, value, null);
-        key.value = representative;
-        if (completed) key.state = 2; // Publication after registration, no notification.
-        return new Alias(token, new WeakReference<>(key));
-    }
-    private static Alias deadAlias() { return alias(new Object(), true, true); }
-    private static long liveAlias() {
-        Object representative = new Object();
-        Alias live = alias(representative, true, false);
-        Alias opaque = alias(representative, false, false);
-        Alias nil = alias(null, true, false);
-        Alias cycle = deadAlias();
-        Alias child = alias(new IndirectChild(), representative, true, false);
-        for (int i = 0; i != 3; ++i) {
-            System.gc();
-            check(live.wrapper().get() == null, "retargeting does not pin obsolete wrapper");
-            check(Weak.deref(live.token()) instanceof byte[], "live representative retains conditional value");
-            check(Weak.deref(opaque.token()) == null, "unfinished key stays opaque");
-            check(Weak.deref(nil.token()) == null, "null replacement stays opaque");
-            check(Weak.deref(cycle.token()) == null, "replacement backedge cannot activate its association");
-            check(Weak.deref(child.token()) == null, "subclasses do not inherit the descriptor");
-        }
-        Reference.reachabilityFence(representative);
-        return live.token();
-    }
-    private static void indirections() {
-        Object representative = new Object();
-        Alias early = alias(representative, true, false);
-        Indirections.initialize();
-        System.gc();
-        check(Weak.deref(early.token()) == null, "registration does not retrofit earlier associations");
-        Reference.reachabilityFence(representative);
-        long token = liveAlias();
-        System.gc();
-        check(Weak.deref(token) == null, "retargeted key dies normally after representative loses its roots");
-    }
-
     private static void generalized() {
         Chain chain = chain();
         for (int i = 0; i < 4; i++) {
@@ -205,7 +150,6 @@ public final class WeakBridgeSmoke {
         check(Weak.finalizeNow(throwing) == null && Weak.pump() == 0,
               "throwing finalizer is completed without retry");
         generalized();
-        indirections();
         System.out.println("Weak bridge passed: JVM runnables, retirement, pumping and nested GC");
         if (Boolean.getBoolean("jam.runtime.audit")) {
             System.clearProperty("jam.runtime.audit");
