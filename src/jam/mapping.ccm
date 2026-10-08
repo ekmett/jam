@@ -58,6 +58,7 @@ class heap_mapping {
   static void alias(std::byte * source, std::byte * target, std::size_t count) noexcept;
 #endif
   void fresh(std::size_t begin, std::size_t count) noexcept;
+  void map_arc(heap_mapping const & source, std::size_t start, std::size_t target, std::size_t count) noexcept;
   void finish_aliases() noexcept;
   void discard_gap(std::size_t start, std::size_t live) const noexcept;
 
@@ -91,6 +92,13 @@ public:
   /// \brief Restore an exact published window to inaccessible reserved memory.
   /// \pre The window consists entirely of unmodified views published by this API.
   static void unpublish(std::byte * target, std::size_t count) noexcept;
+  /// \brief Own a coherent side alias of a page-aligned circular arc.
+  /// Unlike resizing, this never discards any source backing.
+  [[nodiscard]] heap_mapping alias_run(std::size_t start, std::size_t count) const noexcept;
+  /// \brief Replace destination pages by aliases of a source arc, preserving other pages.
+  /// \pre Page-aligned ranges; destination does not wrap. Source survives staging.
+  void replace_pages(heap_mapping const & source, std::size_t start,
+                     std::size_t target, std::size_t count) noexcept;
   /// \brief Exchange mappings without moving payload bytes.
   void swap(heap_mapping & other) noexcept {
     std::swap(address, other.address);

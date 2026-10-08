@@ -18,6 +18,7 @@ module;
 #include <compare>
 #include <limits>
 #include <memory>
+#include <map>
 #include <tuple>
 #include <type_traits>
 #include <variant>
@@ -1221,12 +1222,47 @@ public:
   /// \details See [hosting a runtime](docs/hosting.md). One capability per heap;
   /// it must not outlive the heap. Ordinary Jam roots and collection are excluded.
   class host {
+  public:
+    /// \brief Stable alias registration; release through its owning host.
+    class pin {
+      friend class host;
+      offset at_;
+      std::size_t words_, references_ = 1, residue_;
+      detail::heap_mapping alias_;
+      pin(offset at, std::size_t words, std::size_t residue, detail::heap_mapping alias) noexcept
+        : at_(at), words_(words), residue_(residue), alias_(std::move(alias)) {}
+    public:
+      [[nodiscard]] void * address() const noexcept { return alias_.data() + residue_ * sizeof(word); }
+      [[nodiscard]] offset position() const noexcept { return at_; }
+    };
+    /// \brief Padding retained by pin placement, in destination cells.
+    struct gap { offset at; std::size_t words; };
+  private:
+    std::map<offset, std::unique_ptr<pin>> pins_;
+    struct pin_run { std::size_t first, end, block_begin, block_end; };
+    std::array<std::vector<pin_run>, 2> pin_runs;
+    std::vector<gap> pin_gaps;
+    std::vector<gap> source_gaps;
+    // Pin padding affects ranks, never weak-target survival. Empty on the ordinary path.
+    std::array<std::vector<bitmap>, 2> traced;
+    [[nodiscard]] bool alive(offset at) const noexcept {
+      if (!at) return false;
+      if (owner.minor_collection && !(at & young_bit)) return true;
+      auto const & live = traced[at >> 31];
+      if (live.empty()) return owner.marked(at);
+      auto const local = at & offset_mask;
+      return (live[local / block_words] >> (local % block_words)) & 1u;
+    }
+    void prepare_pin_marks() noexcept;
+    [[nodiscard]] std::size_t prepare_pinned(heap::generation & g, unsigned which,
+                                           std::size_t start, bool keep_null) noexcept;
+    void finish_pinned() noexcept;
     heap & owner;
     std::size_t const prefix;
     enum class phase { idle, marking, retry, prepared };
     phase state = phase::idle;
     std::size_t old_words = 0, young_words = 0;
-    bool promoting = false;
+    bool promoting = false, moving_pins = false;
 #if defined(_WIN32)
     struct publication {
       detail::heap_mapping const * source;
@@ -1266,6 +1302,17 @@ public:
       owner.require_mutator();
       return (which == generation::young ? owner.nursery.allocate(words) : owner.arena.allocate(words)) | (which == generation::young ? young_bit : 0);
     }
+    /// \brief Alias a complete allocated object without collecting or changing its offset.
+    /// \pre Idle phase, host allocation ownership; all pins agree on object extent.
+    [[nodiscard]] pin * pin_object(offset at, std::size_t words) noexcept;
+    /// \brief Release one registration; the last release invalidates its native address.
+    void unpin(pin * value) noexcept;
+    /// \brief Enumerate open pins as strong roots before reference policy is resolved.
+    template<class F> void visit_pins(F && visit) const noexcept {
+      for (auto const & [at, value] : pins_) visit(at);
+    }
+    /// \brief Placement padding to format before a VM walks the collected object stream.
+    [[nodiscard]] std::span<gap const> gaps() const noexcept { return pin_gaps; }
     /// \brief Start a VM-owned marking epoch; the VM supplies barriers and weak policy.
     /// \pre No jam roots, weak registrations, remembered slots or active collection.
     void begin(bool minor) noexcept;
@@ -1290,7 +1337,7 @@ public:
     [[nodiscard]] bool marked(offset at) const noexcept {
       if (state != phase::marking && state != phase::retry)
         detail::heap_failure("host liveness outside marking phase");
-      return owner.marked(at);
+      return alive(at);
     }
     /// \brief Freeze both forwarding tables after resolving all reference policies.
     /// \return False if whole-nursery promotion does not fit. No forwarding is then visible;
@@ -1301,9 +1348,9 @@ public:
     [[nodiscard]] offset forward(offset at) const noexcept {
       if (state != phase::prepared)
         detail::heap_failure("host forward outside prepared phase");
-      return owner.forward(at, owner.minor_collection);
+      return alive(at) ? owner.forward(at, owner.minor_collection) : null;
     }
-    /// \brief Move with the original SIMD kernel and pack only after both moves finish.
+    /// \brief Move survivors, preserving side aliases, then pack the consumed metadata.
     /// \pre VM roots and old remembered fields have been repaired. Republish both aliases
     /// before resuming mutators. Majors need no combined-live-size fit in either generation.
     void finish() noexcept;
@@ -2238,6 +2285,7 @@ heap::host::host(heap & storage, std::size_t prefix) noexcept : owner(storage), 
 
 heap::host::~host() noexcept {
   if (state != phase::idle) detail::heap_failure("unfinished host collection");
+  if (!pins_.empty()) detail::heap_failure("host destroyed with open pins");
 #if defined(_WIN32)
   if (!publications.empty()) detail::heap_failure("host destroyed with published Windows views");
 #endif
@@ -2295,6 +2343,229 @@ void heap::host::unpublish(void * target, std::size_t count) const noexcept {
 #endif
 }
 
+
+heap::host::pin * heap::host::pin_object(offset at, std::size_t words) noexcept {
+  owner.require_mutator();
+  if (state != phase::idle || !at || !words) detail::heap_failure("invalid host pin");
+  auto & g = owner.containing(at);
+  auto const local = std::size_t(at & offset_mask);
+  if (local < prefix || local >= g.cursor || words > g.cursor - local)
+    detail::heap_failure("pin outside allocated storage");
+  if (auto found = pins_.find(at); found != pins_.end()) {
+    if (found->second->words_ != words) detail::heap_failure("conflicting pin extents");
+    ++found->second->references_;
+    return found->second.get();
+  }
+  auto const page = g.page_word_count;
+  auto const first = local / page * page;
+  auto const end = (local + words + page - 1) / page * page;
+  auto alias = g.storage.alias_run(((g.origin + first) % g.capacity()) * 8, (end - first) * 8);
+  auto value = std::unique_ptr<pin>(new pin{at, words, local - first, std::move(alias)});
+  auto * result = value.get();
+  pins_.emplace(at, std::move(value));
+  return result;
+}
+
+void heap::host::unpin(pin * value) noexcept {
+  owner.require_mutator();
+  if (state != phase::idle || !value) detail::heap_failure("invalid host unpin");
+  auto found = pins_.find(value->at_);
+  if (found == pins_.end() || found->second.get() != value) detail::heap_failure("foreign host pin");
+  if (!--value->references_) pins_.erase(found);
+}
+
+void heap::host::prepare_pin_marks() noexcept {
+  // Snapshot exact claims before padding can make dead targets appear occupied.
+  for (unsigned which = owner.minor_collection ? 1 : 0; which != 2; ++which) {
+    auto & g = which ? owner.nursery : owner.arena;
+    auto const blocks = (g.cursor + block_words - 1) / block_words;
+    auto & live = traced[which];
+    live.resize(blocks);
+    for (std::size_t i = 0; i != blocks; ++i) {
+      auto & item = g.metadata[i];
+      live[i] = item.live;
+      item.pointers &= heap::generation::pointer_cells(item.live);
+    }
+  }
+  for (auto const & [at, value] : pins_) {
+    if (!owner.marked(at)) detail::heap_failure("open pin was not traced");
+    auto const which = unsigned(at >> 31);
+    if (!which && owner.minor_collection) continue;
+    auto & g = owner.containing(at);
+    auto & runs = pin_runs[which];
+    auto const first = std::size_t(at & offset_mask), end = first + value->words_;
+    auto const page = g.page_word_count;
+    if (!runs.empty() && first / page < (runs.back().end + page - 1) / page) {
+      runs.back().end = std::max(runs.back().end, end);
+    } else runs.push_back({first, end, 0, 0});
+  }
+  for (unsigned which = 0; which != 2; ++which) {
+    auto & g = which ? owner.nursery : owner.arena;
+    auto & runs = pin_runs[which];
+    // A placement gap must never split another live record across mini-pages.
+    std::vector<pin_run> joined;
+    for (auto run : runs) {
+      run.block_begin = run.first / block_words;
+      run.block_end = (run.end + block_words - 1) / block_words;
+      while (run.block_begin && (g.flags(run.block_begin - 1) & 8u)) --run.block_begin;
+      while (run.block_end * block_words < g.cursor && (g.flags(run.block_end - 1) & 8u)) ++run.block_end;
+      if (!joined.empty() && run.block_begin < joined.back().block_end) {
+        joined.back().end = run.end;
+        joined.back().block_end = std::max(joined.back().block_end, run.block_end);
+      } else joined.push_back(run);
+    }
+    runs = std::move(joined);
+    for (auto const & run : runs) {
+      for (auto cell = run.block_begin * block_words; cell < run.end; ++cell) {
+        auto & item = g.metadata[cell / block_words];
+        auto const bit = bitmap{1} << (cell % block_words);
+        if (!(item.live & bit)) {
+          auto const at = static_cast<offset>(cell) | (which ? young_bit : 0);
+          if (!source_gaps.empty() && source_gaps.back().at + source_gaps.back().words == at)
+            ++source_gaps.back().words;
+          else source_gaps.push_back({at, 1});
+          item.live |= bit;
+        }
+      }
+    }
+  }
+}
+
+std::size_t heap::host::prepare_pinned(heap::generation & g, unsigned which,
+                                      std::size_t start, bool keep_null) noexcept {
+  static_cast<void>(g.prepare(start, keep_null));
+  auto const blocks = (g.cursor + block_words - 1) / block_words;
+  auto const page = g.page_word_count;
+  auto const & runs = pin_runs[which];
+  std::size_t cursor = start, next_run = 0;
+  // Promotion cannot replace the partial page containing stationary old objects.
+  std::size_t pinned_page_end = promoting && which ? (start + page - 1) / page * page : 0;
+  for (std::size_t begin = 0; begin < blocks;) {
+    auto end = begin + 1;
+    while (end < blocks && (g.flags(end - 1) & 8u)) ++end;
+    bool const constrained = next_run < runs.size() && runs[next_run].block_begin == begin;
+    if (constrained) end = runs[next_run].block_end;
+    unsigned k = 0;
+    for (auto i = begin; i < end; ++i) k = std::max(k, static_cast<unsigned>(std::popcount(g.flags(i) & 7u)));
+    auto const previous = cursor;
+    cursor = (cursor + (std::size_t{1} << k) - 1) & ~((std::size_t{1} << k) - 1);
+    if (constrained) {
+      auto const & run = runs[next_run++];
+      cursor += (begin * block_words - cursor) & (page - 1);
+      auto mapped_page = (cursor + run.first - begin * block_words) / page * page;
+      if (mapped_page < pinned_page_end) cursor += pinned_page_end - mapped_page;
+      pinned_page_end = (cursor + run.end - begin * block_words + page - 1) / page * page;
+    }
+    if (cursor > previous) pin_gaps.push_back({static_cast<offset>(previous), cursor - previous});
+    for (auto i = begin; i != end; ++i) {
+      g.metadata[i].destination = static_cast<offset>(cursor);
+      cursor += std::popcount(detail::retained(g.metadata[i], g.alignment_table(), i));
+    }
+    begin = end;
+  }
+  return cursor;
+}
+
+void heap::host::finish_pinned() noexcept {
+  std::array<std::optional<detail::heap_mapping>, 2> output;
+  std::array<std::vector<block>, 2> metadata;
+  auto const minor = owner.minor_collection;
+  for (unsigned which = 0; which != 2; ++which) {
+    auto & g = which ? owner.nursery : owner.arena;
+    if (!which && minor && !promoting) continue;
+    if (!which && minor) {
+      output[which].emplace(g.storage.alias_run(g.origin * 8, g.capacity() * 8));
+      metadata[which] = g.metadata;
+    } else {
+      output[which].emplace(g.capacity() * 8);
+      metadata[which].resize(g.metadata.size());
+    }
+  }
+  std::vector<std::pair<offset, offset>> relocated;
+  for (auto const & [at, value] : pins_) relocated.emplace_back(at, owner.forward(at, minor));
+  for (auto const & hole : source_gaps) pin_gaps.push_back({owner.forward(hole.at, minor), hole.words});
+
+  // Read all movable payload before replacing any source pages shared by pins.
+  for (unsigned which = minor ? 1 : 0; which != 2; ++which) {
+    auto & g = which ? owner.nursery : owner.arena;
+    unsigned const target_gen = which && !promoting ? 1 : 0;
+    auto * target = reinterpret_cast<word *>(output[target_gen]->data());
+    auto & target_meta = metadata[target_gen];
+    auto pinned = pins_.lower_bound(which ? young_bit : 0);
+    auto const blocks = (g.cursor + block_words - 1) / block_words;
+    for (std::size_t i = 0; i < blocks; ++i) {
+      auto const & item = g.metadata[i];
+      auto retained = detail::retained(item, g.alignment_table(), i);
+      auto destination = std::size_t(item.destination & offset_mask);
+      while (retained) {
+        auto const bit = std::countr_zero(retained);
+        auto const cell = i * block_words + bit;
+        auto const at = static_cast<offset>(cell) | (which ? young_bit : 0);
+        while (pinned != pins_.end() && std::uint64_t(pinned->first) + pinned->second->words_ <= at) ++pinned;
+        bool const fixed = pinned != pins_.end() && at >= pinned->first &&
+          std::uint64_t(at) < std::uint64_t(pinned->first) + pinned->second->words_;
+        auto const pointers = (item.pointers >> (bit * 2)) & 3u;
+        if (!fixed) target[destination] = g.data()[cell];
+        for (unsigned slot = 0; slot != 2; ++slot) if (pointers & (1u << slot)) {
+          auto * from = reinterpret_cast<std::byte *>(g.data() + cell) + slot * sizeof(offset);
+          offset before;
+          std::memcpy(&before, from, sizeof(before));
+          auto const after = forward(before);
+          auto * to = fixed ? from : reinterpret_cast<std::byte *>(target + destination) + slot * sizeof(offset);
+          std::memcpy(to, &after, sizeof(after));
+        }
+        auto & packed = target_meta[destination / block_words];
+        packed.live |= bitmap{1} << (destination % block_words);
+        packed.pointers |= word{pointers} << ((destination % block_words) * 2);
+        ++destination;
+        retained &= retained - 1;
+      }
+    }
+  }
+  for (auto const & hole : pin_gaps) {
+    auto const which = unsigned(hole.at >> 31);
+    auto * target = reinterpret_cast<word *>(output[which]->data());
+    std::fill_n(target + (hole.at & offset_mask), hole.words, word{0});
+  }
+  for (unsigned which = minor ? 1 : 0; which != 2; ++which) {
+    auto & g = which ? owner.nursery : owner.arena;
+    auto const page = g.page_word_count;
+    unsigned const target_gen = which && !promoting ? 1 : 0;
+    for (auto const & run : pin_runs[which]) {
+      auto const first = run.first / page * page, end = (run.end + page - 1) / page * page;
+      auto const destination = (owner.forward(static_cast<offset>(run.first) | (which ? young_bit : 0), minor) & offset_mask) / page * page;
+      auto const * staged = reinterpret_cast<word const *>(output[target_gen]->data());
+      auto pin_at = pins_.lower_bound(static_cast<offset>(first) | (which ? young_bit : 0));
+      for (auto cell = first; cell != end; ++cell) {
+        auto const at = static_cast<offset>(cell) | (which ? young_bit : 0);
+        while (pin_at != pins_.end() && std::uint64_t(pin_at->first) + pin_at->second->words_ <= at) ++pin_at;
+        if (pin_at != pins_.end() && at >= pin_at->first && std::uint64_t(at) < std::uint64_t(pin_at->first) + pin_at->second->words_) continue;
+        g.data()[cell] = staged[destination + cell - first];
+      }
+      output[target_gen]->replace_pages(g.storage, ((g.origin + first) % g.capacity()) * 8,
+                                        destination * 8, (end - first) * 8);
+    }
+  }
+  for (unsigned which = 0; which != 2; ++which) if (output[which]) {
+    auto & g = which ? owner.nursery : owner.arena;
+    g.storage.replace(*output[which]);
+    g.metadata = std::move(metadata[which]);
+    g.adopt(0, which ? young_words : old_words);
+  }
+  std::map<offset, std::unique_ptr<pin>> next;
+  for (auto [before, after] : relocated) {
+    auto node = pins_.extract(before);
+    node.key() = after;
+    node.mapped()->at_ = after;
+    next.insert(std::move(node));
+  }
+  pins_.swap(next);
+  owner.collecting = false;
+  owner.minor_collection = false;
+  state = phase::idle;
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+}
+
 void heap::host::begin(bool minor) noexcept {
   owner.require_mutator();
   if (state != phase::idle) detail::heap_failure("host begin outside idle phase");
@@ -2305,6 +2576,10 @@ void heap::host::begin(bool minor) noexcept {
   owner.collecting = true;
   owner.minor_collection = minor;
   state = phase::marking;
+  moving_pins = !pins_.empty() && (!minor || (pins_.rbegin()->first & young_bit));
+  pin_gaps.clear(); source_gaps.clear();
+  for (auto & runs : pin_runs) runs.clear();
+  for (auto & live : traced) live.clear();
   owner.nursery.clear_marks();
   for (auto & item : owner.nursery.metadata) item.pointers = 0;
   if (!minor) {
@@ -2316,13 +2591,15 @@ void heap::host::begin(bool minor) noexcept {
 [[nodiscard]] bool heap::host::prepare(bool promote) noexcept {
   if (state != phase::marking && state != phase::retry)
     detail::heap_failure("host prepare outside marking phase");
+  pin_gaps.clear();
+  if (state == phase::marking && moving_pins) prepare_pin_marks();
   promoting = owner.minor_collection && promote;
   if (!owner.minor_collection) {
     if (prefix > 1) owner.arena.mark(1, prefix - 1);
-    old_words = owner.arena.prepare(0, true);
+    old_words = !moving_pins ? owner.arena.prepare(0, true) : prepare_pinned(owner.arena, 0, 0, true);
   } else old_words = owner.arena.cursor;
   if (promoting) {
-    old_words = owner.nursery.prepare(owner.arena.cursor, false);
+    old_words = !moving_pins ? owner.nursery.prepare(owner.arena.cursor, false) : prepare_pinned(owner.nursery, 1, owner.arena.cursor, false);
     if (old_words > owner.arena.capacity() - owner.arena.reserved()) {
       state = phase::retry;
       return false;
@@ -2330,7 +2607,7 @@ void heap::host::begin(bool minor) noexcept {
     young_words = prefix;
   } else {
     if (prefix > 1) owner.nursery.mark(1, prefix - 1);
-    young_words = owner.nursery.prepare(young_bit, true) - young_bit;
+    young_words = (!moving_pins ? owner.nursery.prepare(young_bit, true) : prepare_pinned(owner.nursery, 1, young_bit, true)) - young_bit;
   }
   state = phase::prepared;
   return true;
@@ -2339,6 +2616,7 @@ void heap::host::begin(bool minor) noexcept {
 void heap::host::finish() noexcept {
   if (state != phase::prepared)
     detail::heap_failure("host finish outside prepared phase");
+  if (moving_pins) { finish_pinned(); return; }
   detail::forwarding_tables tables{owner.minor_collection ? nullptr : owner.arena.metadata.data(), owner.nursery.metadata.data(),
     owner.minor_collection ? nullptr : owner.arena.alignment_table(), owner.nursery.alignment_table()};
   auto const old_origin = owner.minor_collection ? owner.arena.origin : owner.arena.rotated_origin();

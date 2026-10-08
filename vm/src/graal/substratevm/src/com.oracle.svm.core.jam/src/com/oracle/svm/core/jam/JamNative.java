@@ -55,6 +55,20 @@ final class JamNative {
     static native UnsignedWord origin(Pointer heap, int young);
     @CFunction(value = "jam_vm_compactor", transition = NO_TRANSITION)
     static native CCharPointer compactor(Pointer heap);
+    @CFunction(value = "jam_vm_pin_object", transition = NO_TRANSITION)
+    static native Pointer pinObject(Pointer heap, int object, UnsignedWord words);
+    @CFunction(value = "jam_vm_pin_address", transition = NO_TRANSITION)
+    static native Pointer pinAddress(Pointer registration);
+    @CFunction(value = "jam_vm_unpin", transition = NO_TRANSITION)
+    static native void unpin(Pointer heap, Pointer registration);
+    @CFunction(value = "jam_vm_pin_roots", transition = NO_TRANSITION)
+    static native void pinRoots(Pointer heap, CFunctionPointer scanner, JamScanContext context);
+    @CFunction(value = "jam_vm_gap_count", transition = NO_TRANSITION)
+    static native UnsignedWord gapCount(Pointer heap);
+    @CFunction(value = "jam_vm_gap_at", transition = NO_TRANSITION)
+    static native int gapAt(Pointer heap, UnsignedWord index);
+    @CFunction(value = "jam_vm_gap_words", transition = NO_TRANSITION)
+    static native UnsignedWord gapWords(Pointer heap, UnsignedWord index);
     @CFunction(value = "jam_vm_begin", transition = NO_TRANSITION)
     static native void begin(Pointer heap, int minor);
     @CFunction(value = "jam_vm_trace", transition = NO_TRANSITION)

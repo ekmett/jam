@@ -7,13 +7,13 @@ import java.lang.management.MemoryPoolMXBean;
 import org.graalvm.nativeimage.PinnedObject;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 
-/** Pin exhaustion and recovery with -Xmx128m -Xmn32m. */
+/** Closed pins reclaim normally while another pin remains open. */
 public final class CapacitySmoke {
     private static final int CHUNK = 4 << 20;
     private static final int ATTEMPTS = 32;
 
     private static final class Pressure implements Runnable {
-        volatile byte[] rejected;
+        volatile byte[] last;
         volatile Throwable failure;
 
         @Override public void run() {
@@ -26,21 +26,17 @@ public final class CapacitySmoke {
 
         private void exhaust() {
             for (int i = 0; i < ATTEMPTS; i++) {
-                // Allocation must succeed; only mandatory pin promotion may fail.
                 byte[] candidate = new byte[CHUNK];
                 candidate[0] = 73;
                 candidate[candidate.length - 1] = -91;
-                PinnedObject pin;
-                try {
-                    pin = PinnedObject.create(candidate);
-                } catch (OutOfMemoryError expected) {
-                    rejected = candidate;
-                    return;
+                try (PinnedObject pin = PinnedObject.create(candidate)) {
+                    CCharPointer address = pin.addressOfArrayElement(0);
+                    check(address.read(0) == 73 && address.read(candidate.length - 1) == -91,
+                                    "New alias sees both ends of the array");
                 }
-                pin.close();
-                // Closed pins leave unreachable old storage until a major is allowed.
+                last = candidate;
+                System.gc();
             }
-            throw new AssertionError("Pin promotion did not exhaust old space");
         }
     }
 
@@ -68,7 +64,6 @@ public final class CapacitySmoke {
 
     public static void main(String[] args) throws Exception {
         configuration();
-        GarbageCollectorMXBean minor = collector("Jam minor");
         GarbageCollectorMXBean major = collector("Jam major");
         Pressure pressure = new Pressure();
         Thread worker = new Thread(pressure, "jam-pin-capacity");
@@ -79,16 +74,14 @@ public final class CapacitySmoke {
         try (PinnedObject anchor = PinnedObject.create(payload)) {
             CCharPointer nativeAddress = anchor.addressOfArrayElement(0);
             long address = nativeAddress.rawValue();
-            long beforeMinor = minor.getCollectionCount();
             long beforeMajor = major.getCollectionCount();
             worker.start();
             // Keep the pin open throughout the join: waiting for this pin cannot make progress.
             worker.join(30_000);
-            check(!worker.isAlive(), "Mandatory pin promotion waited instead of throwing OOME");
+            check(!worker.isAlive(), "Pin churn finishes while another pin is open");
             if (pressure.failure != null) throw new AssertionError("Capacity worker failed", pressure.failure);
-            check(pressure.rejected != null, "Pin creation reports exhaustion");
-            check(minor.getCollectionCount() > beforeMinor, "Pin requests performed actual minors");
-            check(major.getCollectionCount() == beforeMajor, "No major moved pinned old storage");
+            check(pressure.last != null, "Pin churn completed");
+            check(major.getCollectionCount() > beforeMajor, "Majors run with the anchor pin open");
             check(anchor.addressOfArrayElement(0).rawValue() == address, "Pinned address remains stable");
             for (int i = 0; i < payload.length; i++) {
                 byte expected = (byte) (i * 17 + 3);
@@ -99,12 +92,12 @@ public final class CapacitySmoke {
         // The producer stack has exited, so old chunks have no accidental stack roots.
         long beforeMajor = major.getCollectionCount();
         System.gc();
-        check(major.getCollectionCount() > beforeMajor, "Closing the pin permits a major");
-        byte[] rejected = pressure.rejected;
-        try (PinnedObject recovered = PinnedObject.create(rejected)) {
+        check(major.getCollectionCount() > beforeMajor, "Collection still works after closing the pin");
+        byte[] retained = pressure.last;
+        try (PinnedObject recovered = PinnedObject.create(retained)) {
             CCharPointer address = recovered.addressOfArrayElement(0);
-            check(address.read(0) == 73 && address.read(rejected.length - 1) == -91,
-                    "The rejected object can be pinned after recovery");
+            check(address.read(0) == 73 && address.read(retained.length - 1) == -91,
+                    "Retained object can be pinned again");
         }
         // Larger than the nursery: recovery must make old capacity usable again.
         byte[] recovered = new byte[64 << 20];

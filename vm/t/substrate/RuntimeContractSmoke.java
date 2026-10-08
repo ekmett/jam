@@ -146,7 +146,7 @@ public final class RuntimeContractSmoke {
             threads[i].start();
         }
         ready.await();
-        // Thread startup itself can pin VM data and promote. Drain it before the measured stores.
+        // Drain thread-startup allocation before the measured stores.
         if (!pressure) System.gc();
         long before = collector("Jam minor").getCollectionCount();
         start.countDown();
@@ -174,10 +174,9 @@ public final class RuntimeContractSmoke {
         long majorTime = major.getCollectionTime();
         check(minorStart >= 0 && minorTime >= 0 && majorTime >= 0, "collection accounting is supported");
 
-        // Pin creation promotes the whole nursery, including the owners, arrays and atomic cells.
+        // Keep a native alias open while verifying old-to-young barriers and major movement.
         try (PinnedObject pin = PinnedObject.create(owners)) {
             check(pin.getObject() == owners, "pin retains the owner graph");
-            long majorStart = major.getCollectionCount();
             for (int round = 0; round < ROUNDS; round++) {
                 long beforePressure = minor.getCollectionCount();
                 concurrentRound(owners, round, true);
@@ -186,8 +185,9 @@ public final class RuntimeContractSmoke {
                 // Refill from an empty nursery, then discard every producer stack before collection.
                 long before = concurrentRound(owners, round, false);
                 check(minor.getCollectionCount() == before, "final young stores have not already been promoted");
-                System.gc();
-                check(minor.getCollectionCount() > before, "explicit collection with a live pin performs a minor");
+                long majorStart = major.getCollectionCount();
+                for (int i = 0; minor.getCollectionCount() == before && i < 65536; i++) sink = new byte[4096];
+                check(minor.getCollectionCount() > before, "allocation triggers a minor with a live pin");
                 check(major.getCollectionCount() == majorStart, "barrier checks are not masked by a major");
                 for (int worker = 0; worker < WORKERS; worker++) verify(owners[worker], value(round, worker, ITERATIONS - 1));
                 accounting();
@@ -198,7 +198,7 @@ public final class RuntimeContractSmoke {
         Reference<?>[] references = orphan(queue);
         long beforeMajor = major.getCollectionCount();
         System.gc();
-        check(major.getCollectionCount() > beforeMajor, "closing the pin permits an actual major");
+        check(major.getCollectionCount() > beforeMajor, "explicit collection performs an actual major");
         check(references[0].get() == null, "unreachable weak referent clears");
         int seen = 0;
         for (int i = 0; i < references.length; i++) {

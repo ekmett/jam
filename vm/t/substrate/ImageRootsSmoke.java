@@ -25,6 +25,7 @@ public final class ImageRootsSmoke {
             install(round, queue);
             // The array and weak-reference wrapper have no strong root outside image storage.
             try (PinnedObject pin = PinnedObject.create(new byte[64])) {
+                SubstrateSmoke.minorCollection();
                 if (((int[]) ImageRoots.slots[1])[0] != round) throw new AssertionError("image root lost during promotion");
                 WeakReference<?> weak = (WeakReference<?>) ImageRoots.slots[3];
                 if (weak.get() != null || queue.remove(10000) != weak) throw new AssertionError("pending reference lost during promotion");

@@ -300,6 +300,51 @@ void heap_mapping::publish(std::size_t start, std::byte * target, std::size_t co
   }
 }
 
+void heap_mapping::map_arc(heap_mapping const & source, std::size_t start,
+                           std::size_t target, std::size_t count) noexcept {
+  while (count) {
+    auto const where = std::lower_bound(source.spans.begin(), source.spans.end(), start,
+      [](span const & s, std::size_t value) noexcept { return s.end <= value; });
+    assert(where != source.spans.end() && where->begin <= start);
+    auto const part = std::min(count, where->end - start);
+#if defined(_WIN32)
+    span next{target, target + part, where->section, where->offset + start - where->begin};
+    alias(next, address + target, part);
+#else
+    span next{target, target + part};
+    alias(source.address + start, address + target, part);
+#endif
+    spans.push_back(std::move(next));
+    start = (start + part) % source.capacity;
+    target += part;
+    count -= part;
+  }
+}
+
+heap_mapping heap_mapping::alias_run(std::size_t start, std::size_t count) const noexcept {
+  auto const page = page_size();
+  if (!count || start >= capacity || start % page || count % page || count > capacity)
+    heap_failure("invalid side alias");
+  heap_mapping result(reservation{}, count);
+  result.map_arc(*this, start, 0, count);
+  result.finish_aliases();
+  return result;
+}
+
+void heap_mapping::replace_pages(heap_mapping const & source, std::size_t start,
+                                 std::size_t target, std::size_t count) noexcept {
+  auto const page = page_size();
+  if (!count || start >= source.capacity || start % page || target % page || count % page ||
+      count > source.capacity || target > capacity || count > capacity - target)
+    heap_failure("invalid page replacement");
+  heap_mapping result(reservation{}, capacity);
+  result.map_arc(*this, 0, 0, target);
+  result.map_arc(source, start, target, count);
+  result.map_arc(*this, target + count, target + count, capacity - target - count);
+  result.finish_aliases();
+  replace(result);
+}
+
 void heap_mapping::unpublish(std::byte * target, std::size_t count) noexcept {
   if (!count || count % page_size() || reinterpret_cast<std::uintptr_t>(target) % page_size())
     heap_failure("invalid unpublished heap window");

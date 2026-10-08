@@ -4,17 +4,23 @@
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.graalvm.nativeimage.PinnedObject;
 
 /** One image exercises the collector through its ordinary application interfaces. */
 public final class SubstrateSmoke {
     private static volatile Object sink;
 
-    private static void minorWithPin() {
-        try (PinnedObject pin = PinnedObject.create(new Object())) {
-            System.gc();
-            java.lang.ref.Reference.reachabilityFence(pin);
+    static void minorCollection() {
+        java.lang.management.GarbageCollectorMXBean minor = null;
+        java.lang.management.GarbageCollectorMXBean major = null;
+        for (var bean : java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            if (bean.getName().equals("Jam minor")) minor = bean;
+            if (bean.getName().equals("Jam major")) major = bean;
         }
+        if (minor == null || major == null) throw new AssertionError("Jam collectors missing");
+        long before = minor.getCollectionCount(), majorBefore = major.getCollectionCount();
+        for (int i = 0; minor.getCollectionCount() == before && i < 65536; i++) sink = new byte[4096];
+        if (minor.getCollectionCount() == before || major.getCollectionCount() != majorBefore)
+            throw new AssertionError("Expected allocation-triggered minor without major collection");
     }
 
     private static void continuations() throws Exception {
@@ -62,8 +68,8 @@ public final class SubstrateSmoke {
             case "heap" -> HeapSmoke.main(new String[0]);
             case "weak" -> WeakBridgeSmoke.main(new String[0]);
             case "jni-weak" -> {
-                JNIWeakSmoke.run(SubstrateSmoke::minorWithPin, System::gc);
-                JNIWeakSmoke.oldReferent(SubstrateSmoke::minorWithPin, SubstrateSmoke::minorWithPin, System::gc);
+                JNIWeakSmoke.run(SubstrateSmoke::minorCollection, System::gc);
+                JNIWeakSmoke.oldReferent(SubstrateSmoke::minorCollection, SubstrateSmoke::minorCollection, System::gc);
             }
             case "pin" -> NativePinSmoke.main(new String[0]);
             case "runtime" -> RuntimeContractSmoke.main(new String[0]);

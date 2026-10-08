@@ -113,15 +113,6 @@ final class JamGC implements GC {
         if (available(old).belowThan(bytes)) request(true, true);
     }
 
-    void promoteForPin() {
-        if (request(false, false)) return;
-        if (!pins().hasPins()) {
-            request(true, true);
-            if (request(false, true)) return;
-        }
-        throw OutOfMemoryUtil.heapSizeExceeded();
-    }
-
     @Uninterruptible(reason = "Read native allocation bounds without an intervening collection.")
     private UnsignedWord available(boolean old) {
         UnsignedWord capacity = old ? heap.oldCapacity() : heap.youngCapacity();
@@ -178,7 +169,7 @@ final class JamGC implements GC {
         long started = System.nanoTime();
         heap.retireAllTlabs();
         pins().removeClosedObjectsAndGetFirstOpenObject();
-        minor = !data.getMajor() || pins().hasPins();
+        minor = !data.getMajor();
         clearSoft = data.getClearSoft();
         objects.clear(); references.clear(); roots.clear(); derived.clear();
         context = StackValue.get(JamScanContext.class);
@@ -191,6 +182,7 @@ final class JamGC implements GC {
         }
         heap.walkImageHeapRoots(imageVisitor);
         if (minor) heap.walkDirtyOldObjects(oldVisitor);
+        JamNative.pinRoots(heap.nativeHeap(), SCAN.getFunctionPointer(), context);
         JamNative.weakRoots(heap.nativeHeap(), SCAN.getFunctionPointer(), context);
         RuntimeCodeInfoMemory.singleton().walkRuntimeMethodsDuringGC(codeRoots);
         JamNative.weakClose(heap.nativeHeap(), SCAN.getFunctionPointer(), context);

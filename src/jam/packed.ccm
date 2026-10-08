@@ -14,7 +14,7 @@ import native.isa;
 
 export namespace jam::detail {
 struct heap_block {
-  std::uint32_t live = 0; // Exact claims; retained alignment cells are derived.
+  std::uint32_t live = 0; // Claims, plus hosted pin padding after exact liveness is saved.
   std::uint32_t destination = 0;
   std::uint64_t pointers = 0;
 };

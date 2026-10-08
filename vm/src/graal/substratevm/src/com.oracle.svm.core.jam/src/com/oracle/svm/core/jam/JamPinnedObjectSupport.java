@@ -5,46 +5,97 @@ package com.oracle.svm.core.jam;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
-
 import org.graalvm.nativeimage.PinnedObject;
+import org.graalvm.word.Pointer;
+import org.graalvm.word.PointerBase;
 import org.graalvm.word.impl.Word;
+import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.heap.AbstractPinnedObjectSupport;
-import com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.AtomicInteger;
+import com.oracle.svm.core.heap.ObjectHeader;
+import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.VMError;
 
-/** Pins expose old storage; collection never rotates that storage until every pin closes. */
+/** Graal owns the Java root; Jam owns its stable physical-page alias. */
 @SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class)
 final class JamPinnedObjectSupport extends AbstractPinnedObjectSupport {
-    private final AtomicInteger count = new AtomicInteger(0);
-
     @Override
     public PinnedObject create(Object object) {
-        if (needsPromotion(object)) {
-            JamGC.get().promoteForPin();
+        Alias result = new Alias((PinnedObjectImpl) super.create(object));
+        result.acquire();
+        return result;
+    }
+
+    @Override
+    @Uninterruptible(reason = "Alias.acquire registers the side mapping before exposing its address.", callerMustBe = true)
+    protected void pinObject(Object object) { }
+
+    @Override
+    @Uninterruptible(reason = "Alias.close releases the side mapping under the heap lock.", callerMustBe = true)
+    protected void unpinObject(Object object) { }
+
+    private static final class Alias implements PinnedObject {
+        private final PinnedObjectImpl root;
+        private Pointer registration = Word.nullPointer();
+        private Pointer address = Word.nullPointer();
+        private boolean open = true;
+
+        Alias(PinnedObjectImpl root) { this.root = root; }
+
+        @Uninterruptible(reason = "Register the current object without an intervening safepoint.")
+        void acquire() {
+            Object object = root.getObject();
+            if (!needsPinning(object)) {
+                address = Word.objectToUntrackedPointer(object);
+                return;
+            }
+            JamHeap heap = JamHeap.get();
+            heap.lock().lockNoTransition();
+            try {
+                registration = JamNative.pinObject(heap.nativeHeap(), heap.encode(object),
+                                LayoutEncoding.getSizeFromObjectInGC(object).unsignedShiftRight(3));
+                address = JamNative.pinAddress(registration);
+            } finally { heap.lock().unlock(); }
         }
-        // The tracked local remains valid across promotion and allocation of the pin wrapper.
-        return super.create(object);
-    }
 
-    @Uninterruptible(reason = "Classify the tracked referent before a possible promotion safepoint.")
-    private boolean needsPromotion(Object object) {
-        return needsPinning(object) && JamHeap.get().isYoung(Word.objectToUntrackedPointer(object));
-    }
+        @Override
+        @Uninterruptible(reason = Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        public Object getObject() {
+            VMError.guarantee(open, "Closed Jam pin");
+            return root.getObject();
+        }
 
-    @Override
-    @Uninterruptible(reason = "Publish the pin and its old-generation count atomically with respect to GC.", callerMustBe = true)
-    protected void pinObject(Object object) {
-        VMError.guarantee(!JamHeap.get().isYoung(Word.objectToUntrackedPointer(object)), "A pin must be promoted before its address is exposed");
-        VMError.guarantee(count.incrementAndGet() > 0, "Jam pin count overflow");
-    }
+        @Override
+        @Uninterruptible(reason = "Release the alias and its Java root together outside GC.")
+        public void close() {
+            VMError.guarantee(open, "Closed Jam pin");
+            JamHeap heap = JamHeap.get();
+            heap.lock().lockNoTransition();
+            try {
+                if (registration.isNonNull()) JamNative.unpin(heap.nativeHeap(), registration);
+                registration = Word.nullPointer();
+                address = Word.nullPointer();
+                root.close();
+                open = false;
+            } finally { heap.lock().unlock(); }
+        }
 
-    @Override
-    @Uninterruptible(reason = "Release pin ownership without an intervening GC.", callerMustBe = true)
-    protected void unpinObject(Object object) {
-        VMError.guarantee(count.decrementAndGet() >= 0, "Jam pin count underflow");
-    }
+        @Override
+        public Pointer addressOfObject() {
+            if (!SubstrateOptions.PinnedObjectAddressing.getValue()) {
+                throw new UnsupportedOperationException("Pinned object addressing has been disabled.");
+            }
+            VMError.guarantee(open, "Closed Jam pin");
+            return address;
+        }
 
-    @Uninterruptible(reason = Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    boolean hasPins() { return count.get() != 0; }
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T extends PointerBase> T addressOfArrayElement(int index) {
+            Object object = getObject();
+            if (object == null) throw new NullPointerException("PinnedObject is missing a referent");
+            return (T) addressOfObject().add(LayoutEncoding.getArrayElementOffset(
+                            ObjectHeader.readDynamicHubFromObject(object).getLayoutEncoding(), index));
+        }
+    }
 }
