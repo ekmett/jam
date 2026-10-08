@@ -7,7 +7,7 @@ module;
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
-#include <native/attributes.h>
+#include <hint.h>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
@@ -50,7 +50,7 @@ struct heap_mapping::backing {
 };
 #endif
 
-native_cold native_noreturn
+hint_cold hint_noreturn
 void heap_failure(char const * operation, int code) noexcept {
   std::fprintf(stderr, "jam: %s (%d)\n", operation, code);
   std::abort();

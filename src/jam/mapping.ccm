@@ -4,7 +4,7 @@
 /// \file
 /// \brief Virtual reservations and coherent circular heap mappings.
 module;
-#include <native/attributes.h>
+#include <hint.h>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -13,7 +13,7 @@ module;
 export module jam.mapping;
 
 export namespace jam::detail {
-native_cold native_noreturn
+hint_cold hint_noreturn
 void heap_failure(char const * operation, int code = 0) noexcept;
 
 // One reservation gives both generations stable, ordered address ranges. Only
@@ -79,9 +79,9 @@ public:
   /// \brief Release both virtual views.
   ~heap_mapping() noexcept;
   /// \brief The first of the two adjacent views.
-  native_inline native_pure std::byte * data() const noexcept { return address; }
+  hint_inline hint_pure std::byte * data() const noexcept { return address; }
   /// \brief Capacity of one view, in bytes.
-  native_inline native_pure std::size_t bytes() const noexcept { return capacity; }
+  hint_inline hint_pure std::size_t bytes() const noexcept { return capacity; }
   /// \brief Native OS page size, also the mapping granularity.
   static std::size_t page_size() noexcept;
   /// \brief Publish a logical arc into a caller-owned, page-aligned reservation.

@@ -94,7 +94,7 @@ set(NATIVE_BUILD_DOCS OFF CACHE BOOL "Build native dependency documentation")
 set(NATIVE_ENABLE_EXCEPTIONS ON CACHE BOOL "Enable native exceptions" FORCE)
 FetchContent_Declare(jam_native
   GIT_REPOSITORY https://github.com/ekmett/native.git
-  GIT_TAG 4f5f6533417b2951b063581a3252c63de0024102)
+  GIT_TAG 385b740751005952434d10e4ee1c1d3fd1f4766b)
 FetchContent_MakeAvailable(jam_native)
 
 find_package(Threads REQUIRED)
@@ -114,7 +114,7 @@ set(jam_implementations
 target_sources(jam PUBLIC FILE_SET modules TYPE CXX_MODULES
   BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src" FILES ${jam_interfaces})
 target_sources(jam PRIVATE ${jam_implementations})
-target_link_libraries(jam PUBLIC Threads::Threads native::native)
+target_link_libraries(jam PUBLIC Threads::Threads native::native hint::hint)
 target_compile_definitions(jam PUBLIC JAM_PAGE_BYTES=${JAM_PAGE_BYTES})
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   block()
@@ -208,9 +208,9 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_MACRO_EXPANSION YES)
   set(DOXYGEN_EXPAND_ONLY_PREDEF YES)
   set(DOXYGEN_PREDEFINED
-    "JAM_DOXYGEN=1" "native_const="
-    "native_pure=" "native_inline=inline" "native_cold=" "native_noreturn="
-    "native_lifetimebound=" "native_diagnose_if(condition,message)=")
+    "JAM_DOXYGEN=1" "hint_const="
+    "hint_pure=" "hint_inline=inline" "hint_cold=" "hint_noreturn="
+    "hint_lifetimebound=" "hint_diagnose_if(condition,message)=")
   set(DOXYGEN_EXCLUDE_SYMBOLS "jam::detail" "jam::detail::*")
   set(DOXYGEN_MARKDOWN_ID_STYLE GITHUB)
   set(DOXYGEN_STRIP_FROM_PATH "${CMAKE_CURRENT_SOURCE_DIR}")

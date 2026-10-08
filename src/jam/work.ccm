@@ -6,7 +6,7 @@
 
 module;
 
-#include <native/attributes.h>
+#include <hint.h>
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -198,7 +198,7 @@ public:
   frontier(frontier const &) = delete;
   frontier & operator=(frontier const &) = delete;
 
-  native_inline void push(std::size_t worker, Item value) noexcept {
+  hint_inline void push(std::size_t worker, Item value) noexcept {
     locals[worker].pending.push_back(value);
   }
 

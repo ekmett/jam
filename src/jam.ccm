@@ -4,7 +4,7 @@
 /// \file
 /// \brief A compacting generational heap with four-byte pointers and tracing roots.
 module;
-#include <native/attributes.h>
+#include <hint.h>
 #include <array>
 #include <cstddef>
 #include <span>
@@ -18,48 +18,48 @@ namespace jam {
 /// \brief Register a weak key/value pair and managed finalizer in the current heap.
 /// The captureless runner receives a nullable F* and obeys normal borrow rules; no destructor is invoked.
 export template<traceable K, traceable V, traceable F>
-[[nodiscard]] native_inline weak<V> mk_weak(ptr<K> const & key, ptr<V> const & value,
+[[nodiscard]] hint_inline weak<V> mk_weak(ptr<K> const & key, ptr<V> const & value,
     ptr<F> const & finalizer, std::type_identity_t<void (*)(F *) noexcept> runner) noexcept {
   return heap::current()->mk_weak(key, value, finalizer, runner);
 }
 
 /// \brief Allocate a record in the current heap; register a root before collection.
 export template<traceable T, class... Args>
-[[nodiscard]] native_inline ptr<T> mk(Args &&... args) noexcept {
+[[nodiscard]] hint_inline ptr<T> mk(Args &&... args) noexcept {
   return heap::current()->mk<T>(std::forward<Args>(args)...);
 }
 
 /// \brief Bulk-copy pointer bits without registration; the caller owns the barrier.
 export template<class T, std::size_t N>
-native_inline constexpr void unsafe_assign(std::array<ptr<T>, N> & target, std::array<ptr<T>, N> const & source) noexcept {
+hint_inline constexpr void unsafe_assign(std::array<ptr<T>, N> & target, std::array<ptr<T>, N> const & source) noexcept {
   for (std::size_t i = 0; i != N; ++i) target[i].unsafe_assign(source[i]);
 }
 /// \brief Copy an array and register young lanes with one old-range check.
 export template<class T, std::size_t N>
-native_inline constexpr void assign(std::array<ptr<T>, N> & target, std::array<ptr<T>, N> const & source) noexcept {
+hint_inline constexpr void assign(std::array<ptr<T>, N> & target, std::array<ptr<T>, N> const & source) noexcept {
   unsafe_assign(target, source);
   if !consteval { if (auto * h = heap::current()) h->remember(std::span<ptr<T>>{target}); }
 }
 
 /// \brief Bulk-copy weak pointer bits without registration; caller owns the barriers.
 export template<class T, std::size_t N>
-native_inline constexpr void unsafe_assign(std::array<weak_ptr<T>, N> & target,
+hint_inline constexpr void unsafe_assign(std::array<weak_ptr<T>, N> & target,
                                           std::array<weak_ptr<T>, N> const & source) noexcept {
   for (std::size_t i = 0; i != N; ++i) target[i].unsafe_assign(source[i]);
 }
 /// \brief Copy weak fields and update remembered entries with one old-range check.
 export template<class T, std::size_t N>
-native_inline constexpr void assign(std::array<weak_ptr<T>, N> & target,
+hint_inline constexpr void assign(std::array<weak_ptr<T>, N> & target,
                                    std::array<weak_ptr<T>, N> const & source) noexcept {
   unsafe_assign(target, source);
   if !consteval { if (auto * h = heap::current()) h->remember(std::span<weak_ptr<T>>{target}); }
 }
 
 /// \brief Collect the current heap; only registered roots remain meaningful outside it.
-export native_inline void collect() noexcept { heap::current()->collect(); }
+export hint_inline void collect() noexcept { heap::current()->collect(); }
 /// \brief Collect both generations of the current heap; reset its collection countdown.
-export native_inline void collect_major() noexcept { heap::current()->collect_major(); }
+export hint_inline void collect_major() noexcept { heap::current()->collect_major(); }
 /// \brief Collect the current heap's young generation; optionally promote survivors.
-export native_inline void collect_minor(bool promote = false) noexcept { heap::current()->collect_minor(promote); }
+export hint_inline void collect_minor(bool promote = false) noexcept { heap::current()->collect_minor(promote); }
 
 }

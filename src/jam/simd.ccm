@@ -4,7 +4,7 @@
 /// \file
 /// \brief SIMD compressed pointers and heap-relative gathers.
 module;
-#include <native/attributes.h>
+#include <hint.h>
 #include <native/targets.h>
 #include <array>
 #include <cassert>
@@ -39,32 +39,32 @@ struct alignas(Raw) ptr_storage {
 protected:
   std::array<value_type, lanes> values_{};
 public:
-  [[nodiscard]] native_inline constexpr value_type const & operator[](std::size_t i) const noexcept { return values_[i]; }
-  [[nodiscard]] native_inline constexpr value_type & operator[](std::size_t i) noexcept { return values_[i]; }
+  [[nodiscard]] hint_inline constexpr value_type const & operator[](std::size_t i) const noexcept { return values_[i]; }
+  [[nodiscard]] hint_inline constexpr value_type & operator[](std::size_t i) noexcept { return values_[i]; }
   /** \brief Initialize every lane to null. */
   constexpr ptr_storage() noexcept = default;
-  native_inline constexpr ptr_storage(ptr_storage const & other) noexcept { assign(other); }
-  native_inline constexpr ptr_storage & operator=(ptr_storage const & other) noexcept { assign(other); return *this; }
-  native_inline constexpr void unsafe_assign(ptr_storage const & other) noexcept {
+  hint_inline constexpr ptr_storage(ptr_storage const & other) noexcept { assign(other); }
+  hint_inline constexpr ptr_storage & operator=(ptr_storage const & other) noexcept { assign(other); return *this; }
+  hint_inline constexpr void unsafe_assign(ptr_storage const & other) noexcept {
     for (std::size_t i = 0; i != lanes; ++i) values_[i].unsafe_assign(other.values_[i]);
   }
-  native_inline constexpr void remember() noexcept {
+  hint_inline constexpr void remember() noexcept {
     if !consteval { if (auto * h = heap::current()) h->remember(std::span<value_type>{values_}); }
   }
-  native_inline constexpr void assign(ptr_storage const & other) noexcept { unsafe_assign(other); remember(); }
+  hint_inline constexpr void assign(ptr_storage const & other) noexcept { unsafe_assign(other); remember(); }
   /** \brief Broadcast one pointer, including nullptr. */
-  native_inline constexpr ptr_storage(value_type const & value) noexcept {
+  hint_inline constexpr ptr_storage(value_type const & value) noexcept {
     for (auto & lane : values_) lane.unsafe_assign(value);
     remember();
   }
   /** \brief Copy pointer lanes in array order. */
-  native_inline constexpr explicit ptr_storage(std::array<value_type, lanes> const & values) noexcept
+  hint_inline constexpr explicit ptr_storage(std::array<value_type, lanes> const & values) noexcept
   {
     for (std::size_t i = 0; i != lanes; ++i) values_[i].unsafe_assign(values[i]);
     remember();
   }
   /** \brief Adopt the raw compressed offsets without changing their bits. */
-  native_inline constexpr explicit ptr_storage(Raw const & raw) noexcept {
+  hint_inline constexpr explicit ptr_storage(Raw const & raw) noexcept {
     std::array<std::uint32_t, lanes> offsets;
     std::memcpy(offsets.data(), &raw, sizeof(offsets));
     for (std::size_t i = 0; i != lanes; ++i) values_[i].unsafe_assign(offsets[i]);
@@ -72,21 +72,21 @@ public:
   }
   /** \brief Load exactly lanes pointers; no physical padding is accessed. */
   template<std::size_t Alignment = 1>
-  [[nodiscard]] static native_inline constexpr Self load_memory(value_type const * p) noexcept {
+  [[nodiscard]] static hint_inline constexpr Self load_memory(value_type const * p) noexcept {
     std::array<value_type, lanes> values;
     for (std::size_t i = 0; i != lanes; ++i) values[i].unsafe_assign(p[i]);
     return Self{values};
   }
   /** \brief Store exactly lanes pointers; no physical padding is accessed. */
   template<std::size_t Alignment = 1>
-  native_inline constexpr void store_memory(value_type * p) const noexcept {
+  hint_inline constexpr void store_memory(value_type * p) const noexcept {
     for (std::size_t i = 0; i != lanes; ++i) p[i].unsafe_assign(values_[i]);
     if !consteval { if (auto * h = heap::current()) h->remember(std::span<value_type>{p, lanes}); }
   }
   /** \brief Load exactly lanes pointers. */
-  [[nodiscard]] static native_inline constexpr Self load(value_type const * p) noexcept { return load_memory(p); }
+  [[nodiscard]] static hint_inline constexpr Self load(value_type const * p) noexcept { return load_memory(p); }
   /** \brief Store exactly lanes pointers. */
-  native_inline constexpr void store(value_type * p) const noexcept { store_memory(p); }
+  hint_inline constexpr void store(value_type * p) const noexcept { store_memory(p); }
 };
 }
 #if defined(__x86_64__) || defined(_M_X64)
@@ -113,13 +113,13 @@ private: \
   using base::values_; \
 public: \
   /** \brief Project the raw unsigned cell-offset register. */ \
-  [[nodiscard]] native_inline constexpr Raw to_native() const noexcept { \
+  [[nodiscard]] hint_inline constexpr Raw to_native() const noexcept { \
     std::array<std::uint32_t, lanes> offsets; \
     for (std::size_t i = 0; i != lanes; ++i) offsets[i] = values_[i].get(); \
     return Raw::load(offsets.data()); \
   } \
   /** \brief Compare lanes within one heap, producing the architecture's mask. */ \
-  [[nodiscard]] friend native_inline constexpr mask_type operator==(Self const & a, Self const & b) noexcept { \
+  [[nodiscard]] friend hint_inline constexpr mask_type operator==(Self const & a, Self const & b) noexcept { \
     if constexpr (requires(Raw x) { x == x; }) return a.to_native() == b.to_native(); \
     else { \
       std::uint64_t bits = 0; \
@@ -128,7 +128,7 @@ public: \
     } \
   } \
   /** \brief Compare lanes within one heap, producing the architecture's mask. */ \
-  [[nodiscard]] friend native_inline constexpr mask_type operator!=(Self const & a, Self const & b) noexcept { \
+  [[nodiscard]] friend hint_inline constexpr mask_type operator!=(Self const & a, Self const & b) noexcept { \
     if constexpr (requires(Raw x) { x != x; }) return a.to_native() != b.to_native(); \
     else { \
       std::uint64_t bits = 0; \
@@ -137,7 +137,7 @@ public: \
     } \
   } \
   /** \brief Select the nonnull lanes without extracting a scalar bitmask. */ \
-  [[nodiscard]] friend native_inline constexpr mask_type operator!=(Self const & a, std::nullptr_t) noexcept { \
+  [[nodiscard]] friend hint_inline constexpr mask_type operator!=(Self const & a, std::nullptr_t) noexcept { \
     if constexpr (requires(Raw x) { x != x; }) return a.to_native() != Raw{std::uint32_t{0}}; \
     else { \
       std::uint64_t bits = 0; \
@@ -146,7 +146,7 @@ public: \
     } \
   } \
   /** \brief Select the null lanes without extracting a scalar bitmask. */ \
-  [[nodiscard]] friend native_inline constexpr mask_type operator==(Self const & a, std::nullptr_t) noexcept { \
+  [[nodiscard]] friend hint_inline constexpr mask_type operator==(Self const & a, std::nullptr_t) noexcept { \
     if constexpr (requires(Raw x) { x == x; }) return a.to_native() == Raw{std::uint32_t{0}}; \
     else { \
       std::uint64_t bits = 0; \
@@ -162,21 +162,21 @@ NATIVE_TARGET_VARIANTS(pointer, JAM_PTR_SIMD, JAM_PTR_TARGETS)
 export namespace jam {
 /// \brief Copy SIMD pointer bits without registering old-to-young slots.
 template<class T, std::size_t N, native::isa<> A>
-native_inline void unsafe_assign(native::simd<ptr<T>, N, A> & target,
+hint_inline void unsafe_assign(native::simd<ptr<T>, N, A> & target,
                                 native::simd<ptr<T>, N, A> const & source) noexcept { target.unsafe_assign(source); }
 /// \brief Bulk-copy a register and register its old-to-young slots.
 template<class T, std::size_t N, native::isa<> A>
-native_inline void assign(native::simd<ptr<T>, N, A> & target,
+hint_inline void assign(native::simd<ptr<T>, N, A> & target,
                          native::simd<ptr<T>, N, A> const & source) noexcept { target.assign(source); }
 /// \brief Copy a pointer register pack without registration; caller owns its barriers.
 template<class T, std::size_t N, native::isa<> A, std::size_t K>
-native_inline void unsafe_assign(native::wide<native::simd<ptr<T>, N, A>, K> & target,
+hint_inline void unsafe_assign(native::wide<native::simd<ptr<T>, N, A>, K> & target,
                                 native::wide<native::simd<ptr<T>, N, A>, K> const & source) noexcept {
   for (std::size_t i = 0; i != K; ++i) target.registers[i].unsafe_assign(source.registers[i]);
 }
 /// \brief Copy a pointer register pack with one bulk barrier per register.
 template<class T, std::size_t N, native::isa<> A, std::size_t K>
-native_inline void assign(native::wide<native::simd<ptr<T>, N, A>, K> & target,
+hint_inline void assign(native::wide<native::simd<ptr<T>, N, A>, K> & target,
                          native::wide<native::simd<ptr<T>, N, A>, K> const & source) noexcept {
   for (std::size_t i = 0; i != K; ++i) target.registers[i].assign(source.registers[i]);
 }
@@ -185,7 +185,7 @@ native_inline void assign(native::wide<native::simd<ptr<T>, N, A>, K> & target,
 template<class T, std::size_t N, native::isa<> A>
 struct tracer<native::simd<ptr<T>, N, A>> : detail::structural_tracer {
   template<class Visitor>
-  static native_inline constexpr void trace(Visitor & visit, native::simd<ptr<T>, N, A> const & value)
+  static hint_inline constexpr void trace(Visitor & visit, native::simd<ptr<T>, N, A> const & value)
       noexcept requires detail::visits<ptr<T>, Visitor> {
     for (std::size_t i = 0; i != N; ++i) detail::trace_parts(visit, value[i]);
   }
@@ -194,7 +194,7 @@ struct tracer<native::simd<ptr<T>, N, A>> : detail::structural_tracer {
 template<class V, std::size_t K>
 struct tracer<native::wide<V, K>> : detail::structural_tracer {
   template<class Visitor>
-  static native_inline constexpr void trace(Visitor & visit, native::wide<V, K> const & value)
+  static hint_inline constexpr void trace(Visitor & visit, native::wide<V, K> const & value)
       noexcept requires detail::visits<V, Visitor> {
     for (auto const & part : value.registers) detail::trace_parts(visit, part);
   }
@@ -217,7 +217,7 @@ concept gather_shape = !std::is_const_v<U> && !std::is_volatile_v<U> &&
 // or extracting a vector mask just to find a sample object. Extended MS member
 // pointer representations are deliberately rejected instead of guessed.
 template<class T, class U>
-native_inline native_const std::ptrdiff_t member_displacement(U T::* member) noexcept {
+hint_inline hint_const std::ptrdiff_t member_displacement(U T::* member) noexcept {
   assert(member != nullptr);
 #if defined(_WIN32)
   static_assert(sizeof(member) == sizeof(std::int32_t), "gather requires the flat MS data-member-pointer ABI");
@@ -274,7 +274,7 @@ template<class T, class U, class Owner, std::size_t N, native::isa<> A> \
 /** \brief Gather a member from selected nonnull pointers; inactive lanes are zero. */ \
 /** \pre Active pointers name live T records in the current heap. member is nonnull. */ \
 /** The result's native SIMD shape must exist. Stack pointer vectors expire at GC. */ \
-[[nodiscard]] native_inline auto gather(native::simd<ptr<T>, N, A> const & nodes, \
+[[nodiscard]] hint_inline auto gather(native::simd<ptr<T>, N, A> const & nodes, \
     U Owner::* selected, typename native::simd<ptr<T>, N, A>::mask_type active) noexcept { \
   U T::* member = selected; \
   using B = detail::gather_bits<U>; \
@@ -301,7 +301,7 @@ template<class T, class U, class Owner, std::size_t N, native::isa<> A> \
   requires detail::gather_shape<T, U, N, A> && std::convertible_to<U Owner::*, U T::*> && \
     (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
 /** \brief Gather a member from nonnull lanes, deriving the mask once. */ \
-[[nodiscard]] native_inline auto gather(native::simd<ptr<T>, N, A> const & nodes, \
+[[nodiscard]] hint_inline auto gather(native::simd<ptr<T>, N, A> const & nodes, \
     U Owner::* member) noexcept { \
   return gather(nodes, member, nodes != nullptr); \
 } \
@@ -310,7 +310,7 @@ template<class T, class U, class Owner, std::size_t N, native::isa<> A, std::siz
   requires detail::gather_shape<T, U, N, A> && std::convertible_to<U Owner::*, U T::*> && \
     (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
 /** \brief Gather each register with a supplied mask pack, preserving register order. */ \
-[[nodiscard]] native_inline auto gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes, \
+[[nodiscard]] hint_inline auto gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes, \
     U Owner::* member, native::wide<typename native::simd<ptr<T>, N, A>::mask_type, K> const & active) noexcept { \
   auto const & [...p] = nodes.registers; \
   auto const & [...m] = active.registers; \
@@ -321,7 +321,7 @@ template<class T, class U, class Owner, std::size_t N, native::isa<> A, std::siz
   requires detail::gather_shape<T, U, N, A> && std::convertible_to<U Owner::*, U T::*> && \
     (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
 /** \brief Compute all nonnull register masks, then gather the requested member. */ \
-[[nodiscard]] native_inline auto gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes, \
+[[nodiscard]] hint_inline auto gather(native::wide<native::simd<ptr<T>, N, A>, K> const & nodes, \
     U Owner::* member) noexcept { \
   using M = typename native::simd<ptr<T>, N, A>::mask_type; \
   auto const & [...p] = nodes.registers; \

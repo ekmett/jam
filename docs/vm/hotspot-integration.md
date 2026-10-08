@@ -168,7 +168,7 @@ Use east const, `noexcept`, snake-case names and concepts where a template has
 an actual requirement. Public operations need contracts: ownership, phase
 preconditions, lifetimes and the laws a caller can depend on.
 
-Native's attribute catalog is textual. Include `native/attributes.h` in the
+Hint's attribute catalog is textual. Include `hint.h` in the
 global module fragment when using it; macros do not travel through imports.
 Use its lifetime, visibility and target annotations where their contracts
 apply. ISA dispatch belongs at kernel granularity, with intrinsic wrappers in
