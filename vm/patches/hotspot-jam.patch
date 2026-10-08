@@ -55,7 +55,7 @@
  ifneq ($(call check-jvm-feature, zgc), true)
 --- a/src/hotspot/cpu/aarch64/gc/jam/jamBarrierSetAssembler_aarch64.cpp
 +++ b/src/hotspot/cpu/aarch64/gc/jam/jamBarrierSetAssembler_aarch64.cpp
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,57 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "asm/macroAssembler.inline.hpp"
 +#include "gc/jam/jamBarrierSet.hpp"
@@ -65,6 +65,14 @@
 +void JamBarrierSetAssembler::oop_store_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
 +                                         Address dst, Register val, Register tmp1, Register tmp2, Register tmp3) {
 +  if ((decorators & IN_HEAP) != 0) {
++    Label done;
++    if (tmp1 != noreg && tmp2 != noreg && tmp1 != tmp2 &&
++        tmp1 != val && tmp2 != val && !dst.uses(tmp1) && !dst.uses(tmp2)) {
++      __ lea(tmp1, dst);
++      __ mov(tmp2, (address)JamHeap::heap()->young_begin());
++      __ cmp(tmp1, tmp2);
++      __ br(Assembler::HS, done);
++    }
 +    __ push_call_clobbered_registers();
 +    __ lea(rscratch2, dst);
 +    __ stp(dst.base(), rscratch2, Address(Pre(sp, -2 * wordSize)));
@@ -72,16 +80,24 @@
 +    __ mov(c_rarg2, 1);
 +    __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), c_rarg0, c_rarg1, c_rarg2);
 +    __ pop_call_clobbered_registers();
++    __ bind(done);
 +  }
 +  BarrierSetAssembler::store_at(masm, decorators, type, dst, val, tmp1, tmp2, tmp3);
 +}
 +void JamBarrierSetAssembler::gen_write_ref_array_post_barrier(MacroAssembler* masm, DecoratorSet,
-+                                         Register start, Register count, Register, RegSet) {
++                                         Register start, Register count, Register tmp, RegSet) {
++  Label done;
++  if (tmp != noreg && tmp != start && tmp != count) {
++    __ mov(tmp, (address)JamHeap::heap()->young_begin());
++    __ cmp(start, tmp);
++    __ br(Assembler::HS, done);
++  }
 +  __ push_call_clobbered_registers();
 +  __ stp(start, count, Address(Pre(sp, -2 * wordSize)));
 +  __ ldp(c_rarg0, c_rarg1, Address(Post(sp, 2 * wordSize)));
 +  __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_array), c_rarg0, c_rarg1);
 +  __ pop_call_clobbered_registers();
++  __ bind(done);
 +}
 +
 +void JamBarrierSetAssembler::tlab_allocate(MacroAssembler* masm, Register obj,
@@ -99,7 +115,7 @@
 +}
 --- a/src/hotspot/cpu/x86/gc/jam/jamBarrierSetAssembler_x86.cpp
 +++ b/src/hotspot/cpu/x86/gc/jam/jamBarrierSetAssembler_x86.cpp
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,62 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "asm/macroAssembler.inline.hpp"
 +#include "gc/jam/jamBarrierSet.hpp"
@@ -109,6 +125,14 @@
 +void JamBarrierSetAssembler::oop_store_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
 +                                         Address dst, Register val, Register tmp1, Register tmp2, Register tmp3) {
 +  if ((decorators & IN_HEAP) != 0) {
++    Label done;
++    if (tmp1 != noreg && tmp2 != noreg && tmp1 != tmp2 &&
++        tmp1 != val && tmp2 != val && !dst.uses(tmp1) && !dst.uses(tmp2)) {
++      __ lea(tmp1, dst);
++      __ movptr(tmp2, (intptr_t)JamHeap::heap()->young_begin());
++      __ cmpptr(tmp1, tmp2);
++      __ jcc(Assembler::aboveEqual, done);
++    }
 +    // Register before the store: the leaf call cannot safepoint and never loads the slot.
 +    __ push_call_clobbered_registers();
 +    __ push(dst.base());
@@ -119,11 +143,18 @@
 +    __ movptr(c_rarg2, 1);
 +    __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), c_rarg0, c_rarg1, c_rarg2);
 +    __ pop_call_clobbered_registers();
++    __ bind(done);
 +  }
 +  BarrierSetAssembler::store_at(masm, decorators, type, dst, val, tmp1, tmp2, tmp3);
 +}
 +void JamBarrierSetAssembler::gen_write_ref_array_post_barrier(MacroAssembler* masm, DecoratorSet,
-+                                         Register start, Register count, Register) {
++                                         Register start, Register count, Register tmp) {
++  Label done;
++  if (tmp != noreg && tmp != start && tmp != count) {
++    __ movptr(tmp, (intptr_t)JamHeap::heap()->young_begin());
++    __ cmpptr(start, tmp);
++    __ jcc(Assembler::aboveEqual, done);
++  }
 +  __ push_call_clobbered_registers();
 +  __ push(start);
 +  __ push(count);
@@ -131,6 +162,7 @@
 +  __ pop(c_rarg0);
 +  __ call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_array), c_rarg0, c_rarg1);
 +  __ pop_call_clobbered_registers();
++  __ bind(done);
 +}
 +
 +void JamBarrierSetAssembler::tlab_allocate(MacroAssembler* masm, Register obj,
@@ -289,11 +321,54 @@
    FUNCTION_CASE(entry, SharedRuntime::OSR_migration_end);
 --- a/src/hotspot/share/gc/jam/c1/jamBarrierSetC1.cpp
 +++ b/src/hotspot/share/gc/jam/c1/jamBarrierSetC1.cpp
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,78 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "gc/jam/c1/jamBarrierSetC1.hpp"
 +#include "gc/jam/jamBarrierSet.hpp"
++#include "gc/jam/jamHeap.hpp"
 +#include "c1/c1_LIRGenerator.hpp"
++#include "c1/c1_LIRAssembler.hpp"
++#include "c1/c1_MacroAssembler.hpp"
++#include "c1/c1_CodeStubs.hpp"
++#include "asm/macroAssembler.inline.hpp"
++class JamPostBarrierStub : public CodeStub {
++  LIR_Opr _owner;
++  LIR_Opr _slot;
++public:
++  JamPostBarrierStub(LIR_Opr owner, LIR_Opr slot) : _owner(owner), _slot(slot) {}
++  void visit(LIR_OpVisitState* visitor) override {
++    visitor->do_slow_case();
++    visitor->do_input(_owner);
++    visitor->do_input(_slot);
++  }
++  void emit_code(LIR_Assembler* ce) override {
++    MacroAssembler* masm = ce->masm();
++    masm->bind(*entry());
++    masm->push_call_clobbered_registers();
++#ifdef AARCH64
++    masm->stp(_owner->as_register(), _slot->as_pointer_register(), Address(Pre(sp, -2 * wordSize)));
++    masm->ldp(c_rarg0, c_rarg1, Address(Post(sp, 2 * wordSize)));
++    masm->mov(c_rarg2, 1);
++#else
++    masm->push(_owner->as_register());
++    masm->push(_slot->as_pointer_register());
++    masm->pop(c_rarg1);
++    masm->pop(c_rarg0);
++    masm->movptr(c_rarg2, 1);
++#endif
++    masm->call_VM_leaf(CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), c_rarg0, c_rarg1, c_rarg2);
++    masm->pop_call_clobbered_registers();
++#ifdef AARCH64
++    masm->b(*continuation());
++#else
++    masm->jmp(*continuation());
++#endif
++  }
++#ifndef PRODUCT
++  void print_name(outputStream* out) const override { out->print("JamPostBarrierStub"); }
++#endif
++};
++
 +#ifdef ASSERT
 +#define __ gen->lir(__FILE__, __LINE__)->
 +#else
@@ -312,15 +387,18 @@
 +    __ leal(slot, pointer);
 +    slot = pointer;
 +  }
-+  BasicTypeArray* signature = new BasicTypeArray(3);
-+  signature->append(T_OBJECT);
-+  signature->append(T_ADDRESS);
-+  signature->append(T_LONG);
-+  LIR_OprList* args = new LIR_OprList(3);
-+  args->append(access.base().opr());
-+  args->append(slot);
-+  args->append(LIR_OprFact::longConst(1));
-+  gen->call_runtime(signature, args, CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), voidType, nullptr);
++  LIR_Opr owner = access.base().opr();
++  if (!owner->is_register()) {
++    LIR_Opr reg = gen->new_register(T_OBJECT);
++    __ move(owner, reg);
++    owner = reg;
++  }
++  LIR_Opr last_before_young = gen->new_pointer_register();
++  __ move(LIR_OprFact::intptrConst((intptr_t)JamHeap::heap()->young_begin() - 1), last_before_young);
++  CodeStub* slow = new JamPostBarrierStub(owner, slot);
++  __ cmp(lir_cond_belowEqual, slot, last_before_young);
++  __ branch(lir_cond_belowEqual, slow);
++  __ branch_destination(slow->continuation());
 +}
 --- a/src/hotspot/share/gc/jam/c1/jamBarrierSetC1.hpp
 +++ b/src/hotspot/share/gc/jam/c1/jamBarrierSetC1.hpp
@@ -335,13 +413,14 @@
 +};
 --- a/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.cpp
 +++ b/src/hotspot/share/gc/jam/c2/jamBarrierSetC2.cpp
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,84 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "gc/jam/c2/jamBarrierSetC2.hpp"
 +#include "gc/jam/jamBarrierSet.hpp"
 +#include "opto/graphKit.hpp"
 +#include "opto/runtime.hpp"
 +#include "opto/macro.hpp"
++#include "opto/castnode.hpp"
 +#include "gc/jam/jamHeap.hpp"
 +Node* JamBarrierSetC2::store_at_resolved(C2Access& access, C2AccessValue& val) const {
 +  Node* store = BarrierSetC2::store_at_resolved(access, val);
@@ -352,6 +431,15 @@
 +  return store;
 +}
 +void JamBarrierSetC2::post_barrier(GraphKit* kit, Node* obj, Node* adr, Node*, bool) const {
++  Node* young = kit->longcon((jlong)JamHeap::heap()->young_begin());
++  Node* slot = kit->gvn().transform(new CastP2XNode(kit->control(), adr));
++  Node* cmp = kit->gvn().transform(new CmpULNode(slot, young));
++  Node* below_young = kit->gvn().transform(new BoolNode(cmp, BoolTest::lt));
++  Node* memory = kit->reset_memory();
++  kit->set_all_memory(memory);
++  IfNode* branch = kit->create_and_map_if(kit->control(), below_young, PROB_UNLIKELY(0.9), COUNT_UNKNOWN);
++  Node* skip = kit->gvn().transform(new IfFalseNode(branch));
++  kit->set_control(kit->gvn().transform(new IfTrueNode(branch)));
 +  const Type** fields = TypeTuple::fields(4);
 +  fields[TypeFunc::Parms] = TypeInstPtr::BOTTOM;
 +  fields[TypeFunc::Parms + 1] = TypeRawPtr::BOTTOM;
@@ -361,6 +449,14 @@
 +  kit->make_runtime_call(GraphKit::RC_LEAF, type,
 +      CAST_FROM_FN_PTR(address, JamBarrierSet::record_narrow), "jam_remember", TypePtr::BOTTOM,
 +      obj, adr, kit->longcon(1), kit->top());
++  RegionNode* region = new RegionNode(3);
++  region->init_req(1, skip);
++  region->init_req(2, kit->control());
++  PhiNode* merged = new PhiNode(region, Type::MEMORY, TypePtr::BOTTOM);
++  merged->init_req(1, memory);
++  merged->init_req(2, kit->reset_memory());
++  kit->set_control(kit->gvn().transform(region));
++  kit->set_all_memory(kit->gvn().transform(merged));
 +}
 +
 +void JamBarrierSetC2::clone_at_expansion(PhaseMacroExpand* phase, ArrayCopyNode* ac) const {
@@ -1623,7 +1719,7 @@
 +}
 --- a/src/hotspot/share/gc/jam/jamHeap.hpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.hpp
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,175 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -1724,6 +1820,10 @@
 +  }
 +
 +  bool is_in_young(const void* p) const { return _young_space->is_in(p); }
++  HeapWord* young_begin() const {
++    assert(_young_space->end() == reserved_region().end(), "Young space ends the reservation");
++    return _young_space->bottom();
++  }
 +  // Fresh young TLAB chunks need no barrier; old chunks can acquire young oops.
 +  bool requires_barriers(stackChunkOop obj) const override { return !is_in_young(obj); }
 +

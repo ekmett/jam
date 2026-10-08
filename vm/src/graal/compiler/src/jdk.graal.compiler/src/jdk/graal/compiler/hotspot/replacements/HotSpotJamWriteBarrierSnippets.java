@@ -2,10 +2,16 @@
 // SPDX-License-Identifier: GPL-2.0-only WITH Classpath-exception-2.0
 package jdk.graal.compiler.hotspot.replacements;
 
+import static jdk.graal.compiler.hotspot.GraalHotSpotVMConfig.INJECTED_VMCONFIG;
 import static jdk.graal.compiler.hotspot.meta.HotSpotHostForeignCallsProvider.JAM_REMEMBER;
 import static jdk.graal.compiler.replacements.gc.WriteBarrierSnippets.getPointerToFirstArrayElement;
 import org.graalvm.word.LocationIdentity;
 import org.graalvm.word.WordBase;
+import org.graalvm.word.Pointer;
+import org.graalvm.word.impl.Word;
+import jdk.graal.compiler.api.replacements.Fold;
+import jdk.graal.compiler.api.replacements.Fold.InjectedParameter;
+import jdk.graal.compiler.hotspot.GraalHotSpotVMConfig;
 import jdk.graal.compiler.api.replacements.Snippet;
 import jdk.graal.compiler.api.replacements.Snippet.ConstantParameter;
 import jdk.graal.compiler.core.common.spi.ForeignCallDescriptor;
@@ -31,15 +37,26 @@ public final class HotSpotJamWriteBarrierSnippets implements Snippets {
     @NodeIntrinsic(ForeignCallNode.class)
     private static native void remember(@ConstantNodeParameter ForeignCallDescriptor descriptor, Object owner, WordBase first, long count);
 
+    @Fold
+    static long youngBoundary(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.narrowOopBase + (1L << 34);
+    }
+
     @Snippet
     public static void postWrite(Object owner, Address address) {
-        remember(JAM_REMEMBER, owner, WordCastNode.castToWord(address), 1);
+        Pointer slot = WordCastNode.castToWord(address);
+        if (slot.belowThan(Word.unsigned(youngBoundary(INJECTED_VMCONFIG)))) {
+            remember(JAM_REMEMBER, owner, slot, 1);
+        }
     }
 
     @Snippet
     public static void postRange(Object owner, Address address, long length, @ConstantParameter int stride) {
         if (length == 0) return;
-        remember(JAM_REMEMBER, owner, getPointerToFirstArrayElement(WordCastNode.castToWord(address), length, stride), length);
+        Pointer first = getPointerToFirstArrayElement(WordCastNode.castToWord(address), length, stride);
+        if (first.belowThan(Word.unsigned(youngBoundary(INJECTED_VMCONFIG)))) {
+            remember(JAM_REMEMBER, owner, first, length);
+        }
     }
 
     public static final class Templates extends AbstractTemplates {

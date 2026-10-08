@@ -79,7 +79,10 @@ final class JamBarrierSnippets extends SubstrateTemplates implements Snippets {
     @Snippet
     public static void postWrite(Object owner, Address address) {
         Object anchored = FixedValueAnchorNode.getObject(owner);
-        call(REMEMBER, anchored, WordCastNode.castToWord(address), 1, 4);
+        Pointer slot = WordCastNode.castToWord(address);
+        if (slot.belowThan(JamHeap.get().youngBegin())) {
+            call(REMEMBER, anchored, slot, 1, 4);
+        }
     }
 
     @Snippet
@@ -87,7 +90,9 @@ final class JamBarrierSnippets extends SubstrateTemplates implements Snippets {
         if (length == 0) return;
         Object anchored = FixedValueAnchorNode.getObject(owner);
         Pointer first = getPointerToFirstArrayElement(WordCastNode.castToWord(address), length, stride);
-        call(REMEMBER, anchored, first, length, stride < 0 ? -stride : stride);
+        if (first.belowThan(JamHeap.get().youngBegin())) {
+            call(REMEMBER, anchored, first, length, stride < 0 ? -stride : stride);
+        }
     }
 
     void registerLowerings(Map<Class<? extends Node>, NodeLoweringProvider<?>> lowerings) {

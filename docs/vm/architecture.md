@@ -118,8 +118,10 @@ minor_forward(old(i)) = old(i)
 
 Ordinary old roots are treated as live without traversing their objects.
 Write barriers record exact old source slots, their encoding, and the holder
-needed for Java reference policy. They do not read the concurrently mutable
-value. Array copies register their range with one registry lock; their slots
+needed for Java reference policy. Generated stores check the destination address
+before entering the registration helper; young destinations need no registration.
+The helper validates the old range for its other callers. Barriers do not read
+the concurrently mutable value. Array copies register their range with one registry lock; their slots
 are known strong references and need no holder. Instance fields retain the
 holder so a `Reference.referent` is never accidentally treated as a strong edge.
 
