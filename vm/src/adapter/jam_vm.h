@@ -5,7 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 /// \brief Export the opaque C ABI when building the collector, import it in VM clients.
-#if defined(_WIN32)
+#if defined(JAM_VM_STATIC)
+#define JAM_VM_API
+#elif defined(_WIN32)
 #if defined(JAM_VM_BUILD)
 #define JAM_VM_API __declspec(dllexport)
 #else

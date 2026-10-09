@@ -11,7 +11,7 @@ import shlex
 import shutil
 import subprocess
 from package_jdk import (check_elf_paths, check_loaded_libraries, load_commands,
-                         loader_environment, runtime_libraries, SYSTEM)
+                         loader_environment, runtime_libraries, elf_commands, SYSTEM)
 from pe_runtime import check_pe_paths
 from platform_paths import java_tool
 from runtime_probe import run as audit_runtime
@@ -31,10 +31,13 @@ for directory in (classes, scratch, evidence):
 environment = dict(os.environ, TMPDIR=str(scratch))
 windows = platform.system() == 'Windows'
 jar = home / 'lib/jam/jam-vm.jar'
+static_runtime = (home / 'lib/jam/native-image-libraries.txt').is_file()
 image_options = [java_tool(home, 'native-image'), '--gc=jam', '-ETMPDIR',
                  '-J-Djava.io.tmpdir=' + str(scratch),
                  '-J-Xmx' + os.environ.get('JAM_NATIVE_IMAGE_HEAP', '6g'),
                  '--parallelism=' + os.environ.get('JAM_JOBS', '3')]
+if platform.system() == 'Darwin':
+    image_options += ['-EMACOSX_DEPLOYMENT_TARGET=' + os.environ.get('MACOSX_DEPLOYMENT_TARGET', '15.5')]
 
 
 def run(label, command, timeout=300, expected=None, trace_libraries=False, reject=False):
@@ -92,26 +95,39 @@ run('image-build', [*image_options,
 def relocate(executable):
     # Windows loads adjacent DLLs; Unix images use their sibling runtime directory.
     bundle = executable.with_name(executable.name + '.jam')
-    for library in runtime_names:
+    if static_runtime:
+        if (bundle / 'linkage.txt').read_text() != 'static\n':
+            raise SystemExit('Native Image did not declare static Jam linkage')
+        if any(path.suffix in ('.dll', '.so', '.dylib') for path in bundle.rglob('*')):
+            raise SystemExit('Static Jam image unexpectedly copied runtime libraries')
+    deployed = tuple(name for name in runtime_names if not static_runtime or windows and name.casefold() != 'jam-vm.dll')
+    for library in deployed:
         if not ((executable.parent if windows else bundle) / library).is_file():
             raise SystemExit(f'Missing native-image runtime: {library}')
     relocated = work / 'relocated'
-    relocated.mkdir(exist_ok=True)
+    if relocated.exists():
+        shutil.rmtree(relocated)
+    relocated.mkdir()
     shutil.copy2(executable, relocated / executable.name)
-    shutil.copytree(bundle, relocated / bundle.name, dirs_exist_ok=True)
+    if not static_runtime:
+        shutil.copytree(bundle, relocated / bundle.name)
     if windows:
-        for library in runtime_names:
+        for library in deployed:
             shutil.copy2(executable.parent / library, relocated / library)
     result = relocated / executable.name
     libraries = relocated if windows else relocated / bundle.name
-    for binary in (result, *(libraries / name for name in runtime_names)):
+    for binary in (result, *(libraries / name for name in deployed)):
         if windows:
             check_pe_paths(binary, relocated)
             continue
         if platform.system() == 'Linux':
             check_elf_paths(binary, relocated)
+            if static_runtime and any(name.startswith(('libjam', 'libc++', 'libunwind')) for name in elf_commands(binary)[1]):
+                raise SystemExit('Static Jam image retains a collector/C++ runtime dependency')
             continue
         identity, dependencies, rpaths = load_commands(binary)
+        if static_runtime and any(Path(name).name.startswith(('libjam', 'libc++', 'libunwind')) for name in dependencies):
+            raise SystemExit('Static Jam image retains a collector/C++ runtime dependency')
         for path in (identity, *dependencies, *rpaths):
             if path and path.startswith('/') and not path.startswith(SYSTEM):
                 raise SystemExit(f'{binary.name} retains a build-time load path: {path}')
@@ -125,7 +141,18 @@ def run_executable(label, executable, arguments, expected):
     output = run(label, [executable, *(['-Djam.runtime.audit=true'] if windows else []), *arguments],
                  expected=expected, trace_libraries=True)
     bundle = executable.parent if windows else executable.with_name(executable.name + '.jam')
-    check_loaded_libraries(output, bundle, runtime_names)
+    if static_runtime:
+        if any(name in output for name in ('libjam-vm.', 'jam-vm.dll')):
+            raise SystemExit('Static Jam execution loaded a shared collector')
+        if windows:
+            for line in output.splitlines():
+                if line.startswith('jam-loaded-library: '):
+                    path = Path(line.removeprefix('jam-loaded-library: '))
+                    if path.name.casefold() in {name.casefold() for name in runtime_names}:
+                        if path.parent.resolve() != executable.parent.resolve():
+                            raise SystemExit(f'Unexpected Microsoft runtime path: {path}')
+    else:
+        check_loaded_libraries(output, bundle, runtime_names)
 
 
 executable = relocate(executable)

@@ -15,16 +15,25 @@ nursery capacity; the remainder belongs to old. The defaults are 128 MiB total
 and a nursery one quarter that size. These capacities remain fixed for the
 lifetime of an isolate.
 
-Keep `application` and its generated `application.jam/` directory together.
-That directory contains the collector and its C++ runtime. You can move the
-pair out of the build checkout; the executable does not need a JVM installation
-at runtime. Build and run on macOS arm64, Linux x86_64 or Windows x86_64. The
-executable and its libraries belong to the platform on which they were built.
+Jam links its collector into the executable. On macOS and Linux this includes
+its matching C++/ABI/unwind libraries; ordinary platform libraries remain
+dynamic. The executable does not need a JVM installation or Jam runtime
+sidecars on those platforms. On Windows, use `native-image.cmd`: Jam is linked
+into the executable, while the builder still places the matching Microsoft CRT
+DLLs beside it. Keep those DLLs with the executable; this does not switch
+Graal's Windows toolchain from `/MD` to `/MT`.
 
-On Windows, use `native-image.cmd`. Keep the generated DLLs beside the `.exe`,
-along with its `.jam/` directory of notices and runtime metadata. DLL lookup
-uses the executable's directory. Images sharing a directory must use the same
-Jam runtime; the builder refuses to replace a different DLL already there.
+The builder writes `application.jam/linkage.txt` containing `static` and copies
+license notices into `application.jam/legal/`. Those files describe the build
+and carry redistribution notices; the executable does not read them. Preserve
+the notices in your distribution, wherever it keeps third-party licenses.
+
+The supplier ships `lib/jam/native-image-libraries.txt`, listing archive names
+in dependency order, and the corresponding archives under `lib/jam/static/`.
+Native Image requires every listed archive and uses Graal's static-library
+linker path. JVM execution continues to use the separately packaged shared
+bridge and `runtime-libraries.txt`. Consumers of older packages without the
+static manifest must still retain their generated runtime sidecars.
 
 ## Weak associations
 

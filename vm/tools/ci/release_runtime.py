@@ -175,16 +175,20 @@ def main():
         installation, contents, release, requirements = inventory(target, root)
         if release.get('JAM_BUILD_FLAVOR') != flavor:
             raise ValueError(f'packaged VM flavor disagrees with artifact identity: {artifact["name"]}')
+        static_manifest = 'lib/jam/native-image-libraries.txt'
+        static_linkage = any(entry['path'] == static_manifest for entry in contents['files'])
         inventory_name = filename.removesuffix('.tar.gz') + '.files.json'
         (args.output / inventory_name).write_text(json.dumps(contents, indent=2) + '\n')
         manifest['packages'].append({'product': product, 'os': system, 'arch': arch,
             'tested_on': tested, 'requirements': requirements, 'build_flavor': flavor,
+            'native_image_linkage': ('static' if static_linkage else 'shared') if kind == 'graal' else None,
             'java_version': release.get('JAVA_VERSION'), 'graal_version': release.get('GRAALVM_VERSION') if kind == 'graal' else None,
             'archive': {'url': base + filename, 'type': 'tar.gz', 'sha256': sha256(target), 'bytes': target.stat().st_size},
             'installation': {**installation, 'root': root, 'inventory_url': base + inventory_name},
             'paths': {'java': 'bin/java.exe' if platform == 'windows' else 'bin/java',
                 'api_jar': 'lib/jam/jam-vm.jar', 'native_directory': 'bin' if platform == 'windows' else 'lib/jam',
                 'runtime_manifest': 'lib/jam/runtime-libraries.txt', 'legal': 'legal',
+                'native_image_manifest': static_manifest if static_linkage else None,
                 'sdk_jars': contents['sdk_jars']},
             'ci_artifact': {'id': artifact['id'], 'sha256': expected}})
         print(f'{platform} {product}: {target.stat().st_size} bytes, installation {installation["sha256"]}', flush=True)

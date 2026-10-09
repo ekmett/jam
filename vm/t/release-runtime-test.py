@@ -15,10 +15,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools/ci'))
 from release_runtime import inventory, require_run, qualified_artifacts, PLATFORMS
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from platform_paths import build_flavor, jdk_home, reported_flavor
+from package_jdk import static_libraries
 import build_graal
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_static_archive_closure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            build, runtime = root / 'build', root / 'runtime'
+            build.mkdir(); runtime.mkdir()
+            archives = [build / name for name in ('libjam-vm-static.a', 'libjam.a', 'libwork.a', 'libnative.a', 'libnative_minimal.a')]
+            runtimes = [runtime / name for name in ('libc++.a', 'libc++abi.a', 'libunwind.a')]
+            for archive in archives + runtimes:
+                archive.write_bytes(b'!<arch>\n')
+            manifest = build / 'jam-vm-static-libraries-Release.txt'
+            manifest.write_text('\n'.join(map(str, archives)) + '\n')
+            (build / 'jam-vm-static-libraries-Debug.txt').write_text('missing.a\n')
+            self.assertEqual(static_libraries(build, runtime, 'Linux'), archives + runtimes)
+            with self.assertRaises(SystemExit):
+                static_libraries(build, runtime, 'Linux', 'Debug')
+            # A missing runtime must fail packaging, not silently restore sidecars.
+            runtimes[-1].unlink()
+            with self.assertRaises(SystemExit):
+                static_libraries(build, runtime, 'Linux')
+            runtimes[-1].write_bytes(b'!<thin>\n')
+            with self.assertRaises(SystemExit):
+                static_libraries(build, runtime, 'Linux')
+            runtimes[-1].write_bytes(b'!<arch>\n')
+            manifest.write_text('\n'.join(map(str, archives + archives[:1])) + '\n')
+            with self.assertRaises(SystemExit):
+                static_libraries(build, runtime, 'Linux')
+
     def test_build_flavor_selection_and_report(self):
         for flavor in ('release', 'fastdebug'):
             with self.subTest(flavor=flavor), patch.dict('os.environ', {'JAM_BUILD_FLAVOR': flavor}):
