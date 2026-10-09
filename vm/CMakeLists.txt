@@ -68,7 +68,10 @@ foreach(target jam-vm jam-vm-static jam-vm-test jam-vm-static-test jam-generatio
       ARCHIVE_OUTPUT_DIRECTORY "$<1:${PROJECT_BINARY_DIR}>")
   endif()
 endforeach()
-configure_file("${jam_native_SOURCE_DIR}/LICENSE.md"
+find_file(jam_native_license LICENSE.md
+  HINTS "${jam_native_SOURCE_DIR}" "${native_DIR}/../../../share/native"
+  NO_DEFAULT_PATH REQUIRED)
+configure_file("${jam_native_license}"
   "${PROJECT_BINARY_DIR}/native-LICENSE.md" COPYONLY)
 
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)

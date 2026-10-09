@@ -4,10 +4,13 @@
 <!-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
 Jam requires Clang 23+, CMake 4.4+ and Ninja on macOS, Linux or Windows 10 1803+.
-CMake checks the C++26 features and platform page size. It fetches a pinned
-[native](https://github.com/ekmett/native) for SIMD and target dispatch.
+CMake checks the C++26 features and platform page size. It uses installed
+[native](https://github.com/ekmett/native) and [work](https://github.com/ekmett/work)
+packages when available, otherwise fetching their current `main` branches.
+Native supplies SIMD and target dispatch; an installed Native must include its
+host modules and have exceptions enabled.
 [Hint](https://github.com/ekmett/hint) supplies the textual `<hint.h>` attribute
-catalog through `hint::hint`; Native fetches a pinned Hint revision.
+catalog through `hint::hint`; Native supplies the dependency.
 [work](https://github.com/ekmett/work) supplies the shared worker pool and typed
 gigs through `work::work`.
 To use an existing checkout, set `FETCHCONTENT_SOURCE_DIR_JAM_NATIVE=/path/to/native`.
@@ -21,6 +24,28 @@ cmake --install build --prefix /path/to/jam
 
 Tests default on when building Jam as the top-level project. Exceptions are
 enabled; see [generation limits](generations.md) for failure behavior.
+
+## Docker
+
+The Linux x86-64 development image layers Jam and Work onto
+`ghcr.io/ekmett/native:latest`, with Clang 23, CMake 4.4 and Ninja already present.
+Jam and Work are installed in `/opt/jam`; Native and Hint are in `/opt/native`.
+`CMAKE_PREFIX_PATH` includes both, so the CMake consumer below works directly.
+The image contains the C++ library, not a JDK or GraalVM distribution.
+
+```sh
+docker run --rm -v "$PWD:/workspace" ghcr.io/ekmett/jam:latest \
+  cmake -S . -B build-docker -G Ninja -DCMAKE_BUILD_TYPE=Release
+```
+
+Build it locally with `docker build --pull -t jam .`. The separate Docker
+workflow pulls Native's current base and rebuilds the library stage each run,
+so Work follows `main` even when the toolchain layers are cached. It runs the
+native tests, then compiles and runs an independent installed-package consumer.
+Pull requests test the image; successful `main` builds publish it to
+[GHCR](https://github.com/ekmett/jam/pkgs/container/jam). Use the workflow's manual
+trigger to refresh dependencies between Jam changes. External toolchain and
+action locks remain independent of this in-house dependency policy.
 
 ## Windows
 
