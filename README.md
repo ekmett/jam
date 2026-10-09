@@ -3,7 +3,7 @@
 ![C++26](https://img.shields.io/badge/C%2B%2B-26-00599C?style=flat&logo=c%2B%2B&logoColor=white)
 ![Java25](https://img.shields.io/badge/Java-25-ED8B00?style=flat&logo=openjdk&logoColor=white)
 [![CMake](https://img.shields.io/github/actions/workflow/status/ekmett/jam/ci.yml?branch=main&style=flat&label=CMake&logo=cmake&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/ci.yml?query=branch%3Amain)
-[![docs: doxygen](https://img.shields.io/badge/docs-doxygen-blue?style=flat)](https://ekmett.github.io/jam/)
+[![docs: doxygen](https://img.shields.io/badge/docs-doxygen-blue?style=flat&logo=doxygen&logoColor=white)](https://ekmett.github.io/jam/)
 [![GitHub commit activity](https://img.shields.io/github/commit-activity/w/ekmett/jam?style=flat)](https://github.com/ekmett/jam/activity)
 [![GitHub issues](https://img.shields.io/github/issues/ekmett/jam?style=flat)](https://github.com/ekmett/jam/issues)
 ![Arm](https://img.shields.io/badge/arm-%230091BD.svg?style=flat&logo=arm&logoColor=white)
