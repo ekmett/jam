@@ -47,6 +47,51 @@ Pull requests test the image; successful `main` builds publish it to
 trigger to refresh dependencies between Jam changes. External toolchain and
 action locks remain independent of this in-house dependency policy.
 
+## Coverage and test analytics
+
+Ordinary CI builds remain uninstrumented. A separate coverage workflow runs on
+every `main` commit using the same reusable build workflow, adding Linux ARM64,
+Windows ARM64 and macOS ARM64 to the normal Linux x86-64 and Windows x86-64
+configurations. Windows x86-64 retains Debug and Release. Coverage also builds
+the VM C ABI adapter and its native tests; it does not build JDKs or GraalVM.
+
+For a local report, install grcov and LLVM's matching `llvm-profdata` and
+`llvm-cov` tools alongside Clang, then use a separate build directory:
+
+```sh
+cmake -S . -B build-coverage -G Ninja -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_BUILD_TYPE=Release -DJAM_BUILD_TESTS=ON -DJAM_ENABLE_COVERAGE=ON
+cmake --build build-coverage --parallel
+ctest --test-dir build-coverage --output-on-failure --output-junit tests.xml
+cmake --build build-coverage --target jam_coverage
+```
+
+The report target consumes the test profiles without rebuilding or rerunning
+tests. Module providers and consumers share one instrumented dependency build.
+Assembly/codegen consumers remain uninstrumented. Reports cover Jam's `src/`
+and, when enabled with `JAM_BUILD_VM=ON`, `vm/src/`; dependency sources are
+excluded. `build-coverage/coverage/report/coverage.info` preserves LLVM's
+canonical LCOV branch counts. grcov generates browsable HTML from that file;
+its derived branch metrics are not uploaded. On macOS, VM builds also need
+`JAM_VM_RUNTIME` to point to the matching C++ runtime library directory.
+
+CI retains reports and uploads coverage plus available CTest JUnit results to
+Codecov using GitHub OIDC. Test results are uploaded after failures as well.
+Codecov repository activation is required for the uploads to succeed.
+
+## Nix
+
+The separate Nix workflow checks Linux x86-64 and ARM64 packages, including an
+installed-package consumer. Native supplies LLVM 23 and the pinned external
+Nixpkgs toolchain; Native, Hint and Work follow `main` and are refreshed before
+each CI check. Native exceptions remain enabled.
+
+```sh
+nix flake update native native/hint work
+nix flake check --print-build-logs
+nix develop
+```
+
 ## Windows
 
 Use `clang-cl`, matching `clang-scan-deps`, and LLD from LLVM 23, in a Visual

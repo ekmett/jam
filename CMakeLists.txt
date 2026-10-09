@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(JAM_BUILD_TESTS "Build heap and tracing checks" ${PROJECT_IS_TOP_LEVEL})
 option(JAM_BUILD_BENCHMARKS "Build the compaction benchmark" OFF)
 option(JAM_BUILD_VM "Build the managed-runtime adapter and runtime targets" OFF)
+option(JAM_ENABLE_COVERAGE "Collect runtime test coverage with Clang and grcov" OFF)
 option(JAM_BUILD_DOCS "Build Doxygen documentation" OFF)
 option(JAM_CONTEXT_X28 "Reserve AArch64 x28 for the implicit heap instead of TLS" OFF)
 
@@ -85,6 +86,12 @@ if(NOT JAM_PAGE_BYTES)
 endif()
 if(NOT JAM_PAGE_BYTES MATCHES "^[1-9][0-9]*$")
   message(FATAL_ERROR "JAM_PAGE_BYTES must be a positive integer")
+endif()
+
+# Instrument module providers and consumers consistently in this configuration.
+# Directory flags do not become installed package usage requirements.
+if(JAM_ENABLE_COVERAGE)
+  include(etc/cmake/Coverage.cmake)
 endif()
 
 include(FetchContent)

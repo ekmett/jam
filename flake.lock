@@ -1,0 +1,85 @@
+{
+  "nodes": {
+    "hint": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791529930,
+        "narHash": "sha256-dzzbiDMUAc6TJCdM1LSTSYI3vv/GnPZ3DcnD07AcuwY=",
+        "ref": "main",
+        "rev": "b24b9da02325ea949db5b76f5a90302d9b1c5f83",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/ekmett/hint"
+      },
+      "original": {
+        "ref": "main",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/ekmett/hint"
+      }
+    },
+    "native": {
+      "inputs": {
+        "hint": "hint",
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1791548490,
+        "narHash": "sha256-XpLjzP/o6EzYUmbLsL2jbxvhfH5i6KGpP6evSyfrKps=",
+        "ref": "main",
+        "rev": "c4d0923625e31f028639e403b099df59467ac3de",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/ekmett/native"
+      },
+      "original": {
+        "ref": "main",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/ekmett/native"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1791456040,
+        "narHash": "sha256-H83yz/do+hjOO0uujHyH8RgtIQP2v7Mw+cLwcZK/xKc=",
+        "type": "tarball",
+        "url": "https://codeload.github.com/NixOS/nixpkgs/tar.gz/e7439b6b14ad3cc35d05608ebca9bce01a25f5f8"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://codeload.github.com/NixOS/nixpkgs/tar.gz/e7439b6b14ad3cc35d05608ebca9bce01a25f5f8"
+      }
+    },
+    "root": {
+      "inputs": {
+        "native": "native",
+        "nixpkgs": [
+          "native",
+          "nixpkgs"
+        ],
+        "work": "work"
+      }
+    },
+    "work": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791541337,
+        "narHash": "sha256-EIi2R/YR0Pdi+98Fg0sMhlTxqk3US646xiQ5LxeUYxA=",
+        "ref": "main",
+        "rev": "f948373e155fe3cf7e689f41039e44844fa5547a",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/ekmett/work"
+      },
+      "original": {
+        "ref": "main",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/ekmett/work"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
