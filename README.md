@@ -1,8 +1,11 @@
 # jam
 
 <!-- badges:start -->
-[![build + docs](https://img.shields.io/github/actions/workflow/status/ekmett/jam/ci.yml?branch=main&style=flat&label=build+%2B+docs&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/ci.yml?query=branch%3Amain)
-[![Docker](https://img.shields.io/github/actions/workflow/status/ekmett/jam/docker.yml?branch=main&style=flat&label=Docker&logo=docker&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/docker.yml)
+[![build](https://img.shields.io/github/actions/workflow/status/ekmett/jam/ci.yml?branch=main&style=flat&label=build&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/ci.yml?query=branch%3Amain)
+[![docs](https://img.shields.io/github/actions/workflow/status/ekmett/jam/ci.yml?branch=main&style=flat&label=docs&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/ci.yml?query=branch%3Amain)
+[![coverage](https://img.shields.io/github/actions/workflow/status/ekmett/jam/coverage.yml?branch=main&style=flat&label=coverage&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/coverage.yml?query=branch%3Amain)
+[![docker](https://img.shields.io/github/actions/workflow/status/ekmett/jam/docker.yml?branch=main&style=flat&label=docker&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/docker.yml?query=branch%3Amain)
+[![nix](https://img.shields.io/github/actions/workflow/status/ekmett/jam/nix.yml?branch=main&style=flat&label=nix&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/nix.yml?query=branch%3Amain)
 [![runtime build](https://img.shields.io/github/actions/workflow/status/ekmett/jam/vm.yml?branch=main&style=flat&label=runtime+build&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/vm.yml?query=branch%3Amain)
 [![issues](https://img.shields.io/github/issues/ekmett/jam?style=flat&label=issues&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/jam/issues)
 [![commits](https://img.shields.io/github/commit-activity/w/ekmett/jam?style=flat&label=commits&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/jam/activity)
@@ -21,7 +24,9 @@
 [![license: BSD-2-Clause OR Apache-2.0](assets/badges/license.svg)](LICENSE.md)
 [![Contributor Covenant: 2.0](https://img.shields.io/static/v1?label=Contributor+Covenant&message=2.0&color=007ec6&style=flat&logo=contributorcovenant&logoColor=white)](CODE_OF_CONDUCT.md)
 
-[![docs: read](https://img.shields.io/static/v1?label=docs&message=read&color=007ec6&style=flat)](https://ekmett.github.io/jam/)
+[![docs: read](https://img.shields.io/static/v1?label=docs&message=read&color=007ec6&style=flat&logo=pandoc&logoColor=white)](https://ekmett.github.io/jam/)
+[![coverage: report](https://img.shields.io/static/v1?label=coverage&message=report&color=F01F7A&style=flat&logo=codecov&logoColor=white)](https://app.codecov.io/github/ekmett/jam)
+[![Nix: flake](https://img.shields.io/static/v1?label=Nix&message=flake&color=5277C3&style=flat&logo=nixos&logoColor=white)](https://github.com/ekmett/jam/blob/main/flake.nix)
 [![Docker: GHCR](https://img.shields.io/badge/Docker-GHCR-2496ED?style=flat&logo=docker&logoColor=white)](https://github.com/ekmett/jam/pkgs/container/jam)
 [![dist: downloads](https://img.shields.io/static/v1?label=dist&message=downloads&color=007ec6&style=flat)](https://github.com/ekmett/jam/releases)
 <!-- badges:end -->
