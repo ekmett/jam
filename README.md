@@ -11,7 +11,7 @@
 [![C++: 26](https://img.shields.io/static/v1?label=C%2B%2B&message=26&color=00599C&style=flat&logo=cplusplus&logoColor=white)](README.md)
 [![Clang: 23](https://img.shields.io/static/v1?label=Clang&message=23&color=6f42c1&style=flat&logo=llvm&logoColor=white)](README.md)
 [![Java: 25](https://img.shields.io/static/v1?label=Java&message=25&color=b66a13&style=flat&logo=openjdk&logoColor=white)](vm/README.md)
-[![GraalVM: 25.3.4.1](https://img.shields.io/static/v1?label=GraalVM&message=25.3.4.1&color=b66a13&style=flat&logo=openjdk&logoColor=white)](vm/config/source-pins.json)
+[![GraalVM: 25.3.4.1](assets/badges/graalvm-version.svg)](vm/config/source-pins.json)
 [![SubstrateVM: 25.3.4.1](https://img.shields.io/static/v1?label=SubstrateVM&message=25.3.4.1&color=b66a13&style=flat&logo=openjdk&logoColor=white)](docs/vm/build.md#graalvm)
 
 [![OS: Linux · macOS · Windows](https://img.shields.io/static/v1?label=OS&message=Linux+%C2%B7+macOS+%C2%B7+Windows&color=64748b&style=flat)](docs/building.md)
