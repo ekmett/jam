@@ -87,7 +87,8 @@ jobs:
           extra=()
           if [[ "$RUNNER_OS" == Windows ]]; then
             compiler=clang-cl
-            extra+=(-DCMAKE_LINKER_TYPE=LLD -DJAM_BUILD_BENCHMARKS=ON)
+            # The VM adapter enables C as well as C++; keep both MSVC drivers.
+            extra+=(-DCMAKE_C_COMPILER=clang-cl -DCMAKE_LINKER_TYPE=LLD -DJAM_BUILD_BENCHMARKS=ON)
           elif [[ "$RUNNER_OS" == macOS ]]; then
             extra+=(-DJAM_VM_RUNTIME="$(brew --prefix llvm@23)/lib/c++")
           fi
