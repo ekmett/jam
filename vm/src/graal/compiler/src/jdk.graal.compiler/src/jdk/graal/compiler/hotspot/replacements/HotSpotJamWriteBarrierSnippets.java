@@ -4,8 +4,8 @@ package jdk.graal.compiler.hotspot.replacements;
 
 import static jdk.graal.compiler.hotspot.GraalHotSpotVMConfig.INJECTED_VMCONFIG;
 import static jdk.graal.compiler.hotspot.meta.HotSpotHostForeignCallsProvider.JAM_REMEMBER;
+import static jdk.graal.compiler.hotspot.meta.HotSpotHostForeignCallsProvider.JAM_REMEMBERED_SLOTS_LOCATION;
 import static jdk.graal.compiler.replacements.gc.WriteBarrierSnippets.getPointerToFirstArrayElement;
-import org.graalvm.word.LocationIdentity;
 import org.graalvm.word.WordBase;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.impl.Word;
@@ -64,8 +64,8 @@ public final class HotSpotJamWriteBarrierSnippets implements Snippets {
         private final SnippetInfo range;
         public Templates(OptionValues options, HotSpotProviders providers) {
             super(options, providers);
-            scalar = snippet(providers, HotSpotJamWriteBarrierSnippets.class, "postWrite", LocationIdentity.any());
-            range = snippet(providers, HotSpotJamWriteBarrierSnippets.class, "postRange", LocationIdentity.any());
+            scalar = snippet(providers, HotSpotJamWriteBarrierSnippets.class, "postWrite", JAM_REMEMBERED_SLOTS_LOCATION);
+            range = snippet(providers, HotSpotJamWriteBarrierSnippets.class, "postRange", JAM_REMEMBERED_SLOTS_LOCATION);
         }
         public void lower(SerialWriteBarrierNode node, LoweringTool tool) {
             Arguments args = new Arguments(scalar, node.graph(), tool.getLoweringStage());

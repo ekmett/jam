@@ -1,8 +1,8 @@
 # jam-vm
 
-[![Build](https://github.com/ekmett/jam/actions/workflows/vm.yml/badge.svg?branch=main)](https://github.com/ekmett/jam/actions/workflows/vm.yml)
-![C++](https://img.shields.io/badge/C%2B%2B-00599C?style=flat&logo=c%2B%2B&logoColor=white)
-![Java](https://img.shields.io/badge/Java-ED8B00?style=flat&logo=openjdk&logoColor=white)
+![C++26](https://img.shields.io/badge/C%2B%2B-26-00599C?style=flat&logo=c%2B%2B&logoColor=white)
+![Java25](https://img.shields.io/badge/Java-25-ED8B00?style=flat&logo=openjdk&logoColor=white)
+[![CMake](https://img.shields.io/github/actions/workflow/status/ekmett/jam/vm.yml?branch=main&style=flat&label=CMake&logo=cmake&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/vm.yml?query=branch%3Amain)
 
 This directory adapts [jam](../README.md) to collect Java objects
 on HotSpot and Native Image, with both Java reference processing and GHC-style

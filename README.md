@@ -1,12 +1,35 @@
 # jam
 
-![C++](https://img.shields.io/badge/C%2B%2B-00599C?style=flat&logo=c%2B%2B&logoColor=white)
-![Java](https://img.shields.io/badge/Java-ED8B00?style=flat&logo=openjdk&logoColor=white)
-![Arm](https://img.shields.io/badge/arm-%230091BD.svg?style=flat&logo=arm&logoColor=white)
-![Intel](https://img.shields.io/badge/intel-%230068B5.svg?style=flat&logo=intel&logoColor=white)
-![AMD](https://img.shields.io/badge/amd-%23ED1C24.svg?style=flat&logo=amd&logoColor=white)
-[![Build](https://img.shields.io/github/actions/workflow/status/ekmett/jam/ci.yml?branch=main&style=flat&label=build)](https://github.com/ekmett/jam/actions/workflows/ci.yml)
-[![Documentation](https://img.shields.io/badge/docs-Doxygen-blue?style=flat&logo=doxygen&logoColor=white)](https://ekmett.github.io/jam/)
+<!-- badges:start -->
+[![build](https://img.shields.io/github/actions/workflow/status/ekmett/jam/ci.yml?branch=main&style=flat&label=build&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/ci.yml?query=branch%3Amain)
+[![docs](https://img.shields.io/github/actions/workflow/status/ekmett/jam/ci.yml?branch=main&style=flat&label=docs&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/ci.yml?query=branch%3Amain)
+[![coverage](https://img.shields.io/github/actions/workflow/status/ekmett/jam/coverage.yml?branch=main&style=flat&label=coverage&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/coverage.yml?query=branch%3Amain)
+[![docker](https://img.shields.io/github/actions/workflow/status/ekmett/jam/docker.yml?branch=main&style=flat&label=docker&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/docker.yml?query=branch%3Amain)
+[![nix](https://img.shields.io/github/actions/workflow/status/ekmett/jam/nix.yml?branch=main&style=flat&label=nix&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/nix.yml?query=branch%3Amain)
+[![runtime build](https://img.shields.io/github/actions/workflow/status/ekmett/jam/vm.yml?branch=main&style=flat&label=runtime+build&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/vm.yml?query=branch%3Amain)
+[![issues](https://img.shields.io/github/issues/ekmett/jam?style=flat&label=issues&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/jam/issues)
+[![commits](https://img.shields.io/github/commit-activity/w/ekmett/jam?style=flat&label=commits&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/jam/activity)
+
+[![CMake: 4.4+](https://img.shields.io/static/v1?label=CMake&message=4.4%2B&color=064F8C&style=flat&logo=cmake&logoColor=white)](CMakeLists.txt)
+[![Ninja: 1.12+](https://img.shields.io/static/v1?label=Ninja&message=1.12%2B&color=a06b35&style=flat)](docs/vm/build.md)
+[![C++: 26](https://img.shields.io/static/v1?label=C%2B%2B&message=26&color=00599C&style=flat&logo=cplusplus&logoColor=white)](README.md)
+[![Clang: 23](https://img.shields.io/static/v1?label=Clang&message=23&color=6f42c1&style=flat&logo=llvm&logoColor=white)](README.md)
+[![Java: 25](https://img.shields.io/static/v1?label=Java&message=25&color=b66a13&style=flat&logo=openjdk&logoColor=white)](vm/README.md)
+[![GraalVM: 25.3.4.1](assets/badges/graalvm-version.svg)](vm/config/source-pins.json)
+[![SubstrateVM: 25.3.4.1](assets/badges/substratevm-version.svg)](docs/vm/build.md#graalvm)
+
+[![OS: Linux · macOS · Windows](https://img.shields.io/static/v1?label=OS&message=Linux+%C2%B7+macOS+%C2%B7+Windows&color=64748b&style=flat)](docs/building.md)
+[![CPU: x86-64 · ARM64](https://img.shields.io/static/v1?label=CPU&message=x86-64+%C2%B7+ARM64&color=64748b&style=flat)](docs/building.md)
+
+[![license: BSD-2-Clause OR Apache-2.0](assets/badges/license.svg)](LICENSE.md)
+[![Contributor Covenant: 2.0](https://img.shields.io/static/v1?label=Contributor+Covenant&message=2.0&color=007ec6&style=flat&logo=contributorcovenant&logoColor=white)](CODE_OF_CONDUCT.md)
+
+[![docs: read](https://img.shields.io/static/v1?label=docs&message=read&color=007ec6&style=flat&logo=pandoc&logoColor=white)](https://ekmett.github.io/jam/)
+[![coverage: report](https://img.shields.io/static/v1?label=coverage&message=report&color=F01F7A&style=flat&logo=codecov&logoColor=white)](https://app.codecov.io/github/ekmett/jam)
+[![Nix: flake](https://img.shields.io/static/v1?label=Nix&message=flake&color=5277C3&style=flat&logo=nixos&logoColor=white)](https://github.com/ekmett/jam/blob/main/flake.nix)
+[![Docker: GHCR](https://img.shields.io/badge/Docker-GHCR-2496ED?style=flat&logo=docker&logoColor=white)](https://github.com/ekmett/jam/pkgs/container/jam)
+[![dist: downloads](https://img.shields.io/static/v1?label=dist&message=downloads&color=007ec6&style=flat)](https://github.com/ekmett/jam/releases)
+<!-- badges:end -->
 
 <!-- SPDX-FileCopyrightText: 2026 Edward Kmett <ekmett@gmail.com> -->
 <!-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->

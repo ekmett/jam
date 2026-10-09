@@ -1,0 +1,167 @@
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+name: Native library build
+
+on:
+  workflow_call:
+    inputs:
+      coverage:
+        type: boolean
+        default: false
+      docs:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform.runner }} / ${{ matrix.platform.config }}
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        # Retain regular Linux Release and Windows Debug/Release. Coverage adds
+        # the other native OS/architecture targets and the C ABI adapter tests.
+        platform: >-
+          ${{ fromJSON(inputs.coverage &&
+          '[{"runner":"ubuntu-24.04","config":"Release"},
+            {"runner":"ubuntu-24.04-arm","config":"Release"},
+            {"runner":"windows-2025","config":"Debug"},
+            {"runner":"windows-2025","config":"Release"},
+            {"runner":"windows-11-arm","config":"Release"},
+            {"runner":"macos-15","config":"Release"}]' ||
+          '[{"runner":"ubuntu-24.04","config":"Release"},
+            {"runner":"windows-2025","config":"Debug"},
+            {"runner":"windows-2025","config":"Release"}]') }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ekmett/native/.github/actions/setup/ubuntu/compiler@main
+        if: runner.os == 'Linux'
+      - uses: ekmett/native/.github/actions/setup/ubuntu/build-tools@main
+        if: runner.os == 'Linux'
+      - uses: ekmett/native/.github/actions/setup/macos/compiler@main
+        if: runner.os == 'macOS'
+      - uses: ekmett/native/.github/actions/setup/macos/build-tools@main
+        if: runner.os == 'macOS'
+      - uses: ekmett/native/.github/actions/setup/windows@main
+        if: runner.os == 'Windows'
+      - name: Install documentation tools
+        if: inputs.docs && matrix.platform.runner == 'ubuntu-24.04'
+        run: |
+          sudo apt-get install --no-install-recommends -y graphviz
+          curl --fail --location --retry 3 \
+            https://github.com/doxygen/doxygen/releases/download/Release_1_18_0/doxygen-1.18.0.linux.bin.tar.gz \
+            --output "$RUNNER_TEMP/doxygen.tar.gz"
+          echo "14fa81bdc34171edb5f1f02b1d60e74802f0439b77fa44e592565d517d72df90  $RUNNER_TEMP/doxygen.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/doxygen"
+          tar -xzf "$RUNNER_TEMP/doxygen.tar.gz" -C "$RUNNER_TEMP/doxygen" --strip-components=1
+          echo "$RUNNER_TEMP/doxygen/bin" >> "$GITHUB_PATH"
+          curl --fail --location --retry 3 \
+            https://github.com/jgm/pandoc/releases/download/3.8.2.1/pandoc-3.8.2.1-linux-amd64.tar.gz \
+            --output "$RUNNER_TEMP/pandoc.tar.gz"
+          echo "b362815e21d8ad3629c124aa92baf54558da086ad72374b4f6fdd97b9f3275b0  $RUNNER_TEMP/pandoc.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/pandoc"
+          tar -xzf "$RUNNER_TEMP/pandoc.tar.gz" -C "$RUNNER_TEMP/pandoc" --strip-components=1
+          echo "$RUNNER_TEMP/pandoc/bin" >> "$GITHUB_PATH"
+      - name: Install grcov
+        if: inputs.coverage
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python .github/scripts/install_grcov.py
+          else
+            python3 .github/scripts/install_grcov.py
+          fi
+      - name: Configure
+        run: |
+          compiler=clang++
+          extra=()
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            compiler=clang-cl
+            # The VM adapter enables C as well as C++; keep both MSVC drivers.
+            extra+=(-DCMAKE_C_COMPILER=clang-cl -DCMAKE_LINKER_TYPE=LLD -DJAM_BUILD_BENCHMARKS=ON)
+          elif [[ "$RUNNER_OS" == macOS ]]; then
+            extra+=(-DJAM_VM_RUNTIME="$(brew --prefix llvm@23)/lib/c++")
+          fi
+          if [[ '${{ inputs.docs }}' == true && '${{ matrix.platform.runner }}' == ubuntu-24.04 ]]; then
+            extra+=(-DJAM_BUILD_DOCS=ON)
+          fi
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER="$compiler" -DCMAKE_BUILD_TYPE=${{ matrix.platform.config }} \
+            -DJAM_BUILD_TESTS=ON -DJAM_BUILD_VM=${{ inputs.coverage && 'ON' || 'OFF' }} \
+            -DJAM_ENABLE_COVERAGE=${{ inputs.coverage && 'ON' || 'OFF' }} "${extra[@]}"
+      - name: Build
+        id: build
+        run: cmake --build build --parallel 2
+      - name: Test
+        id: test
+        run: >-
+          ctest --test-dir build --no-tests=error --output-on-failure
+          --output-junit "$GITHUB_WORKSPACE/build/tests.xml"
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && hashFiles('build/tests.xml') != '' }}
+        uses: codecov/codecov-action@f9fe539f5290016afa014f8ef31597d3a61c2dea # v7
+        with:
+          report_type: test_results
+          use_oidc: true
+          files: build/tests.xml
+          disable_search: true
+          flags: ${{ runner.os }}_${{ runner.arch }},${{ matrix.platform.config }},${{ inputs.coverage && 'instrumented' || 'regular' }}
+          name: ${{ matrix.platform.runner }}-${{ matrix.platform.config }}-${{ inputs.coverage && 'coverage' || 'build' }}
+          fail_ci_if_error: true
+      - name: Generate coverage report
+        id: coverage
+        if: ${{ !cancelled() && inputs.coverage && steps.build.outcome == 'success' }}
+        run: cmake --build build --target jam_coverage
+      - name: Retain coverage report
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.platform.runner }}-${{ matrix.platform.config }}
+          retention-days: 7
+          if-no-files-found: error
+          path: build/coverage/report/
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        uses: codecov/codecov-action@f9fe539f5290016afa014f8ef31597d3a61c2dea # v7
+        with:
+          use_oidc: true
+          files: build/coverage/report/coverage.info
+          disable_search: true
+          flags: ${{ runner.os }}_${{ runner.arch }},${{ matrix.platform.config }}
+          name: ${{ matrix.platform.runner }}-${{ matrix.platform.config }}
+          fail_ci_if_error: true
+      - name: Retain test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-${{ matrix.platform.runner }}-${{ matrix.platform.config }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            build/tests.xml
+            build/Testing/Temporary/
+      - name: Check documentation tooling
+        if: inputs.docs && matrix.platform.runner == 'ubuntu-24.04'
+        run: |
+          python3 docs/site/test_build.py
+          python3 docs/site/test_links.py
+          python3 docs/site/test_module_anchors.py
+      - name: Build documentation
+        if: inputs.docs && matrix.platform.runner == 'ubuntu-24.04'
+        run: cmake --build build --target jam-docs
+      - name: Upload site
+        if: inputs.docs && matrix.platform.runner == 'ubuntu-24.04' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: build/site
+          retention-days: 1

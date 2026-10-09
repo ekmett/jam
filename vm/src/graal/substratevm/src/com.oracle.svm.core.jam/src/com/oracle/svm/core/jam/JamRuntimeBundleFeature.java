@@ -11,72 +11,68 @@ import org.graalvm.nativeimage.Platform;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.guest.staging.util.UserError;
-import com.oracle.svm.hosted.FeatureImpl.BeforeImageWriteAccessImpl;
+import com.oracle.svm.hosted.FeatureImpl.BeforeAnalysisAccessImpl;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 
-/** Ship the native collector with its executable, independent of the build JDK's location. */
+/** Link the collector into each image; the notices directory is not a runtime dependency. */
 @AutomaticallyRegisteredFeature
 final class JamRuntimeBundleFeature implements InternalFeature {
-    private List<String> libraries;
-    private String directory;
-
     @Override public boolean isInConfiguration(IsInConfigurationAccess access) { return SubstrateOptions.useJamGC(); }
 
-    @Override public void beforeImageWrite(BeforeImageWriteAccess access) {
-        boolean darwin = Platform.includedIn(Platform.DARWIN.class);
-        boolean windows = Platform.includedIn(Platform.WINDOWS.class);
-        UserError.guarantee(darwin || windows || Platform.includedIn(Platform.LINUX.class), "Jam Native Image runtime packaging requires macOS, Linux or Windows");
-        BeforeImageWriteAccessImpl hosted = (BeforeImageWriteAccessImpl) access;
-        directory = hosted.getOutputFilename() + ".jam";
-        Path libraryDirectory = JamNative.Directives.libraryDirectory();
-        Path manifest = libraryDirectory.resolve("runtime-libraries.txt");
+    @Override public void beforeAnalysis(BeforeAnalysisAccess access) {
+        Path directory = JamNative.Directives.libraryDirectory();
+        Path manifest = directory.resolve("native-image-libraries.txt");
+        List<String> libraries;
         try {
-            libraries = Files.isRegularFile(manifest) ? Files.readAllLines(manifest) :
-                            darwin ? List.of("libjam-vm.dylib", "libc++.1.dylib", "libc++abi.1.dylib", "libunwind.1.dylib") : List.of();
+            libraries = Files.readAllLines(manifest);
         } catch (IOException error) {
-            throw UserError.abort("Unable to read packaged Jam runtime manifest %s: %s", manifest, error.getMessage());
+            throw UserError.abort("Unable to read static Jam archive manifest %s: %s", manifest, error.getMessage());
         }
-        UserError.guarantee(!libraries.isEmpty() && libraries.stream().distinct().count() == libraries.size() &&
-                        libraries.contains(windows ? "jam-vm.dll" : darwin ? "libjam-vm.dylib" : "libjam-vm.so"), "Missing or invalid Jam runtime manifest: %s", manifest);
-        for (String library : libraries) {
-            UserError.guarantee(library.matches(windows ? "[A-Za-z0-9_+.-]+\\.dll" : "lib[A-Za-z0-9_+.-]+"), "Invalid Jam runtime library name: %s", library);
-            UserError.guarantee(Files.isRegularFile(libraryDirectory.resolve(library)), "Missing packaged Jam runtime: %s", libraryDirectory.resolve(library));
+        boolean windows = Platform.includedIn(Platform.WINDOWS.class);
+        UserError.guarantee(!libraries.isEmpty() && libraries.getFirst().equals("jam-vm-static") &&
+                        libraries.stream().distinct().count() == libraries.size(), "Invalid static Jam archive manifest: %s", manifest);
+        var nativeLibraries = ((BeforeAnalysisAccessImpl) access).getNativeLibraries();
+        for (int index = 0; index < libraries.size(); ++index) {
+            String library = libraries.get(index);
+            UserError.guarantee(library.matches("[A-Za-z0-9_+][A-Za-z0-9_+.-]*"), "Invalid static Jam library name: %s", library);
+            Path archive = directory.resolve("static").resolve(windows ? library + ".lib" : "lib" + library + ".a");
+            UserError.guarantee(Files.isRegularFile(archive), "Missing static Jam archive: %s", archive);
+            String[] dependencies = index + 1 < libraries.size() ? new String[]{libraries.get(index + 1)} : new String[0];
+            nativeLibraries.addStaticNonJniLibrary(library, dependencies);
         }
-        if (!windows) {
-            hosted.registerLinkerInvocationTransformer(linker -> {
-                linker.addRPath((darwin ? "@loader_path/" : "$ORIGIN/") + directory);
-                return linker;
-            });
-        }
+        if (windows) nativeLibraries.addDynamicNonJniLibrary("onecore");
     }
 
     @Override public void afterImageWrite(AfterImageWriteAccess access) {
-        Path output = access.getImagePath().resolveSibling(directory);
-        boolean windows = Platform.includedIn(Platform.WINDOWS.class);
-        Path runtimeOutput = windows ? access.getImagePath().toAbsolutePath().getParent() : output;
-        Path libraryDirectory = JamNative.Directives.libraryDirectory();
+        Path output = access.getImagePath().resolveSibling(access.getImagePath().getFileName() + ".jam");
         Path legal = Path.of(System.getProperty("java.home"), "legal", "jam-vm");
         try {
-            Files.createDirectories(output);
-            for (String library : libraries) {
-                Path source = libraryDirectory.resolve(library);
-                Path destination = runtimeOutput.resolve(library);
-                if (windows && Files.exists(destination)) {
-                    UserError.guarantee(Files.isRegularFile(destination) && Files.mismatch(source, destination) == -1,
-                                    "A different runtime already exists at %s; use a separate output directory", destination);
-                } else {
-                    Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+            Files.createDirectories(output.resolve("legal"));
+            Files.writeString(output.resolve("linkage.txt"), "static\n");
+            if (Platform.includedIn(Platform.WINDOWS.class)) {
+                Path directory = JamNative.Directives.libraryDirectory();
+                for (String library : Files.readAllLines(directory.resolve("runtime-libraries.txt"))) {
+                    if (library.equalsIgnoreCase("jam-vm.dll")) continue;
+                    UserError.guarantee(library.matches("(?i)(msvcp|msvcr|vcruntime|concrt)[0-9]+(_[a-z0-9]+)*\\.dll"),
+                                    "Invalid Microsoft runtime library name: %s", library);
+                    Path source = directory.resolve(library);
+                    Path destination = access.getImagePath().toAbsolutePath().getParent().resolve(library);
+                    UserError.guarantee(Files.isRegularFile(source), "Missing Microsoft runtime: %s", source);
+                    if (Files.exists(destination)) {
+                        UserError.guarantee(Files.isRegularFile(destination) && Files.mismatch(source, destination) == -1,
+                                        "A different runtime already exists at %s; use a separate output directory", destination);
+                    } else {
+                        Files.copy(source, destination, StandardCopyOption.COPY_ATTRIBUTES);
+                    }
                 }
             }
-            Files.write(output.resolve("runtime-libraries.txt"), libraries);
-            Files.createDirectories(output.resolve("legal"));
             try (var files = Files.list(legal)) {
                 for (Path file : files.toList()) {
                     if (Files.isRegularFile(file)) Files.copy(file, output.resolve("legal").resolve(file.getFileName()), StandardCopyOption.REPLACE_EXISTING);
                 }
             }
         } catch (IOException error) {
-            throw UserError.abort("Unable to bundle Jam runtime beside %s: %s", access.getImagePath(), error.getMessage());
+            throw UserError.abort("Unable to write Jam notices beside %s: %s", access.getImagePath(), error.getMessage());
         }
     }
 }

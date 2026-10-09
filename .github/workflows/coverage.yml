@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# Every main commit gets its own report, including overlapping builds.
+jobs:
+  coverage:
+    uses: ./.github/workflows/build.yml
+    with:
+      coverage: true

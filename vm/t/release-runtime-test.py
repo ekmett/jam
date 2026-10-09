@@ -15,9 +15,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools/ci'))
 from release_runtime import inventory, require_run, qualified_artifacts, PLATFORMS
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from platform_paths import build_flavor, jdk_home, reported_flavor
+from package_jdk import static_libraries
+import build_graal
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_static_archive_closure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            build, runtime = root / 'build', root / 'runtime'
+            build.mkdir(); runtime.mkdir()
+            archives = [build / name for name in ('libjam-vm-static.a', 'libjam.a', 'libwork.a', 'libnative.a', 'libnative_minimal.a')]
+            runtimes = [runtime / name for name in ('libc++.a', 'libc++abi.a', 'libunwind.a')]
+            for archive in archives + runtimes:
+                archive.write_bytes(b'!<arch>\n')
+            manifest = build / 'jam-vm-static-libraries-Release.txt'
+            manifest.write_text('\n'.join(map(str, archives)) + '\n')
+            (build / 'jam-vm-static-libraries-Debug.txt').write_text('missing.a\n')
+            self.assertEqual(static_libraries(build, runtime, 'Linux'), archives + runtimes)
+            with self.assertRaises(SystemExit):
+                static_libraries(build, runtime, 'Linux', 'Debug')
+            # A missing runtime must fail packaging, not silently restore sidecars.
+            runtimes[-1].unlink()
+            with self.assertRaises(SystemExit):
+                static_libraries(build, runtime, 'Linux')
+            runtimes[-1].write_bytes(b'!<thin>\n')
+            with self.assertRaises(SystemExit):
+                static_libraries(build, runtime, 'Linux')
+            runtimes[-1].write_bytes(b'!<arch>\n')
+            manifest.write_text('\n'.join(map(str, archives + archives[:1])) + '\n')
+            with self.assertRaises(SystemExit):
+                static_libraries(build, runtime, 'Linux')
+
     def test_build_flavor_selection_and_report(self):
         for flavor in ('release', 'fastdebug'):
             with self.subTest(flavor=flavor), patch.dict('os.environ', {'JAM_BUILD_FLAVOR': flavor}):
@@ -30,6 +59,25 @@ class ReleaseTests(unittest.TestCase):
         for output in ('', 'jdk.debug = unknown', 'jdk.debug = release\njdk.debug = fastdebug'):
             with self.subTest(output=output), self.assertRaises(ValueError):
                 reported_flavor(output)
+
+    def test_darwin_graal_deployment_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ('bin/java', 'lib/server/libjvm.dylib', 'mx.py'):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            for inherited, target, prior in (({}, '15.5', ''),
+                    ({'MACOSX_DEPLOYMENT_TARGET': '15.4',
+                      'EXTRA_IMAGE_BUILDER_ARGUMENTS': '--verbose'}, '15.4', '--verbose ')):
+                with self.subTest(target=target), patch.dict('os.environ', inherited, clear=True), \
+                        patch.object(build_graal, 'ROOT', root), \
+                        patch.object(build_graal, 'MX', root / 'mx.py'), \
+                        patch.object(build_graal.platform, 'system', return_value='Darwin'):
+                    environment = build_graal.graal_environment(root)
+                    self.assertEqual(environment['MACOSX_DEPLOYMENT_TARGET'], target)
+                    self.assertEqual(environment['EXTRA_IMAGE_BUILDER_ARGUMENTS'],
+                                     prior + '-EMACOSX_DEPLOYMENT_TARGET=' + target)
 
     def test_only_qualified_main_runs(self):
         run = dict(status='completed', conclusion='success', event='push', head_branch='main', head_repository={'full_name': 'ekmett/jam'}, path='.github/workflows/vm.yml')

@@ -212,6 +212,31 @@ def load_commands(path):
     return identity, dependencies, rpaths
 
 
+def static_libraries(build, runtime, system, configuration="Release"):
+    """Read the native build's archive closure and add the matching C++ runtime."""
+    manifest = build / f'jam-vm-static-libraries-{configuration}.txt'
+    if not manifest.is_file():
+        raise SystemExit(f'Missing static Jam build manifest: {manifest}')
+    archives = [Path(line) for line in manifest.read_text().splitlines()]
+    if system != 'Windows':
+        for name in ('libc++.a', 'libc++abi.a', 'libunwind.a'):
+            candidates = {p.resolve() for p in runtime.rglob(name) if p.is_file()}
+            if len(candidates) != 1:
+                raise SystemExit(f'Expected one matching {name} under {runtime}; found {len(candidates)}')
+            archives.append(candidates.pop())
+    names = [p.name for p in archives]
+    collector = 'jam-vm-static.lib' if system == 'Windows' else 'libjam-vm-static.a'
+    if not names or names[0] != collector or len(names) != len(set(names)):
+        raise SystemExit(f'Invalid static Jam archive closure: {manifest}')
+    for path in archives:
+        if not path.is_file() or path.suffix != ('.lib' if system == 'Windows' else '.a'):
+            raise SystemExit(f'Missing static Jam archive: {path}')
+        with path.open('rb') as source:
+            if source.read(8) != b'!<arch>\n':
+                raise SystemExit(f'Expected a self-contained static archive: {path}')
+    return archives
+
+
 def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_license=None):
     system = platform.system()
     if system not in ('Darwin', 'Linux', 'Windows'):
@@ -260,6 +285,7 @@ def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_li
         if not libraries['libjam-vm.so'].is_file():
             raise SystemExit(f'Missing package input: {libraries["libjam-vm.so"]}')
         libraries.update(linux_runtime_libraries(libraries['libjam-vm.so'], runtime))
+    archives = static_libraries(NATIVE_BUILD, runtime, system, os.environ.get("JAM_NATIVE_CONFIG", "Release"))
     native_runtime = [name for name in libraries if not name.startswith(('libjam_bridge.', 'jam_bridge.'))]
     licenses = {
         'LICENSE.md': ROOT / 'LICENSE.md',
@@ -299,6 +325,12 @@ def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_li
         if import_library is not None:
             shutil.copy2(import_library, library_dir / import_library.name)
         (library_dir / 'runtime-libraries.txt').write_text('\n'.join(native_runtime) + '\n')
+        static_dir = library_dir / 'static'
+        static_dir.mkdir()
+        for archive in archives:
+            shutil.copy2(archive, static_dir / archive.name)
+        static_names = [p.stem if system == 'Windows' else p.stem.removeprefix('lib') for p in archives]
+        (library_dir / 'native-image-libraries.txt').write_text('\n'.join(static_names) + '\n')
         for source in jars:
             shutil.copy2(source, library_dir / source.name)
         (library_dir / 'include').mkdir()

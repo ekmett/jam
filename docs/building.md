@@ -4,10 +4,13 @@
 <!-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
 Jam requires Clang 23+, CMake 4.4+ and Ninja on macOS, Linux or Windows 10 1803+.
-CMake checks the C++26 features and platform page size. It fetches a pinned
-[native](https://github.com/ekmett/native) for SIMD and target dispatch.
+CMake checks the C++26 features and platform page size. It uses installed
+[native](https://github.com/ekmett/native) and [work](https://github.com/ekmett/work)
+packages when available, otherwise fetching their current `main` branches.
+Native supplies SIMD and target dispatch; an installed Native must include its
+host modules and have exceptions enabled.
 [Hint](https://github.com/ekmett/hint) supplies the textual `<hint.h>` attribute
-catalog through `hint::hint`; Native fetches a pinned Hint revision.
+catalog through `hint::hint`; Native supplies the dependency.
 [work](https://github.com/ekmett/work) supplies the shared worker pool and typed
 gigs through `work::work`.
 To use an existing checkout, set `FETCHCONTENT_SOURCE_DIR_JAM_NATIVE=/path/to/native`.
@@ -21,6 +24,73 @@ cmake --install build --prefix /path/to/jam
 
 Tests default on when building Jam as the top-level project. Exceptions are
 enabled; see [generation limits](generations.md) for failure behavior.
+
+## Docker
+
+The Linux x86-64 development image layers Jam and Work onto
+`ghcr.io/ekmett/native:latest`, with Clang 23, CMake 4.4 and Ninja already present.
+Jam and Work are installed in `/opt/jam`; Native and Hint are in `/opt/native`.
+`CMAKE_PREFIX_PATH` includes both, so the CMake consumer below works directly.
+The image contains the C++ library, not a JDK or GraalVM distribution.
+
+```sh
+docker run --rm -v "$PWD:/workspace" ghcr.io/ekmett/jam:latest \
+  cmake -S . -B build-docker -G Ninja -DCMAKE_BUILD_TYPE=Release
+```
+
+Build it locally with `docker build --pull -t jam .`. The separate Docker
+workflow pulls Native's current base and rebuilds the library stage each run,
+so Work follows `main` even when the toolchain layers are cached. It runs the
+native tests, then compiles and runs an independent installed-package consumer.
+Pull requests test the image; successful `main` builds publish it to
+[GHCR](https://github.com/ekmett/jam/pkgs/container/jam). Use the workflow's manual
+trigger to refresh dependencies between Jam changes. External toolchain and
+action locks remain independent of this in-house dependency policy.
+
+## Coverage and test analytics
+
+Ordinary CI builds remain uninstrumented. A separate coverage workflow runs on
+every `main` commit using the same reusable build workflow, adding Linux ARM64,
+Windows ARM64 and macOS ARM64 to the normal Linux x86-64 and Windows x86-64
+configurations. Windows x86-64 retains Debug and Release. Coverage also builds
+the VM C ABI adapter and its native tests; it does not build JDKs or GraalVM.
+
+For a local report, install grcov and LLVM's matching `llvm-profdata` and
+`llvm-cov` tools alongside Clang, then use a separate build directory:
+
+```sh
+cmake -S . -B build-coverage -G Ninja -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_BUILD_TYPE=Release -DJAM_BUILD_TESTS=ON -DJAM_ENABLE_COVERAGE=ON
+cmake --build build-coverage --parallel
+ctest --test-dir build-coverage --output-on-failure --output-junit tests.xml
+cmake --build build-coverage --target jam_coverage
+```
+
+The report target consumes the test profiles without rebuilding or rerunning
+tests. Module providers and consumers share one instrumented dependency build.
+Assembly/codegen consumers remain uninstrumented. Reports cover Jam's `src/`
+and, when enabled with `JAM_BUILD_VM=ON`, `vm/src/`; dependency sources are
+excluded. `build-coverage/coverage/report/coverage.info` preserves LLVM's
+canonical LCOV branch counts. grcov generates browsable HTML from that file;
+its derived branch metrics are not uploaded. On macOS, VM builds also need
+`JAM_VM_RUNTIME` to point to the matching C++ runtime library directory.
+
+CI retains reports and uploads coverage plus available CTest JUnit results to
+Codecov using GitHub OIDC. Test results are uploaded after failures as well.
+Codecov repository activation is required for the uploads to succeed.
+
+## Nix
+
+The separate Nix workflow checks Linux x86-64 and ARM64 packages, including an
+installed-package consumer. Native supplies LLVM 23 and the pinned external
+Nixpkgs toolchain; Native, Hint and Work follow `main` and are refreshed before
+each CI check. Native exceptions remain enabled.
+
+```sh
+nix flake update native native/hint work
+nix flake check --print-build-logs
+nix develop
+```
 
 ## Windows
 

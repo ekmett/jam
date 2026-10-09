@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(JAM_BUILD_TESTS "Build heap and tracing checks" ${PROJECT_IS_TOP_LEVEL})
 option(JAM_BUILD_BENCHMARKS "Build the compaction benchmark" OFF)
 option(JAM_BUILD_VM "Build the managed-runtime adapter and runtime targets" OFF)
+option(JAM_ENABLE_COVERAGE "Collect runtime test coverage with Clang and grcov" OFF)
 option(JAM_BUILD_DOCS "Build Doxygen documentation" OFF)
 option(JAM_CONTEXT_X28 "Reserve AArch64 x28 for the implicit heap instead of TLS" OFF)
 
@@ -87,18 +88,36 @@ if(NOT JAM_PAGE_BYTES MATCHES "^[1-9][0-9]*$")
   message(FATAL_ERROR "JAM_PAGE_BYTES must be a positive integer")
 endif()
 
+# Instrument module providers and consumers consistently in this configuration.
+# Directory flags do not become installed package usage requirements.
+if(JAM_ENABLE_COVERAGE)
+  include(etc/cmake/Coverage.cmake)
+endif()
+
 include(FetchContent)
 # Native owns CPU/OS admission and the source-targeted SIMD implementations.
 set(NATIVE_BUILD_TESTS OFF CACHE BOOL "Build native dependency tests")
 set(NATIVE_BUILD_DOCS OFF CACHE BOOL "Build native dependency documentation")
 set(NATIVE_ENABLE_EXCEPTIONS ON CACHE BOOL "Enable native exceptions" FORCE)
-FetchContent_Declare(jam_native
-  GIT_REPOSITORY https://github.com/ekmett/native.git
-  GIT_TAG 385b740751005952434d10e4ee1c1d3fd1f4766b)
-FetchContent_MakeAvailable(jam_native)
+if(NOT TARGET native::native)
+  if(NOT FETCHCONTENT_SOURCE_DIR_JAM_NATIVE AND
+      NOT FETCHCONTENT_TRY_FIND_PACKAGE_MODE STREQUAL "NEVER")
+    find_package(native QUIET CONFIG COMPONENTS native)
+    if(TARGET native::headers AND NOT TARGET native::native)
+      message(FATAL_ERROR "Jam requires Native's host modules; the installed Native package contains only headers")
+    endif()
+  endif()
+  if(NOT TARGET native::native)
+    FetchContent_Declare(jam_native
+      GIT_REPOSITORY https://github.com/ekmett/native.git
+      GIT_TAG main)
+    FetchContent_MakeAvailable(jam_native)
+  endif()
+endif()
 FetchContent_Declare(work
   GIT_REPOSITORY https://github.com/ekmett/work.git
-  GIT_TAG 295598e8a6f2348d5ec96547e46ff76bd0642700)
+  GIT_TAG main
+  FIND_PACKAGE_ARGS CONFIG)
 FetchContent_MakeAvailable(work)
 
 find_package(Threads REQUIRED)
@@ -204,7 +223,8 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_GENERATE_XML YES)
   set(DOXYGEN_PROJECT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/favicon.png")
 
-  set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+  set(jam_docs_markdown "${CMAKE_CURRENT_BINARY_DIR}/markdown")
+  set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${jam_docs_markdown}/README.md")
   set(DOXYGEN_FILE_PATTERNS "*.ccm" "*.cc" "*.md")
   set(DOXYGEN_EXTENSION_MAPPING "ccm=C++")
   set(DOXYGEN_EXTRACT_ALL NO)
@@ -221,7 +241,7 @@ if(JAM_BUILD_DOCS)
     "hint_lifetimebound=" "hint_diagnose_if(condition,message)=")
   set(DOXYGEN_EXCLUDE_SYMBOLS "jam::detail" "jam::detail::*")
   set(DOXYGEN_MARKDOWN_ID_STYLE GITHUB)
-  set(DOXYGEN_STRIP_FROM_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
+  set(DOXYGEN_STRIP_FROM_PATH "${jam_docs_markdown}" "${CMAKE_CURRENT_SOURCE_DIR}")
   set(DOXYGEN_GENERATE_TREEVIEW YES)
   # Match native's static menus; Doxygen 1.18's dynamic menus link to absent sections.
   set(DOXYGEN_HTML_DYNAMIC_MENUS NO)
@@ -237,17 +257,45 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
   set(DOXYGEN_WARN_LOGFILE "${CMAKE_CURRENT_BINARY_DIR}/docs/warnings.log")
   set(DOXYGEN_QUIET YES)
-  file(GLOB jam_vm_guides CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/vm/*.md")
-  doxygen_add_docs(jam-docs ${jam_interfaces} ${jam_implementations} README.md LICENSE.md
+  file(GLOB jam_vm_guides CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/docs/vm/*.md")
+  set(jam_docs_pages README.md LICENSE.md CODE_OF_CONDUCT.md
     docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md docs/finalizers.md
     ${jam_vm_guides} vm/README.md vm/NOTICE.md
-    docs/simd.md docs/collector.md docs/single-base.md docs/hosting.md docs/building.md
+    docs/simd.md docs/collector.md docs/single-base.md docs/hosting.md docs/building.md)
+  # Preserve relative page links in a build-tree copy. Doxygen needs linked
+  # badges as inline HTML; Pandoc continues to render the original Markdown.
+  set(jam_docs_inputs)
+  foreach(page IN LISTS jam_docs_pages)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/${page}")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/${page}" docs_markdown)
+    if(page STREQUAL "README.md")
+      string(REGEX REPLACE "\\[!\\[([^]]*)\\]\\(([^)]+)\\)\\]\\(([^):]+)\\)"
+        "<a href=\"https://github.com/ekmett/jam/blob/main/\\3\"><img src=\"\\2\" alt=\"\\1\" /></a>"
+        docs_markdown "${docs_markdown}")
+      string(REGEX REPLACE "\\[!\\[([^]]*)\\]\\(([^)]+)\\)\\]\\((https?://[^)]+)\\)"
+        "<a href=\"\\3\"><img src=\"\\2\" alt=\"\\1\" /></a>"
+        docs_markdown "${docs_markdown}")
+    endif()
+    get_filename_component(page_directory "${jam_docs_markdown}/${page}" DIRECTORY)
+    file(MAKE_DIRECTORY "${page_directory}")
+    file(WRITE "${jam_docs_markdown}/${page}" "${docs_markdown}")
+    list(APPEND jam_docs_inputs "${jam_docs_markdown}/${page}")
+  endforeach()
+  set(jam_docs_sources ${jam_interfaces} ${jam_implementations})
+  list(TRANSFORM jam_docs_sources PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
+  doxygen_add_docs(jam-docs ${jam_docs_sources} ${jam_docs_inputs}
+    WORKING_DIRECTORY "${jam_docs_markdown}"
     COMMENT "Build jam API documentation")
   # Keep README image paths valid in both GitHub and the generated main page.
   add_custom_command(TARGET jam-docs POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
       "${CMAKE_CURRENT_SOURCE_DIR}/assets/images"
       "${CMAKE_CURRENT_BINARY_DIR}/docs/html/assets/images"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+      "${CMAKE_CURRENT_SOURCE_DIR}/assets/badges"
+      "${CMAKE_CURRENT_BINARY_DIR}/docs/html/assets/badges"
     VERBATIM)
   # Removed declarations must not leave stale pages in the generated reference.
   add_custom_target(jam-docs-clean

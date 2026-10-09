@@ -8,7 +8,6 @@ import com.oracle.svm.core.SubstrateOptions;
 import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.function.CFunction;
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
-import org.graalvm.nativeimage.c.function.CLibrary;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.nativeimage.c.type.CLongPointer;
@@ -19,16 +18,16 @@ import static org.graalvm.nativeimage.c.function.CFunction.Transition.NO_TRANSIT
 
 /** The same opaque C ABI used by HotSpot. All calls run with GC or allocation ownership. */
 @CContext(JamNative.Directives.class)
-@CLibrary(value = "jam-vm", requireStatic = false)
 final class JamNative {
     static final class Directives implements CContext.Directives {
         @Override public boolean isInConfiguration() { return SubstrateOptions.useJamGC(); }
+        @Override public List<String> getMacroDefinitions() { return List.of("JAM_VM_STATIC"); }
         @Override public List<String> getHeaderFiles() { return List.of("<jam_vm.h>"); }
         @Override public List<String> getOptions() {
             String include = System.getProperty("jam.native.include", libraryDirectory().resolve("include").toString());
             return List.of("-I" + include);
         }
-        @Override public List<String> getLibraryPaths() { return List.of(libraryDirectory().toString()); }
+        @Override public List<String> getLibraryPaths() { return List.of(libraryDirectory().resolve("static").toString()); }
         static Path libraryDirectory() {
             return Path.of(System.getProperty("jam.native.library", Path.of(System.getProperty("java.home"), "lib", "jam").toString()));
         }
