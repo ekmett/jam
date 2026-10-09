@@ -48,6 +48,9 @@ def run(name, test, options=()):
 
 for test in ('HeapSmoke', 'WeakSmoke', 'BoundarySmoke'):
     run(test, test)
+run('CloneBarrierSmoke-c2', 'CloneBarrierSmoke',
+    ['-Xbatch', '-XX:-TieredCompilation', '-XX:CompileThreshold=100',
+     '-XX:CompileCommand=dontinline,CloneBarrierSmoke::copy'])
 for mode, compiler in (
         ('interpreter', ['-Xint']),
         ('c1', ['-Xbatch', '-XX:TieredStopAtLevel=1', '-XX:+PrintCompilation']),

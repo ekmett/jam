@@ -237,6 +237,16 @@ jobs:
         run: |
           source "$JAM_CI_TOOLS/env.sh"
           bash tools/check_graal_compiler.sh
+      - name: Preserve compiler crash evidence
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: graal-crash-${{ matrix.platform }}
+          path: |
+            vm/**/hs_err_pid*.log
+            vm/**/replay_pid*.log
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Archive runtime and consumer dependencies
         run: python3 tools/ci/archive_graal.py --output "$RUNNER_TEMP/jam-graal-ci.tar.gz"
       - uses: actions/upload-artifact@v7.0.1
@@ -446,6 +456,16 @@ jobs:
           . "$env:JAM_CI_TOOLS/env.ps1"
           python tools/check_graal_compiler.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Preserve compiler crash evidence
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: graal-crash-windows
+          path: |
+            vm/**/hs_err_pid*.log
+            vm/**/replay_pid*.log
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Archive runtime and consumer dependencies
         run: |
           . "$env:JAM_CI_TOOLS/env.ps1"
