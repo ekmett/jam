@@ -145,7 +145,7 @@
      }
 --- a/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/DeferredBarrierAdditionTest.java
 +++ b/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/DeferredBarrierAdditionTest.java
-@@ -74,8 +74,8 @@
+@@ -74,13 +74,16 @@
  
      @Before
      public void checkGC() {
@@ -156,6 +156,15 @@
      }
  
      @Test
+     public void testGroupAllocation() throws Exception {
+-        testHelper("testCrossReferences", 1, getInitialOptions());
++        // Jam allocations may start in old space, so both initialization stores
++        // retain their barriers. The other collectors defer the latest one.
++        int expectedBarriers = config.gc == HotSpotGraalRuntime.HotSpotGC.Jam ? 2 : 1;
++        testHelper("testCrossReferences", expectedBarriers, getInitialOptions());
+     }
+ 
+     protected void testHelper(final String snippetName, final int expectedBarriers, OptionValues options) {
 --- a/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/GraalHotSpotVMConfigAccessTest.java
 +++ b/compiler/src/jdk.graal.compiler.test/src/jdk/graal/compiler/hotspot/test/GraalHotSpotVMConfigAccessTest.java
 @@ -29,12 +29,17 @@
