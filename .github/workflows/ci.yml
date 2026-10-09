@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: ekmett/native/.github/actions/setup/windows@261c56507195e78c104ca7aa4e6e764c19a55f84
+      - uses: ekmett/native/.github/actions/setup/windows@main
       - name: Configure native Windows modules
         run: >-
           cmake -S . -B build -G Ninja

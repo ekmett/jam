@@ -92,13 +92,25 @@ include(FetchContent)
 set(NATIVE_BUILD_TESTS OFF CACHE BOOL "Build native dependency tests")
 set(NATIVE_BUILD_DOCS OFF CACHE BOOL "Build native dependency documentation")
 set(NATIVE_ENABLE_EXCEPTIONS ON CACHE BOOL "Enable native exceptions" FORCE)
-FetchContent_Declare(jam_native
-  GIT_REPOSITORY https://github.com/ekmett/native.git
-  GIT_TAG 385b740751005952434d10e4ee1c1d3fd1f4766b)
-FetchContent_MakeAvailable(jam_native)
+if(NOT TARGET native::native)
+  if(NOT FETCHCONTENT_SOURCE_DIR_JAM_NATIVE AND
+      NOT FETCHCONTENT_TRY_FIND_PACKAGE_MODE STREQUAL "NEVER")
+    find_package(native QUIET CONFIG COMPONENTS native)
+    if(TARGET native::headers AND NOT TARGET native::native)
+      message(FATAL_ERROR "Jam requires Native's host modules; the installed Native package contains only headers")
+    endif()
+  endif()
+  if(NOT TARGET native::native)
+    FetchContent_Declare(jam_native
+      GIT_REPOSITORY https://github.com/ekmett/native.git
+      GIT_TAG main)
+    FetchContent_MakeAvailable(jam_native)
+  endif()
+endif()
 FetchContent_Declare(work
   GIT_REPOSITORY https://github.com/ekmett/work.git
-  GIT_TAG 295598e8a6f2348d5ec96547e46ff76bd0642700)
+  GIT_TAG main
+  FIND_PACKAGE_ARGS CONFIG)
 FetchContent_MakeAvailable(work)
 
 find_package(Threads REQUIRED)
