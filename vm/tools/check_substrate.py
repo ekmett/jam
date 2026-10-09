@@ -82,7 +82,7 @@ else:
                         '-c', root / 't/substrate/pin_writer.c', '-o', work / 'pin_writer.o'])
     run('pin-archive', [*archiver, 'rcs', work / 'libjam_pin_test.a', work / 'pin_writer.o'])
 executable = work / ('substrate-smoke.exe' if windows else 'substrate-smoke')
-run('image-build', [*image_options,
+run('image-build', [*image_options, '--enable-monitoring=heapdump',
                     '--initialize-at-build-time=IsolateSmoke$EntryPoints,ImageRootsSmoke$ImageRoots',
                     '--initialize-at-run-time=JNIWeakSmoke',
                     '--enable-native-access=ALL-UNNAMED',
@@ -161,6 +161,7 @@ shutil.copy2(jni_library, executable.parent / jni_library.name)
 for mode, expected in (
         ('image-roots', 'Jam Native Image sparse image roots passed'),
         ('heap', 'Jam Native Image heap passed'),
+        ('heap-walk', 'Jam Native Image heap enumeration passed'),
         ('weak', 'Weak bridge passed:'),
         ('jni-weak', 'JNI weak globals passed:'),
         ('pin', 'Jam Native Image concurrent pin passed'),

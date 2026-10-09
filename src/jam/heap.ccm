@@ -1115,7 +1115,7 @@ public:
       return reinterpret_cast<word *>(storage.data()) + start;
     }
     void adopt(std::size_t next_origin, std::size_t words) noexcept;
-    void reset() noexcept;
+    template<bool tracks_starts = false> void reset(bitmap * starts = nullptr) noexcept;
     void compact_impl(std::span<offset> roots) noexcept;
   };
 private:
@@ -1256,7 +1256,9 @@ public:
     void prepare_pin_marks() noexcept;
     [[nodiscard]] std::size_t prepare_pinned(heap::generation & g, unsigned which,
                                            std::size_t start, bool keep_null) noexcept;
-    void finish_pinned() noexcept;
+    std::array<std::vector<bitmap>, 2> starts_;
+    template<bool tracks_starts> void finish_pinned() noexcept;
+    template<bool tracks_starts> void finish_impl() noexcept;
     heap & owner;
     std::size_t const prefix;
     enum class phase { idle, marking, retry, prepared };
@@ -1313,6 +1315,33 @@ public:
     }
     /// \brief Placement padding to format before a VM walks the collected object stream.
     [[nodiscard]] std::span<gap const> gaps() const noexcept { return pin_gaps; }
+    /// \brief Lazily allocate VM-defined object-start bits; enable before a major epoch.
+    /// Existing objects are discovered by that epoch's tracer, not by this operation.
+    void track_starts() {
+      if (state != phase::idle) detail::heap_failure("enable starts during collection");
+      if (!starts_[0].empty()) return;
+      std::array<std::vector<bitmap>, 2> next;
+      next[0].resize(owner.arena.metadata.size());
+      next[1].resize(owner.nursery.metadata.size());
+      starts_.swap(next);
+    }
+    /// \brief Whether the host opted into object-start transport.
+    [[nodiscard]] bool tracks_starts() const noexcept { return !starts_[0].empty(); }
+    /// \brief Declare an actual object start after claiming or formatting the object.
+    /// \pre Tracking enabled; idle or marking; callers never declare pin padding.
+    void record_start(offset at) noexcept {
+      auto const local = at & offset_mask;
+      auto & bits = starts_[at >> 31];
+      if ((state != phase::idle && state != phase::marking) || local < prefix ||
+          bits.empty() || local / block_words >= bits.size())
+        detail::heap_failure("invalid object start declaration");
+      std::atomic_ref<bitmap>{bits[local / block_words]}.fetch_or(
+        bitmap{1} << (local % block_words), std::memory_order_relaxed);
+    }
+    /// \brief Borrow the bitmap in canonical cell coordinates, one word per mini-page.
+    [[nodiscard]] std::span<bitmap const> starts(generation which) const noexcept {
+      return starts_[which == generation::young];
+    }
     /// \brief Start a VM-owned marking epoch; the VM supplies barriers and weak policy.
     /// \pre No jam roots, weak registrations, remembered slots or active collection.
     void begin(bool minor) noexcept;
@@ -2094,8 +2123,12 @@ void heap::generation::adopt(std::size_t next_origin, std::size_t words) noexcep
       && cursor <= smaller - reserve_word_count) resize(smaller);
 }
 
-void heap::generation::reset() noexcept {
-  for (auto & item : metadata) item = {};
+template<bool tracks_starts>
+void heap::generation::reset(bitmap * starts) noexcept {
+  for (std::size_t i = 0; i != metadata.size(); ++i) {
+    metadata[i] = {};
+    if constexpr (tracks_starts) starts[i] = 0;
+  }
   std::fill(alignment.begin(), alignment.end(), 0);
   has_alignment = false;
   cursor = 1; data()[0] = 0;
@@ -2466,9 +2499,11 @@ std::size_t heap::host::prepare_pinned(heap::generation & g, unsigned which,
   return cursor;
 }
 
+template<bool tracks_starts>
 void heap::host::finish_pinned() noexcept {
   std::array<std::optional<detail::heap_mapping>, 2> output;
   std::array<std::vector<block>, 2> metadata;
+  std::array<std::vector<bitmap>, 2> next_starts;
   auto const minor = owner.minor_collection;
   for (unsigned which = 0; which != 2; ++which) {
     auto & g = which ? owner.nursery : owner.arena;
@@ -2479,6 +2514,7 @@ void heap::host::finish_pinned() noexcept {
     } else {
       output[which].emplace(g.capacity() * 8);
       metadata[which].resize(g.metadata.size());
+      if constexpr (tracks_starts) next_starts[which].resize(g.metadata.size());
     }
   }
   std::vector<std::pair<offset, offset>> relocated;
@@ -2515,6 +2551,10 @@ void heap::host::finish_pinned() noexcept {
           std::memcpy(to, &after, sizeof(after));
         }
         auto & packed = target_meta[destination / block_words];
+        if constexpr (tracks_starts)
+          if (starts_[which][i] & (bitmap{1} << bit))
+            (minor && target_gen == 0 ? starts_[0] : next_starts[target_gen])[destination / block_words]
+              |= bitmap{1} << (destination % block_words);
         packed.live |= bitmap{1} << (destination % block_words);
         packed.pointers |= word{pointers} << ((destination % block_words) * 2);
         ++destination;
@@ -2550,6 +2590,8 @@ void heap::host::finish_pinned() noexcept {
     auto & g = which ? owner.nursery : owner.arena;
     g.storage.replace(*output[which]);
     g.metadata = std::move(metadata[which]);
+    if constexpr (tracks_starts)
+      if (!minor || which) starts_[which].swap(next_starts[which]);
     g.adopt(0, which ? young_words : old_words);
   }
   std::map<offset, std::unique_ptr<pin>> next;
@@ -2580,11 +2622,19 @@ void heap::host::begin(bool minor) noexcept {
   pin_gaps.clear(); source_gaps.clear();
   for (auto & runs : pin_runs) runs.clear();
   for (auto & live : traced) live.clear();
-  owner.nursery.clear_marks();
-  for (auto & item : owner.nursery.metadata) item.pointers = 0;
-  if (!minor) {
-    owner.arena.clear_marks();
-    for (auto & item : owner.arena.metadata) item.pointers = 0;
+  auto reset = [&]<bool tracks_starts>(heap::generation & g, unsigned which) noexcept {
+    g.clear_marks();
+    for (std::size_t i = 0; i != g.metadata.size(); ++i) {
+      g.metadata[i].pointers = 0;
+      if constexpr (tracks_starts) starts_[which][i] = 0;
+    }
+  };
+  if (tracks_starts()) {
+    reset.template operator()<true>(owner.nursery, 1);
+    if (!minor) reset.template operator()<true>(owner.arena, 0);
+  } else {
+    reset.template operator()<false>(owner.nursery, 1);
+    if (!minor) reset.template operator()<false>(owner.arena, 0);
   }
 }
 
@@ -2614,9 +2664,15 @@ void heap::host::begin(bool minor) noexcept {
 }
 
 void heap::host::finish() noexcept {
+  if (tracks_starts()) finish_impl<true>();
+  else finish_impl<false>();
+}
+
+template<bool tracks_starts>
+void heap::host::finish_impl() noexcept {
   if (state != phase::prepared)
     detail::heap_failure("host finish outside prepared phase");
-  if (moving_pins) { finish_pinned(); return; }
+  if (moving_pins) { finish_pinned<tracks_starts>(); return; }
   detail::forwarding_tables tables{owner.minor_collection ? nullptr : owner.arena.metadata.data(), owner.nursery.metadata.data(),
     owner.minor_collection ? nullptr : owner.arena.alignment_table(), owner.nursery.alignment_table()};
   auto const old_origin = owner.minor_collection ? owner.arena.origin : owner.arena.rotated_origin();
@@ -2629,12 +2685,21 @@ void heap::host::finish() noexcept {
   auto * target = promoting ? owner.arena.data() : owner.nursery.at_origin(young_origin);
   owner.nursery.move_to(target, tables);
   owner.nursery.zero_gaps(target, promoting ? owner.arena.cursor : 0);
-  // Both moves consumed the original tables. Packing may overwrite them now.
-  if (!owner.minor_collection) owner.arena.pack_into(owner.arena.metadata);
-  owner.nursery.pack_into(promoting ? owner.arena.metadata : owner.nursery.metadata);
+  // Both moves consumed the original tables. Pack starts in the same metadata pass.
+  auto pack = [&](heap::generation & g, unsigned source, unsigned destination) noexcept {
+    auto & out = destination ? owner.nursery : owner.arena;
+    if constexpr (tracks_starts)
+      g.compactor.pack(g.metadata.data(), out.metadata.data(), (g.cursor + block_words - 1) / block_words,
+                       g.alignment_table(), starts_[source].data(), starts_[destination].data());
+    else g.pack_into(out.metadata);
+  };
+  if (!owner.minor_collection) pack(owner.arena, 0, 0);
+  pack(owner.nursery, 1, promoting ? 0 : 1);
   if (!owner.minor_collection || promoting) owner.arena.adopt(old_origin, old_words);
-  if (promoting) owner.nursery.reset();
-  else owner.nursery.adopt(young_origin, young_words);
+  if (promoting) {
+    if constexpr (tracks_starts) owner.nursery.reset<true>(starts_[1].data());
+    else owner.nursery.reset<false>();
+  } else owner.nursery.adopt(young_origin, young_words);
   owner.collecting = false;
   owner.minor_collection = false;
   state = phase::idle;

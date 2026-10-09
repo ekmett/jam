@@ -57,6 +57,20 @@ JAM_VM_API size_t jam_vm_used(jam_vm const *, int young); /* cells, including gu
 JAM_VM_API size_t jam_vm_origin(jam_vm const *, int young); /* private ring origin */
 JAM_VM_API char const * jam_vm_compactor(jam_vm const *);
 
+/* Optional object enumeration: enable while idle, then run an instrumented major.
+ * Allocation failure returns zero without enabling tracking. The VM declares one
+ * start after successfully claiming/formatting each actual object, never padding.
+ * Later allocations must register starts too. A raw allocation may be a TLAB and
+ * is intentionally NOT registered by jam_vm_allocate.
+ * start_bits borrows canonical bits up to used(), one uint32_t per 32 cells.
+ * Disabled tracking returns null/count=0. Borrow expires on collection/destruction;
+ * inspect only with stopped mutators, and reacquire after every collection. */
+JAM_VM_API int jam_vm_track_starts(jam_vm *);
+JAM_VM_API int jam_vm_tracks_starts(jam_vm const *);
+JAM_VM_API void jam_vm_record_start(jam_vm *, uint32_t object);
+JAM_VM_API uint32_t const * jam_vm_start_bits(jam_vm const *, int young, size_t * count);
+
+
 /* Pin a complete moving object without collecting. Duplicate pins share a
  * registration; release each acquisition. Native payload access uses address(),
  * not the canonical Java address. Pin/unpin require the VM allocation lock.
@@ -75,6 +89,26 @@ JAM_VM_API size_t jam_vm_gap_words(jam_vm const *, size_t index);
 /* begin -> any number of trace/liveness operations -> prepare -> root repairs
  * using forward -> finish. finish republishes the stable alias. VM root repair
  * must happen before finish (including code relocations and derived pointers). */
+/* Exact old source slots; no target load occurs in the mutator barrier. first and
+ * stride are four-byte indices from base. Keep the holder for VM reference policy;
+ * recording a holder does not trace it. A zero holder is allowed only for known
+ * strong slots; weak-policy slots must supply their holder. All mutators stop before begin.
+ * Major marking must record surviving old fields again. The set is relocated and
+ * pruned during prepare, before the VM repairs source/root slots. */
+JAM_VM_API void jam_vm_remember(jam_vm *, uint32_t holder, uint64_t first,
+                               size_t count, size_t stride, int compressed);
+/* Retire a contiguous range of four-byte source locations, regardless of width.
+ * Contents need not be cleared; the VM guarantees these slots no longer hold refs. */
+JAM_VM_API void jam_vm_forget(jam_vm *, uint64_t first, size_t count);
+/* Derived entries carry an ordinary base slot; zero base_slot in the callback
+ * denotes an ordinary reference. Only the base is traced; preserve displacement
+ * when repairing the derived value. Both source locations belong to holder. */
+JAM_VM_API void jam_vm_remember_derived(jam_vm *, uint32_t holder, uint64_t base_slot,
+                                       uint64_t slot, int compressed);
+typedef void (*jam_vm_remembered_visit)(void * context, uint32_t holder,
+                                      uint64_t slot, int compressed, uint64_t base_slot);
+JAM_VM_API void jam_vm_remembered(jam_vm *, jam_vm_remembered_visit, void * context);
+
 JAM_VM_API void jam_vm_begin(jam_vm *, int minor);
 JAM_VM_API void jam_vm_trace(jam_vm *, uint32_t const * roots, size_t count,
                   jam_vm_scan, void * context, size_t marker_workers);

@@ -2,37 +2,35 @@
 // SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 package com.oracle.svm.core.jam;
 
-import com.oracle.svm.core.genscavenge.FillerObjectUtil;
 import java.lang.ref.Reference;
 import java.util.ArrayList;
 import java.util.List;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.IsolateThread;
+import org.graalvm.nativeimage.StackValue;
+import org.graalvm.nativeimage.c.type.CIntPointer;
+import org.graalvm.nativeimage.c.type.WordPointer;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 import com.oracle.svm.core.heap.GC;
 import com.oracle.svm.core.heap.Heap;
 import com.oracle.svm.core.heap.ObjectHeader;
-import com.oracle.svm.core.heap.ObjectReferenceVisitor;
 import com.oracle.svm.core.heap.ObjectVisitor;
-import com.oracle.svm.core.heap.ReferenceAccess;
+import com.oracle.svm.core.heap.UninterruptibleObjectReferenceVisitor;
 import com.oracle.svm.core.heap.ReferenceInternals;
-import com.oracle.svm.core.heap.RuntimeCodeInfoGCSupport;
 import com.oracle.svm.core.hub.InteriorObjRefWalker;
+import com.oracle.svm.core.heap.RuntimeCodeInfoGCSupport;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.locks.VMMutex;
-import com.oracle.svm.core.memory.NullableNativeMemory;
-import com.oracle.svm.core.nmt.NmtCategory;
 import com.oracle.svm.core.os.ImageHeapProvider;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
 import com.oracle.svm.core.thread.VMThreads.SafepointBehavior;
 import org.graalvm.nativeimage.CurrentIsolate;
-import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
 import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalFactory;
-import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalInt;
+import com.oracle.svm.core.heap.NoAllocationVerifier;
 import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalLong;
 import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalWord;
 import com.oracle.svm.guest.staging.log.Log;
@@ -52,24 +50,20 @@ public final class JamHeap extends Heap {
     static final int IMAGE_OFFSET = 1 << 30;
     static final long YOUNG_OFFSET = 1L << 34;
     static final long ADDRESS_SPACE = 1L << 35;
-    static final int CARD_SHIFT = 9;
-    private static final FastThreadLocalInt allocationSuspended = FastThreadLocalFactory.createInt("Jam.allocationSuspended");
     private static final FastThreadLocalLong allocatedBytes = FastThreadLocalFactory.createLong("Jam.allocatedBytes");
     private static final FastThreadLocalWord<Pointer> threadScope = FastThreadLocalFactory.createWord("Jam.heapScope");
     private final VMMutex allocationLock = new VMMutex("Jam allocation");
     private final JamObjectHeader header = new JamObjectHeader();
     final JamImageHeapInfo imageInfo = new JamImageHeapInfo();
     private final JamGC gc = new JamGC(this);
-    private final CardRebuilder cardRebuilder = new CardRebuilder();
+    private final RememberVisitor rememberVisitor = new RememberVisitor();
     private Pointer handle = Word.nullPointer();
-    private Pointer cards = Word.nullPointer();
-    private Pointer starts = Word.nullPointer();
     private UnsignedWord prefix = Word.zero();
     private UnsignedWord oldBytes = Word.zero();
     private UnsignedWord youngBytes = Word.zero();
-    private UnsignedWord cardCount = Word.zero();
     private Pointer oldTop = Word.nullPointer();
     private Pointer youngTop = Word.nullPointer();
+    private volatile boolean tracksStarts;
     private long oldPeak;
     private long youngPeak;
     private long oldAfterCollection;
@@ -84,10 +78,6 @@ public final class JamHeap extends Heap {
         prefix = guard;
         oldBytes = oldCapacity;
         youngBytes = youngCapacity;
-        cardCount = guard.add(oldCapacity).add((1 << CARD_SHIFT) - 1).unsignedShiftRight(CARD_SHIFT);
-        cards = NullableNativeMemory.calloc(cardCount, NmtCategory.GC);
-        starts = NullableNativeMemory.calloc(cardCount.multiply(Integer.BYTES), NmtCategory.GC);
-        VMError.guarantee(cards.isNonNull() && starts.isNonNull(), "Cannot allocate Jam remembered metadata");
         oldTop = oldBegin();
         youngTop = youngBegin();
     }
@@ -116,8 +106,6 @@ public final class JamHeap extends Heap {
     Pointer youngUsedEnd() { return youngTop; }
     @Uninterruptible(reason = Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     VMMutex lock() { return allocationLock; }
-    @Uninterruptible(reason = Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    Pointer cardTable() { return cards; }
 
     @Uninterruptible(reason = "Keep encoded and materialized references in one safepoint-free scope.", callerMustBe = true)
     int encode(Object object) {
@@ -146,7 +134,6 @@ public final class JamHeap extends Heap {
         } else {
             oldTop = result.add(bytes);
             oldPeak = Math.max(oldPeak, usedBytes(false));
-            recordObjectStart(result, bytes);
         }
         return result;
     }
@@ -166,44 +153,17 @@ public final class JamHeap extends Heap {
         } finally { lock().unlock(); }
     }
 
-    @Uninterruptible(reason = "Record the first owner overlapping each old card.")
-    private void recordObjectStart(Pointer object, UnsignedWord bytes) {
-        long first = object.subtract(base()).unsignedShiftRight(CARD_SHIFT).rawValue();
-        long last = object.add(bytes).subtract(1).subtract(base()).unsignedShiftRight(CARD_SHIFT).rawValue();
-        int encoded = (int) object.subtract(base()).unsignedShiftRight(3).rawValue();
-        for (long card = first; card <= last; card++) {
-            UnsignedWord index = Word.unsigned(card).multiply(Integer.BYTES);
-            if (starts.readInt(index) == 0) { starts.writeInt(index, encoded); }
+    @Uninterruptible(reason = "Register completed reference writes without reading their mutable targets.")
+    void remember(Object holder, Pointer first, long count, int stride, boolean compressed) {
+        Pointer owner = Word.objectToUntrackedPointer(holder);
+        if (owner.aboveOrEqual(oldBegin()) && owner.belowThan(oldEnd())) {
+            JamNative.remember(handle, encode(holder), first.subtract(base()).unsignedShiftRight(2).rawValue(),
+                            Word.unsigned(count), Word.unsigned(stride / 4), compressed ? 1 : 0);
         }
     }
 
-    @Uninterruptible(reason = "Consume dirty owners at a GC safepoint.", calleeMustBe = false)
-    void walkDirtyOldObjects(ObjectVisitor visitor) {
-        Pointer visited = Word.nullPointer();
-        for (long card = 0; card < cardCount.rawValue(); card++) {
-            if (cards.readByte(Word.unsigned(card)) == 0) { continue; }
-            int offset = starts.readInt(Word.unsigned(card).multiply(Integer.BYTES));
-            if (offset == 0) { continue; }
-            Pointer current = base().add(Word.unsigned((offset & 0xffffffffL)).shiftLeft(3));
-            Pointer limit = base().add(Word.unsigned(card + 1).shiftLeft(CARD_SHIFT));
-            while (current.belowThan(limit) && current.belowThan(oldTop)) {
-                Object object = current.toObjectNonNull();
-                if (current.aboveThan(visited)) { visitor.visitObject(object); visited = current; }
-                current = current.add(LayoutEncoding.getSizeFromObjectInGC(object));
-            }
-        }
-    }
-
-    @Uninterruptible(reason = "Reset remembered metadata at a GC safepoint.")
-    void clearCards() { UnmanagedMemoryUtil.fill(cards, cardCount, (byte) 0); }
-
-    @Uninterruptible(reason = "Update metadata after publishing the collected arenas.")
+    @Uninterruptible(reason = "Update allocation bounds after publishing the collected arenas.")
     void finishCollection(boolean minor, boolean promoted) {
-        for (UnsignedWord i = Word.zero(); i.belowThan(JamNative.gapCount(handle)); i = i.add(1)) {
-            int at = JamNative.gapAt(handle, i);
-            Pointer address = base().add(Word.unsigned(at & 0xffffffffL).shiftLeft(3));
-            FillerObjectUtil.writeFillerObjectAt(address, JamNative.gapWords(handle, i).shiftLeft(3), false);
-        }
         Pointer previousOldTop = oldTop;
         oldTop = base().add(JamNative.used(handle, 0).shiftLeft(3));
         youngTop = base().add(Word.unsigned(YOUNG_OFFSET)).add(JamNative.used(handle, 1).shiftLeft(3));
@@ -211,63 +171,41 @@ public final class JamHeap extends Heap {
         youngAfterCollection = usedBytes(true);
         oldPeak = Math.max(oldPeak, oldAfterCollection);
         youngPeak = Math.max(youngPeak, youngAfterCollection);
-        if (minor && !promoted) {
-            VMError.guarantee(oldTop.equal(previousOldTop), "A retaining minor cannot move the old arena");
-            return;
-        }
-        if (!minor) { UnmanagedMemoryUtil.fill(starts, cardCount.multiply(Integer.BYTES), (byte) 0); }
-        Pointer current = minor ? previousOldTop : oldBegin();
-        while (current.belowThan(oldTop)) {
-            UnsignedWord bytes = LayoutEncoding.getSizeFromObjectInGC(current.toObjectNonNull());
-            recordObjectStart(current, bytes);
-            current = current.add(bytes);
-        }
-        if (minor) {
-            VMError.guarantee(youngTop.equal(youngBegin()), "Whole-nursery promotion must leave no young survivors");
-            clearCards();
-        } else {
-            rebuildCards();
+        if (minor) VMError.guarantee(oldTop.aboveOrEqual(previousOldTop), "A minor cannot relocate the old arena");
+        if (promoted) VMError.guarantee(youngTop.equal(youngBegin()), "Promotion must empty young space");
+    }
+
+    @Uninterruptible(reason = "Register derived slots using the VM's existing reference visitor.")
+    void rememberDerived(Object holder, Pointer baseSlot, Pointer slot, boolean compressed) {
+        Pointer owner = Word.objectToUntrackedPointer(holder);
+        if (owner.aboveOrEqual(oldBegin()) && owner.belowThan(oldEnd())) {
+            JamNative.rememberDerived(handle, encode(holder), baseSlot.subtract(base()).unsignedShiftRight(2).rawValue(),
+                            slot.subtract(base()).unsignedShiftRight(2).rawValue(), compressed ? 1 : 0);
         }
     }
 
-    @Uninterruptible(reason = "Reconstruct precise old-to-young cards after movement.")
-    void rebuildCards() {
-        clearCards();
-        Pointer current = oldBegin();
-        while (current.belowThan(oldTop)) {
-            Object object = current.toObjectNonNull();
-            InteriorObjRefWalker.walkObject(object, cardRebuilder);
-            if (object instanceof Reference<?> reference) {
-                Object referent = ReferenceInternals.getReferent(reference);
-                if (referent != null && isYoung(Word.objectToUntrackedPointer(referent))) { dirtyAllReferencesOf(object); }
-            }
-            current = current.add(LayoutEncoding.getSizeFromObjectInGC(object));
+    private final class RememberVisitor implements UninterruptibleObjectReferenceVisitor {
+        @Override @Uninterruptible(reason = "Register copied reference locations without tracing targets.")
+        public void visitObjectReferences(Pointer first, boolean compressed, int stride, Object holder, int count) {
+            remember(holder, first, count, stride, compressed);
         }
-    }
-
-    private static final class CardRebuilder implements ObjectReferenceVisitor {
-        @Override
-        @Uninterruptible(reason = "Rebuild remembered references.")
-        public void visitObjectReferences(Pointer first, boolean compressed, int size, Object holder, int count) {
-            for (int i = 0; i < count; i++) {
-                Object value = ReferenceAccess.singleton().readObjectAt(first.add(i * size), compressed);
-                if (value != null && get().isYoung(Word.objectToUntrackedPointer(value))) {
-                    get().dirtyAllReferencesOf(holder);
-                    return;
-                }
-            }
+        @Override @Uninterruptible(reason = "The base remains an ordinary reference.")
+        public void visitDerivedReferenceBase(Pointer slot, boolean compressed, int stride, Object holder) {
+            remember(holder, slot, 1, stride, compressed);
         }
-        @Override
-        @Uninterruptible(reason = "The corresponding base reference was already visited.")
-        public void visitDerivedReference(Pointer baseRef, Pointer derivedRef, boolean compressed, Object holder) { }
+        @Override @Uninterruptible(reason = "Retain the base-to-interior relationship for relocation.")
+        public void visitDerivedReference(Pointer base, Pointer slot, boolean compressed, Object holder) {
+            rememberDerived(holder, base, slot, compressed);
+        }
     }
 
     @Override
-    @Uninterruptible(reason = "Dirty the old owner before a safepoint.", callerMustBe = true)
+    @Uninterruptible(reason = "Register fields after a bulk object copy.", callerMustBe = true)
     public void dirtyAllReferencesOf(Object object) {
-        Pointer address = Word.objectToUntrackedPointer(object);
-        if (isOld(address)) {
-            cards.writeByte(address.subtract(base()).unsignedShiftRight(CARD_SHIFT), (byte) 1);
+        if (!isOld(Word.objectToUntrackedPointer(object))) return;
+        InteriorObjRefWalker.walkObjectInline(object, rememberVisitor);
+        if (object instanceof Reference<?> reference) {
+            remember(object, ReferenceInternals.getReferentFieldAddress(reference), 1, 4, true);
         }
     }
 
@@ -319,28 +257,48 @@ public final class JamHeap extends Heap {
     @Override public void walkObjects(ObjectVisitor visitor) { walkImageHeapObjects(visitor); walkCollectedHeapObjects(visitor); }
     @Override public void walkImageHeapObjects(ObjectVisitor visitor) { imageInfo.walk(visitor, false); }
     void walkImageHeapRoots(ObjectVisitor visitor) { imageInfo.walk(visitor, true); }
+    @Override public boolean prepareForHeapWalk() {
+        VMOperation.guaranteeInProgressAtSafepoint("Enable object starts with mutators stopped");
+        if (tracksStarts) return false;
+        VMError.guarantee(JamNative.trackStarts(handle) != 0, "Cannot allocate Jam object-start metadata");
+        tracksStarts = true;
+        return true;
+    }
+    @Uninterruptible(reason = "Publish an actual formatted object, never an allocation-buffer tail.")
+    Object recordFormattedObject(Object object) {
+        if (tracksStarts) JamBarrierSnippets.recordStart(object);
+        return object;
+    }
+    @Uninterruptible(reason = Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    boolean tracksStarts() { return tracksStarts; }
     @Override public void walkCollectedHeapObjects(ObjectVisitor visitor) {
         VMOperation.guaranteeInProgressAtSafepoint("Jam heap walking requires a safepoint");
+        VMError.guarantee(tracksStarts, "Prepare object-start metadata before beginning a heap walk");
         retireAllTlabs();
-        walkRegion(oldBegin(), oldTop, visitor);
-        walkRegion(youngBegin(), youngTop, visitor);
+        walkStarts(false, visitor);
+        walkStarts(true, visitor);
     }
-    private static void walkRegion(Pointer begin, Pointer end, ObjectVisitor visitor) {
-        Pointer current = begin;
-        while (current.belowThan(end)) {
-            Object object = current.toObjectNonNull();
-            visitor.visitObject(object);
-            current = current.add(LayoutEncoding.getSizeFromObjectInGC(object));
+    private void walkStarts(boolean young, ObjectVisitor visitor) {
+        WordPointer count = StackValue.get(WordPointer.class);
+        CIntPointer words = JamNative.startBits(handle, young ? 1 : 0, count);
+        long length = count.read().rawValue();
+        Pointer origin = young ? base().add(Word.unsigned(YOUNG_OFFSET)) : base();
+        for (long i = 0; i < length; ++i) {
+            int bits = words.read(Word.unsigned(i));
+            while (bits != 0) {
+                int bit = Integer.numberOfTrailingZeros(bits);
+                visitor.visitObject(origin.add(Word.unsigned(i * 32 + bit).shiftLeft(3)).toObjectNonNull());
+                bits &= bits - 1;
+            }
         }
     }
     @Override @Uninterruptible(reason = "Retire the fast path before allocation is suspended.")
     public void suspendAllocation() {
         JamThreadLocalAllocation.retire(CurrentIsolate.getCurrentThread());
-        allocationSuspended.set(allocationSuspended.get() + 1);
     }
-    @Override public void resumeAllocation() { allocationSuspended.set(allocationSuspended.get() - 1); }
+    @Override public void resumeAllocation() { /* The next allocation refills the TLAB. */ }
     @Override @Uninterruptible(reason = Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    public boolean isAllocationDisallowed() { return allocationSuspended.get() != 0 || SafepointBehavior.ignoresSafepoints(); }
+    public boolean isAllocationDisallowed() { return NoAllocationVerifier.isActive() || SafepointBehavior.ignoresSafepoints(); }
     @Uninterruptible(reason = "Account for actual objects, excluding unused buffer tails.")
     void recordAllocatedBytes(IsolateThread thread, UnsignedWord bytes) {
         allocatedBytes.set(thread, allocatedBytes.get(thread) + bytes.rawValue());
@@ -403,8 +361,5 @@ public final class JamHeap extends Heap {
     void releaseNativeResources() {
         gc.tearDown();
         if (handle.isNonNull()) { JamNative.destroy(handle); handle = Word.nullPointer(); }
-        NullableNativeMemory.free(cards);
-        NullableNativeMemory.free(starts);
-        cards = starts = Word.nullPointer();
     }
 }

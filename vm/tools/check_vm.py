@@ -59,5 +59,9 @@ for mode, compiler in (
     run(f'CompiledBarrierSmoke-{mode}', 'CompiledBarrierSmoke', [*compiler,
         '-Xms128m', '-Xmx128m', '-XX:JamYoungSize=8m', '-XX:CompileCommand=dontinline,CompiledBarrierSmoke::*'])
     run(f'JNIWeakGenerations-{mode}', 'JNIWeakGenerations', [*compiler, '-Xcheck:jni'])
+    for first in ('histogram', 'jvmti', 'legacy', 'locks'):
+        run(f'JvmHeapWalkSmoke-{mode}-{first}', 'JvmHeapWalkSmoke', [*compiler,
+            '-Xms128m', '-Xmx128m', '-XX:-VerifyBeforeGC', '-XX:-VerifyAfterGC', '-XX:-VerifyBeforeExit',
+            f'-Djam.heap.walk.first={first}', '-XX:CompileCommand=dontinline,JvmHeapWalkSmoke::*'])
 run('GenerationCapacitySmoke', 'GenerationCapacitySmoke',
     ['-Xms64m', '-Xmx64m', '-XX:JamYoungSize=32m', '-XX:JamPromoteEvery=1000'])

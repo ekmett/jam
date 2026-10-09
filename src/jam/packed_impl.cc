@@ -136,14 +136,47 @@ void baseline_move(word const * source, word * target, heap_block const * metada
   }
 }
 
+// The side channel uses the same cell ranks as payload, including retained padding.
+// Read a source word before clearing destination words when packing in place.
+hint_inline void pack_starts(bitmap bits, bitmap kept, std::size_t destination,
+                 bitmap * output, [[maybe_unused]] std::size_t source_index,
+                 std::size_t & cleared, bool in_place) noexcept {
+  if (!bits) return;
+  bitmap packed = 0;
+  unsigned position = 0;
+  for (auto mask = kept; mask; mask &= mask - 1, ++position)
+    packed |= bitmap{(bits >> std::countr_zero(mask)) & 1u} << position;
+  auto const index = destination / 32;
+  auto const shift = destination % 32;
+  if (in_place) {
+    assert(index <= source_index);
+    while (cleared <= index) output[cleared++] = 0;
+  }
+  output[index] |= packed << shift;
+  if (shift) {
+    auto const upper = packed >> (32 - shift);
+    if (upper) {
+      if (in_place) {
+        assert(index + 1 <= source_index);
+        while (cleared <= index + 1) output[cleared++] = 0;
+      }
+      output[index + 1] |= upper;
+    }
+  }
+}
+
 // Aliased output consumes each descriptor before clearing its destination slots;
 // leftward compaction ensures those slots never belong to an unread descriptor.
 // Separate output appends to existing masks (promotion may share a partial block).
 #define JAM_PACK_MASKS(EXTRACT) \
   bool const in_place = metadata == output; \
-  std::size_t cleared = 0; \
+  std::size_t cleared = 0, starts_cleared = 0; \
   for (std::size_t i = 0; i != old_blocks; ++i) { \
     auto item = metadata[i]; \
+    if constexpr (tracks_starts) \
+      pack_starts(starts[i] & item.live, retained(item, alignment, i), \
+                  item.destination & 0x7fffffffu, destination_starts, i, starts_cleared, \
+                  starts == destination_starts); \
     item.pointers &= pointer_cells(item.live); \
     if (!item.pointers) continue; \
     item.live = retained(item, alignment, i); \
@@ -172,10 +205,19 @@ void baseline_move(word const * source, word * target, heap_block const * metada
       } \
     } \
   } \
-  if (in_place) while (cleared < old_blocks) output[cleared++].pointers = 0;
+  if constexpr (tracks_starts) { \
+    while ((in_place && cleared < old_blocks) \
+        || (starts == destination_starts && starts_cleared < old_blocks)) { \
+      if (in_place && cleared < old_blocks) output[cleared++].pointers = 0; \
+      if (starts == destination_starts && starts_cleared < old_blocks) \
+        destination_starts[starts_cleared++] = 0; \
+    } \
+  } else if (in_place) while (cleared < old_blocks) output[cleared++].pointers = 0;
 
+template<bool tracks_starts>
 void baseline_pack(heap_block const * metadata, heap_block * output, std::size_t old_blocks,
-                   std::uint8_t const * alignment) noexcept {
+                   std::uint8_t const * alignment, bitmap const * starts = nullptr,
+                   bitmap * destination_starts = nullptr) noexcept {
   JAM_PACK_MASKS(portable_pack(item))
 }
 
@@ -349,10 +391,11 @@ if constexpr ((ISA).has(native::x86_feature::avx512vpopcntdq) \
       } \
     } \
   } \
-  template<native::isa<> A> \
+  template<native::isa<> A, bool tracks_starts> \
     requires (native::target<A, __VA_ARGS__> == native::target<ISA, __VA_ARGS__>) \
   void name##_pack(heap_block const * metadata, heap_block * output, std::size_t old_blocks, \
-                   std::uint8_t const * alignment) noexcept { \
+                   std::uint8_t const * alignment, bitmap const * starts = nullptr, \
+                   bitmap * destination_starts = nullptr) noexcept { \
     JAM_PACK_MASKS(JAM_EXTRACT(ISA)) \
   }
 NATIVE_TARGET_VARIANTS(vector, JAM_COMPACTOR, JAM_TARGETS)
@@ -360,9 +403,11 @@ NATIVE_TARGET_VARIANTS(vector, JAM_COMPACTOR, JAM_TARGETS)
 #undef JAM_COMPACTOR
 #undef JAM_PACK_MASKS
 
-constexpr compactor baseline{baseline_move, baseline_pack, native::scalar, "baseline"};
+constexpr compactor baseline{baseline_move, baseline_pack<false>,
+  baseline_pack<true>, native::scalar, "baseline"};
 #define JAM_ENTRY(unused, tag) \
-  compactor{vector_move<NATIVE_TARGET_ISA(tag)>, vector_pack<NATIVE_TARGET_ISA(tag)>, \
+  compactor{vector_move<NATIVE_TARGET_ISA(tag)>, vector_pack<NATIVE_TARGET_ISA(tag), false>, \
+    vector_pack<NATIVE_TARGET_ISA(tag), true>, \
     NATIVE_TARGET_ISA(tag), #tag},
 constexpr compactor variants[]{NATIVE_DETAIL_TARGET_MAP(JAM_ENTRY, unused, JAM_TARGETS) baseline};
 #undef JAM_ENTRY

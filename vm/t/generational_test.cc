@@ -38,13 +38,163 @@ struct heap {
     auto & h = *static_cast<heap *>(ctx);
     check(jam_vm_thread_current(h.vm), "tracer binds the owning Jam heap");
     if (!jam_vm_claim(v, o, 3)) return;
+    if (jam_vm_tracks_starts(h.vm)) jam_vm_record_start(h.vm, o);
     check(h.at(o).header == 0x8000000100000800ull, "opaque JVM header intact");
     uint64_t fields[] = {uint64_t(o) * 2 + 2, uint64_t(o) * 2 + 3};
     jam_vm_fields(v, fields, 2, 1);
+    jam_vm_remember(h.vm, o, fields[0], 2, 1, 1);
   }
   void trace(uint32_t o) { jam_vm_trace(vm, &o, 1, scan, this, 1); }
   void weak_close() { jam_vm_weak_close(vm, scan, this); jam_vm_weak_finalizers(vm, scan, this); }
 };
+static void object_starts() {
+  heap h(1);
+  size_t count = 123;
+  check(jam_vm_start_bits(h.vm, 0, &count) == nullptr && count == 0, "starts disabled by default");
+  auto first = h.make(false, 1), second = h.make(true, 2);
+  h.at(first).left = second;
+  check(jam_vm_track_starts(h.vm) && jam_vm_tracks_starts(h.vm), "enable start tracking");
+  jam_vm_begin(h.vm, 0); h.trace(first);
+  check(jam_vm_prepare(h.vm, 0), "tracked ABI major fits");
+  first = jam_vm_forward(h.vm, first); second = jam_vm_forward(h.vm, second);
+  jam_vm_finish(h.vm);
+  for (auto at : {first, second}) {
+    auto bits = jam_vm_start_bits(h.vm, bool(at & young_bit), &count);
+    auto cell = at & ~young_bit;
+    check(bits && cell / 32 < count && (bits[cell / 32] & (1u << (cell % 32))), "ABI start follows relocation");
+  }
+}
+struct remembered_test {
+  struct entry { uint32_t holder; uint64_t slot; bool compressed; uint64_t base_slot; };
+  std::vector<entry> entries;
+  static void append(void * context, uint32_t holder, uint64_t slot, int compressed, uint64_t base_slot) {
+    static_cast<remembered_test *>(context)->entries.push_back({holder, slot, compressed != 0, base_slot});
+  }
+  void read(jam_vm * vm) { entries.clear(); jam_vm_remembered(vm, append, this); }
+};
+static void exact_remembered_slots() {
+  heap h(4);
+  h.make(false, 999); // Leave room for the remembered holder to move on a major.
+  auto old = h.make(false, 1), live = h.make(true, 2), weak = h.make(true, 3);
+  h.at(old).left = live; h.at(old).right = weak;
+  uint64_t first = uint64_t(old) * 2 + 2;
+  std::vector<std::thread> writers;
+  for (unsigned i = 0; i != 4; ++i)
+    writers.emplace_back([&] { for (unsigned j = 0; j != 100; ++j) jam_vm_remember(h.vm, old, first, 2, 1, 1); });
+  for (auto & writer : writers) writer.join();
+  jam_vm_begin(h.vm, 1);
+  remembered_test recorded;
+  recorded.read(h.vm);
+  check(recorded.entries.size() == 2, "bulk/concurrent barriers deduplicate exact slots");
+  for (auto entry : recorded.entries) {
+    check(entry.holder == old && entry.compressed, "remembered holder and width retained");
+    if (entry.slot == first) h.trace(h.at(old).left);
+    else check(entry.slot == first + 1, "adjacent fields retain separate obligations");
+  }
+  check(jam_vm_marked(h.vm, live) && !jam_vm_marked(h.vm, weak), "remembering does not strengthen weak slots");
+  h.at(old).right = 0; // VM reference policy, before prepare/repair.
+  check(jam_vm_prepare(h.vm, 0), "remembered retaining minor fits");
+  live = jam_vm_forward(h.vm, live);
+  h.at(old).left = live;
+  jam_vm_finish(h.vm);
+  jam_vm_begin(h.vm, 1); recorded.read(h.vm);
+  check(recorded.entries.size() == 1 && recorded.entries[0].slot == first, "cleared slots pruned; surviving edge retained");
+  h.trace(live);
+  check(jam_vm_prepare(h.vm, 0), "second remembered minor fits");
+  live = jam_vm_forward(h.vm, live); h.at(old).left = live;
+  jam_vm_finish(h.vm);
+  jam_vm_begin(h.vm, 0); h.trace(old);
+  check(jam_vm_prepare(h.vm, 0), "remembered major fits");
+  old = jam_vm_forward(h.vm, old); live = jam_vm_forward(h.vm, live);
+  jam_vm_finish(h.vm);
+  check(uint64_t(old) * 2 + 2 < first && h.at(old).left == live, "major moves remembered source and target");
+  jam_vm_begin(h.vm, 1); recorded.read(h.vm);
+  check(recorded.entries.size() == 1 && recorded.entries[0].holder == old &&
+        recorded.entries[0].slot == uint64_t(old) * 2 + 2, "remembered source relocates without a heap walk");
+  h.trace(live);
+  check(jam_vm_prepare(h.vm, 1), "remembered promotion fits");
+  h.at(old).left = jam_vm_forward(h.vm, live); jam_vm_finish(h.vm);
+  jam_vm_begin(h.vm, 1); recorded.read(h.vm);
+  check(recorded.entries.empty(), "promotion empties old-to-young set");
+  check(jam_vm_prepare(h.vm, 0), "empty young fits"); jam_vm_finish(h.vm);
+  jam_vm_begin(h.vm, 0); recorded.read(h.vm);
+  check(recorded.entries.empty(), "major drops stale holders before marking");
+  check(jam_vm_prepare(h.vm, 0), "dead remembered holder reclaimed"); jam_vm_finish(h.vm);
+}
+static void retired_remembered_slots() {
+  heap h(1);
+  auto old = h.make(false, 1), live = h.make(true, 2), retired = h.make(true, 3);
+  h.at(old).left = live; h.at(old).right = retired;
+  auto first = uint64_t(old) * 2 + 2;
+  jam_vm_remember(h.vm, 0, first, 2, 1, 1); // Raw strong slots, as in arraycopy.
+  jam_vm_forget(h.vm, first + 1, 1);
+  jam_vm_begin(h.vm, 1);
+  remembered_test snapshot; snapshot.read(h.vm);
+  check(snapshot.entries.size() == 1 && snapshot.entries[0].holder == 0 &&
+        snapshot.entries[0].slot == first, "retirement removes only discarded raw slots");
+  h.trace(h.at(old).left);
+  check(!jam_vm_marked(h.vm, retired), "uncleared retired storage does not retain its target");
+  check(jam_vm_prepare(h.vm, 0), "retired slot minor fits");
+  h.at(old).left = jam_vm_forward(h.vm, live);
+  jam_vm_finish(h.vm);
+  jam_vm_forget(h.vm, first, 2);
+  jam_vm_begin(h.vm, 1); snapshot.read(h.vm);
+  check(snapshot.entries.empty(), "retirement is idempotent over absent slots");
+  check(jam_vm_prepare(h.vm, 0), "fully retired minor fits"); jam_vm_finish(h.vm);
+}
+struct wide_remembered_heap {
+  heap h{1};
+  uint32_t owner = 0;
+  uintptr_t address(uint32_t at) { return reinterpret_cast<uintptr_t>(h.base) + uint64_t(at) * 8; }
+  void write(unsigned field, uintptr_t value) { std::memcpy(reinterpret_cast<void *>(address(owner) + field * 8), &value, sizeof(value)); }
+  uintptr_t read(unsigned field) { uintptr_t value; std::memcpy(&value, reinterpret_cast<void *>(address(owner) + field * 8), sizeof(value)); return value; }
+  static void scan(void * context, jam_vm_visit * visit, uint32_t at) {
+    auto & self = *static_cast<wide_remembered_heap *>(context);
+    if (at != self.owner) { heap::scan(&self.h, visit, at); return; }
+    if (!jam_vm_claim(visit, at, 4)) return;
+    auto slot = uint64_t(at) * 2;
+    jam_vm_remember(self.h.vm, at, slot + 2, 1, 2, 0);
+    jam_vm_remember_derived(self.h.vm, at, slot + 2, slot + 4, 0);
+    auto target = uint32_t((self.read(1) - reinterpret_cast<uintptr_t>(self.h.base)) / 8);
+    jam_vm_targets(visit, &target, 1);
+  }
+};
+static void wide_and_derived_remembered_slots() {
+  wide_remembered_heap x;
+  auto & h = x.h;
+  h.make(false, 999); h.make(true, 999);
+  x.owner = jam_vm_allocate(h.vm, 4, 0);
+  auto target = h.make(true, 23);
+  x.write(0, 123); x.write(1, x.address(target)); x.write(2, x.address(target) + 13); x.write(3, 456);
+  jam_vm_begin(h.vm, 0);
+  jam_vm_trace(h.vm, &x.owner, 1, wide_remembered_heap::scan, &x, 1);
+  check(jam_vm_prepare(h.vm, 0), "wide remembered major fits");
+  target = jam_vm_forward(h.vm, target);
+  x.write(1, x.address(target)); x.write(2, x.address(target) + 13);
+  x.owner = jam_vm_forward(h.vm, x.owner);
+  jam_vm_finish(h.vm);
+  check(x.read(1) == x.address(target) && x.read(2) == x.address(target) + 13, "wide source and derived displacement survive major");
+  for (unsigned round = 0; round != 2; ++round) {
+    jam_vm_begin(h.vm, 1);
+    remembered_test snapshot; snapshot.read(h.vm);
+    check(snapshot.entries.size() == 2, "wide base and derived slots retained");
+    for (auto e : snapshot.entries) {
+      check(!e.compressed && e.holder == x.owner, "wide remembered holder/encoding preserved");
+      if (e.base_slot) check(e.base_slot == uint64_t(x.owner) * 2 + 2 && e.slot == e.base_slot + 2, "derived source relationship relocates");
+      else check(e.slot == uint64_t(x.owner) * 2 + 2, "wide base slot relocates");
+    }
+    h.trace(target);
+    check(jam_vm_prepare(h.vm, round != 0), "wide minor/promotion fits");
+    target = jam_vm_forward(h.vm, target);
+    x.write(1, x.address(target)); x.write(2, x.address(target) + 13);
+    jam_vm_finish(h.vm);
+    check(x.read(1) == x.address(target) && x.read(2) == x.address(target) + 13, "wide/derived repair survives retaining minor and promotion");
+  }
+  jam_vm_begin(h.vm, 1);
+  remembered_test snapshot; snapshot.read(h.vm);
+  check(snapshot.entries.empty(), "promotion discards wide and derived remembered entries");
+  check(jam_vm_prepare(h.vm, 0), "empty wide minor fits"); jam_vm_finish(h.vm);
+}
 static void cycles(size_t workers, bool require_simd) {
   heap h(workers);
   if (require_simd) check(std::strcmp(jam_vm_compactor(h.vm), "baseline") != 0, "SIMD selected");
@@ -277,6 +427,10 @@ static void thread_scopes() {
   check(!jam_vm_thread_current(first.vm), "last scope restores empty TLS");
 }
 int main(int argc, char **) {
+  object_starts();
+  exact_remembered_slots();
+  retired_remembered_slots();
+  wide_and_derived_remembered_slots();
   cycles(1, argc > 1); cycles(4, argc > 1); capacity_and_retry(); mixed_weak_batch();
   permanent_references(); concurrent_old_pin(); concurrent_alias_pin(); thread_scopes();
 }

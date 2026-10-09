@@ -7,7 +7,7 @@ import java.lang.reflect.Field;
 import java.util.concurrent.atomic.AtomicReference;
 import sun.misc.Unsafe;
 
-/** Exercises actual card barriers and policy boundaries on the jam-backed JVM. */
+/** Exercises exact-slot barriers and policy boundaries on the jam-backed JVM. */
 public final class GenerationSmoke {
     static final Unsafe U;
     static final long LEFT;
@@ -40,7 +40,7 @@ public final class GenerationSmoke {
             U = (Unsafe) f.get(null);
             LEFT = U.objectFieldOffset(Node.class.getDeclaredField("left"));
             check(U.objectFieldOffset(Large.class.getDeclaredField("tail")) >= 1024,
-                  "large-instance field must lie beyond its head card");
+                  "large-instance field must lie at least 1 KiB from the object start");
         } catch (ReflectiveOperationException e) { throw new ExceptionInInitializerError(e); }
     }
     static void check(boolean value, String message) {
@@ -65,7 +65,7 @@ public final class GenerationSmoke {
         a.right = a; b.right = a;
         store(ordinary, a);
         unsafeStore(unsafe, b);
-        arrayStore(array, 1536, c); // Source slot far from the old array's head card.
+        arrayStore(array, 1536, c); // Source slot far from the old array's header.
         Object[] from = {d, a, b, c};
         copy(from, array);
         largeStore(large, new Node(106));
@@ -74,10 +74,10 @@ public final class GenerationSmoke {
     static void checkGraph(Node ordinary, Node unsafe, Large large, Object[] array, AtomicReference<Object> atomic) {
         Node a = (Node) ordinary.left, b = (Node) unsafe.left;
         check(a.id == 101 && a.right == a && b.id == 102 && b.right == a, "field/Unsafe/shared cycle");
-        check(((Node) array[1536]).id == 103 && ((Node) array[2304]).id == 104, "array/arraycopy cards");
+        check(((Node) array[1536]).id == 103 && ((Node) array[2304]).id == 104, "array/arraycopy barriers");
         check(array[2305] == a && array[2306] == b && array[2307] == array[1536], "arraycopy aliasing");
         check(((Node) atomic.get()).id == 105, "volatile reference barrier");
-        check(((Node) large.tail).id == 106, "imprecise head card covers field beyond the first card");
+        check(((Node) large.tail).id == 106, "remembered slot covers a distant field");
     }
     static void barriers() {
         Node ordinary = new Node(1), unsafe = new Node(2);
@@ -96,7 +96,7 @@ public final class GenerationSmoke {
         }
         check(JamWeak.collections(0) >= minors + 5, "five real minors");
         check(JamWeak.collections(1) == promotions, "retaining minors did not promote");
-        // A major changes old offsets; its reconstructed cards must survive another minor.
+        // A major changes old offsets; its relocated remembered slots must survive another minor.
         System.gc();
         JamWeak.minor(false);
         checkGraph(ordinary, unsafe, large, array, atomic);
@@ -138,7 +138,7 @@ public final class GenerationSmoke {
         JamWeak.minor(true);
         installWeakReferent(ref);
         JamWeak.minor(false);
-        check(ref.get() == null, "dirty old Java weak owner must not strengthen its young referent");
+        check(ref.get() == null, "remembered old Java weak owner must not strengthen its young referent");
         Reference.reachabilityFence(ref);
     }
     static long[] frozenBatch() {

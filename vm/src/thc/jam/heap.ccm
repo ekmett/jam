@@ -13,6 +13,8 @@ module;
 #include <vector>
 #include <atomic>
 #include <optional>
+#include <mutex>
+#include <unordered_map>
 export module thc.jam:heap;
 import jam;
 import :weak;
@@ -55,6 +57,17 @@ export namespace thc {
 /// reservation (placeholders on Windows) spans both generations through
 /// base+16GiB+prefix+young_bytes.
 class hosted_heap {
+public:
+  /// \brief Exact source slot and its holder; the VM supplies reference policy.
+  struct remembered_slot {
+    std::uint64_t slot;
+    std::uint32_t holder;
+    bool compressed;
+    std::uint64_t base_slot = 0;
+  };
+private:
+  std::mutex remembered_lock;
+  std::unordered_map<std::uint64_t, remembered_slot> remembered;
   using generation = jam::heap::host::generation;
   jam::heap storage;
   jam::heap::host host;
@@ -150,6 +163,71 @@ public:
   [[nodiscard]] std::size_t origin(bool young) const noexcept {
     return (young ? storage.young() : storage.old()).start();
   }
+  /// \brief Enable the optional start side channel before an instrumented major.
+  /// Allocation failure leaves tracking disabled and the heap unchanged.
+  [[nodiscard]] bool track_starts() noexcept {
+    try { host.track_starts(); return true; }
+    catch (std::bad_alloc const &) { return false; }
+  }
+  /// \brief Whether the VM has enabled explicit object-start recording.
+  [[nodiscard]] bool tracks_starts() const noexcept { return host.tracks_starts(); }
+  /// \brief VM tracer/allocation hook, never inferred from raw allocation extents.
+  void record_start(std::uint32_t at) noexcept { host.record_start(at); }
+  /// \brief Borrow canonical start bits through the allocated high-water mark.
+  [[nodiscard]] std::span<std::uint32_t const> starts(bool young) const noexcept {
+    auto result = host.starts(young ? generation::young : generation::old);
+    return result.empty() ? result : result.first((used(young) + 31) / 32);
+  }
+  /// \brief Record old source slots without reading concurrently mutable targets.
+  /// Slots/stride use four-byte units. The barrier covers completed writes, including
+  /// initializing stores; the holder is retained only as policy metadata, never a root.
+  /// A zero holder denotes a known strong slot (for example an arraycopy stub).
+  /// A bulk write takes the registry lock once. Mutators cannot safepoint in this call.
+  void remember(std::uint32_t holder, std::uint64_t first, std::size_t count,
+                std::size_t stride, bool compressed) noexcept {
+    if (first / 2 < prefix_words || first / 2 >= prefix_words + words[0]) return;
+    if ((holder & young_bit) || (holder && immortal(holder))) return;
+    if ((holder && (holder < prefix_words || holder >= prefix_words + words[0])) ||
+        stride < (compressed ? 1u : 2u) || first < std::uint64_t(holder) * 2 ||
+        first > (prefix_words + words[0]) * 2 ||
+        (count && (first > (prefix_words + words[0]) * 2 - (compressed ? 1 : 2) ||
+          count - 1 > ((prefix_words + words[0]) * 2 - first - (compressed ? 1 : 2)) / stride)))
+      detail::invalid("invalid remembered source range");
+    std::lock_guard lock{remembered_lock};
+    for (std::size_t i = 0; i != count; ++i) {
+      auto slot = first + i * stride;
+      remembered.insert_or_assign(slot, remembered_slot{slot, holder, compressed});
+    }
+  }
+  /// \brief Retire exact source slots without reading their former contents.
+  /// Continuation thaw uses this for discarded frames and argument intervals.
+  void forget(std::uint64_t first, std::size_t count) noexcept {
+    if (first / 2 < prefix_words || first / 2 >= prefix_words + words[0]) return;
+    if (count > (prefix_words + words[0]) * 2 - first)
+      detail::invalid("invalid retired source range");
+    std::lock_guard lock{remembered_lock};
+    for (std::size_t i = 0; i != count; ++i) remembered.erase(first + i);
+  }
+  /// \brief Record an interior reference together with its ordinary base slot.
+  /// The VM's existing reference visitor supplies both locations and their encoding.
+  void remember_derived(std::uint32_t holder, std::uint64_t base_slot,
+                        std::uint64_t slot, bool compressed) noexcept {
+    if (!holder || (holder & young_bit) || immortal(holder)) return;
+    remember(holder, base_slot, 1, compressed ? 1 : 2, compressed);
+    remember(holder, slot, 1, compressed ? 1 : 2, compressed);
+    std::lock_guard lock{remembered_lock};
+    remembered.at(slot).base_slot = base_slot;
+  }
+  /// \brief Snapshot exact source locations at a safepoint; callbacks may trace.
+  /// No old objects are enumerated. The VM distinguishes Reference.referent from
+  /// ordinary fields using the recorded holder and applies its own weak policy.
+  [[nodiscard]] std::vector<remembered_slot> remembered_slots() const noexcept {
+    if (!collecting) detail::invalid("remembered slots require a collection safepoint");
+    std::vector<remembered_slot> result;
+    result.reserve(remembered.size());
+    for (auto const & [slot, entry] : remembered) result.push_back(entry);
+    return result;
+  }
   /// \brief Name of jam's admitted scalar or SIMD compaction kernel.
   [[nodiscard]] char const * compactor() const noexcept { return storage.compactor_name(); }
   /// \brief Admit permanent image or metadata references outside both moving arenas.
@@ -169,6 +247,7 @@ public:
   /// \brief Begin major or minor marking, retaining ordinary old liveness in a minor.
   void begin(bool minor_epoch) noexcept {
     minor = minor_epoch;
+    if (!minor) remembered.clear(); // The major marker records surviving source slots.
     host.begin(minor);
     collecting = true;
     registry.begin();
@@ -245,6 +324,31 @@ public:
   [[nodiscard]] bool prepare(bool promote) noexcept {
     if (!host.prepare(promote)) return false;
     registry.forward([&](std::uint32_t at) noexcept { return forward(at); });
+    // Repair the sparse remembered set, not the old heap. Read before root repair.
+    decltype(remembered) next;
+    if (!(minor && promote)) {
+      next.reserve(remembered.size());
+      for (auto const & [slot, entry] : remembered) {
+        auto source = entry.holder ? entry.holder : static_cast<std::uint32_t>(slot / 2);
+        auto destination_source = forward(source);
+        if (!destination_source) continue;
+        auto holder = entry.holder ? destination_source : 0;
+        auto target_slot = entry.base_slot ? entry.base_slot : slot;
+        std::uint32_t target;
+        if (entry.compressed) {
+          std::memcpy(&target, base + target_slot * 4, sizeof(target));
+        } else {
+          std::uintptr_t address;
+          std::memcpy(&address, base + target_slot * 4, sizeof(address));
+          target = address ? static_cast<std::uint32_t>((address - reinterpret_cast<std::uintptr_t>(base)) / 8) : 0;
+        }
+        if (!(target & young_bit) || immortal(target) || !(forward(target) & young_bit)) continue;
+        auto destination = std::uint64_t(destination_source) * 2 + slot - std::uint64_t(source) * 2;
+        auto base_slot = entry.base_slot ? std::uint64_t(holder) * 2 + entry.base_slot - std::uint64_t(entry.holder) * 2 : 0;
+        next.emplace(destination, remembered_slot{destination, holder, entry.compressed, base_slot});
+      }
+    }
+    remembered.swap(next);
     return true;
   }
   /// \brief Resolve an offset using frozen tables; null and dead targets resolve to null.
