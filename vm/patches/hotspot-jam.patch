@@ -3568,3 +3568,27 @@
  
      private static final WhiteBox WB = WhiteBox.getWhiteBox();
  
+--- a/src/hotspot/share/opto/arraycopynode.cpp
++++ b/src/hotspot/share/opto/arraycopynode.cpp
+@@ -193,6 +193,13 @@
+     return nullptr;
+   }
+ 
++  BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
++  // Field-wise clone stores use C2OptAccess, not a parser GraphKit. Keep the
++  // clone for macro expansion when the collector requires runtime barriers.
++  if (bs->array_copy_requires_gc_barriers(true, T_OBJECT, true, true, BarrierSetC2::Optimization)) {
++    return NodeSentinel;
++  }
++
+   MergeMemNode* mem = phase->transform(MergeMemNode::make(in_mem))->as_MergeMem();
+   if (can_reshape) {
+     phase->is_IterGVN()->_worklist.push(mem);
+@@ -223,7 +230,6 @@
+ 
+   assert(ik->nof_nonstatic_fields() <= ArrayCopyLoadStoreMaxElem, "too many fields");
+ 
+-  BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+   for (int i = 0; i < count; i++) {
+     ciField* field = ik->nonstatic_field_at(i);
+     const TypePtr* adr_type = phase->C->alias_type(field)->adr_type();
