@@ -209,6 +209,15 @@ primitives through this API and arrange to pump finalizers. See
 
 ## Suspended owners
 
+This is an **experimental source API**. Published runtime releases through
+`vm-2026.10.09-9392bca-static` do not include it. Private macOS arm64 HotSpot
+provider tests cover registration, claiming, relocation and completion; they do
+not qualify Windows, Linux or Native Image providers. The Native Image
+substitutions are included for integration, with platform qualification tracked
+separately. A matching SDK and provider package is still required before a
+consumer can pin a published binary dependency. Packaging is tracked in
+[issue #36](https://github.com/ekmett/jam/issues/36).
+
 `jam.vm.Candidate` is an optional API for a language runtime that has already
 captured a suspended computation in a heap object. It does not capture stacks,
 wake threads, or execute guest code. The owner contains the saved execution and
