@@ -71,20 +71,33 @@
              }
 --- a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/meta/HotSpotHostForeignCallsProvider.java
 +++ b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/meta/HotSpotHostForeignCallsProvider.java
-@@ -176,6 +176,12 @@
+@@ -87,6 +87,7 @@
+ 
+ import org.graalvm.collections.EconomicMap;
+ import org.graalvm.word.LocationIdentity;
++import org.graalvm.word.WordBase;
+ import org.graalvm.word.impl.Word;
+ 
+ import jdk.graal.compiler.core.common.spi.ForeignCallDescriptor;
+@@ -176,6 +177,17 @@
   */
  public abstract class HotSpotHostForeignCallsProvider extends HotSpotForeignCallsProviderImpl implements ArrayCopyForeignCalls {
  
-+    public static final HotSpotForeignCallDescriptor JAM_RECORD_START = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(),
++    // Native bookkeeping, disjoint from Java fields. Only lowered Jam snippets
++    // access these locations; collection consumes them at safepoints.
++    public static final LocationIdentity JAM_OBJECT_STARTS_LOCATION = NamedLocationIdentity.mutable("JamObjectStarts");
++    public static final LocationIdentity JAM_REMEMBERED_SLOTS_LOCATION = NamedLocationIdentity.mutable("JamRememberedSlots");
++
++    public static final HotSpotForeignCallDescriptor JAM_RECORD_START = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, JAM_OBJECT_STARTS_LOCATION,
 +                    "jam_record_start", void.class, Word.class);
 +
-+    public static final HotSpotForeignCallDescriptor JAM_REMEMBER = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(),
-+                    "jam_remember", void.class, Object.class, Word.class, long.class);
++    public static final HotSpotForeignCallDescriptor JAM_REMEMBER = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, JAM_REMEMBERED_SLOTS_LOCATION,
++                    "jam_remember", void.class, Object.class, WordBase.class, long.class);
 +
      public static final HotSpotForeignCallDescriptor JAVA_TIME_MILLIS = new HotSpotForeignCallDescriptor(LEAF_NO_VZERO, NO_SIDE_EFFECT, NO_LOCATIONS, "javaTimeMillis", long.class);
      public static final HotSpotForeignCallDescriptor JAVA_TIME_NANOS = new HotSpotForeignCallDescriptor(LEAF_NO_VZERO, NO_SIDE_EFFECT, NO_LOCATIONS, "javaTimeNanos", long.class);
  
-@@ -463,6 +469,8 @@
+@@ -463,6 +475,8 @@
  
      public void initialize(HotSpotProviders providers, OptionValues options) {
          GraalHotSpotVMConfig c = runtime.getVMConfig();
@@ -631,15 +644,16 @@
  
 --- a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/replacements/HotSpotAllocationSnippets.java
 +++ b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/replacements/HotSpotAllocationSnippets.java
-@@ -31,6 +31,7 @@
+@@ -31,6 +31,8 @@
  import static jdk.graal.compiler.hotspot.HotSpotBackend.NEW_ARRAY_OR_NULL;
  import static jdk.graal.compiler.hotspot.HotSpotBackend.NEW_INSTANCE_OR_NULL;
  import static jdk.graal.compiler.hotspot.HotSpotBackend.NEW_MULTI_ARRAY_OR_NULL;
 +import static jdk.graal.compiler.hotspot.meta.HotSpotHostForeignCallsProvider.JAM_RECORD_START;
++import static jdk.graal.compiler.hotspot.meta.HotSpotHostForeignCallsProvider.JAM_OBJECT_STARTS_LOCATION;
  import static jdk.graal.compiler.hotspot.replacements.HotSpotReplacementsUtil.HotSpotOptimizingFieldLocationIdentity.CLASS_ARRAY_KLASS_LOCATION;
  import static jdk.graal.compiler.hotspot.replacements.HotSpotReplacementsUtil.HotSpotFieldLocationIdentity.CLASS_INIT_STATE_LOCATION;
  import static jdk.graal.compiler.hotspot.replacements.HotSpotReplacementsUtil.HotSpotFieldLocationIdentity.CLASS_INIT_THREAD_LOCATION;
-@@ -65,6 +66,7 @@
+@@ -65,6 +67,7 @@
  import static jdk.vm.ci.meta.DeoptimizationReason.RuntimeConstraint;
  
  import org.graalvm.word.UnsignedWord;
@@ -647,7 +661,7 @@
  import org.graalvm.word.impl.Word;
  
  import jdk.graal.compiler.api.replacements.Fold;
-@@ -422,11 +424,25 @@
+@@ -422,11 +425,25 @@
          return getMinimalBulkZeroingSize(INJECTED_OPTIONVALUES);
      }
  
@@ -673,3 +687,35 @@
      }
  
      @Override
+@@ -563,6 +580,7 @@
+                             "allocateInstance",
+                             null,
+                             receiver,
++                            JAM_OBJECT_STARTS_LOCATION,
+                             MARK_WORD_LOCATION,
+                             HUB_WRITE_LOCATION,
+                             TLAB_TOP_LOCATION,
+@@ -572,6 +590,7 @@
+                             "allocateArray",
+                             null,
+                             receiver,
++                            JAM_OBJECT_STARTS_LOCATION,
+                             MARK_WORD_LOCATION,
+                             HUB_WRITE_LOCATION,
+                             TLAB_TOP_LOCATION,
+@@ -581,6 +600,7 @@
+                             "allocateArrayDynamic",
+                             null,
+                             receiver,
++                            JAM_OBJECT_STARTS_LOCATION,
+                             MARK_WORD_LOCATION,
+                             HUB_WRITE_LOCATION,
+                             TLAB_TOP_LOCATION,
+@@ -590,6 +610,7 @@
+                             "allocateInstanceDynamic",
+                             null,
+                             receiver,
++                            JAM_OBJECT_STARTS_LOCATION,
+                             MARK_WORD_LOCATION,
+                             HUB_WRITE_LOCATION,
+                             TLAB_TOP_LOCATION,
