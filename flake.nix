@@ -49,6 +49,8 @@
             };
             nativeBuildInputs = [ pkgs.cmake pkgs.ninja llvm.clang-tools ];
             propagatedBuildInputs = dependencies;
+            # Nix's Clang wrapper adds linker flags to CMake BMI --precompile steps.
+            env.NIX_CFLAGS_COMPILE = "-Wno-unused-command-line-argument";
             cmakeFlags = [
               "-DJAM_BUILD_TESTS=OFF"
               "-DJAM_BUILD_DOCS=OFF"
