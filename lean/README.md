@@ -13,6 +13,10 @@ lean -DwarningAsError=true CompactionLayout.lean
 The toolchain is pinned to Lean 4.24.0. The proof uses bundled `Std`; there are
 no additional packages. No `sorry`, custom axioms or native evaluation are used.
 
+The [VM finalizer models](finalizers/README.md) cover claim ownership,
+conditional reachability, batch retirement and generation-tagged tokens. Run
+`python3 lean/finalizers/check.py` from the repository root to check those proofs.
+
 ## The layout monoid
 
 Once joined groups and their maximum alignments are known, each group maps its
