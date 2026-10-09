@@ -2,6 +2,7 @@
 
 <!-- badges:start -->
 [![build + docs](https://img.shields.io/github/actions/workflow/status/ekmett/jam/ci.yml?branch=main&style=flat&label=build+%2B+docs&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/ci.yml?query=branch%3Amain)
+[![Docker](https://img.shields.io/github/actions/workflow/status/ekmett/jam/docker.yml?branch=main&style=flat&label=Docker&logo=docker&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/docker.yml)
 [![runtime build](https://img.shields.io/github/actions/workflow/status/ekmett/jam/vm.yml?branch=main&style=flat&label=runtime+build&logo=githubactions&logoColor=white)](https://github.com/ekmett/jam/actions/workflows/vm.yml?query=branch%3Amain)
 [![issues](https://img.shields.io/github/issues/ekmett/jam?style=flat&label=issues&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/jam/issues)
 [![commits](https://img.shields.io/github/commit-activity/w/ekmett/jam?style=flat&label=commits&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/jam/activity)
@@ -12,7 +13,7 @@
 [![Clang: 23](https://img.shields.io/static/v1?label=Clang&message=23&color=6f42c1&style=flat&logo=llvm&logoColor=white)](README.md)
 [![Java: 25](https://img.shields.io/static/v1?label=Java&message=25&color=b66a13&style=flat&logo=openjdk&logoColor=white)](vm/README.md)
 [![GraalVM: 25.3.4.1](assets/badges/graalvm-version.svg)](vm/config/source-pins.json)
-[![SubstrateVM: 25.3.4.1](https://img.shields.io/static/v1?label=SubstrateVM&message=25.3.4.1&color=b66a13&style=flat&logo=openjdk&logoColor=white)](docs/vm/build.md#graalvm)
+[![SubstrateVM: 25.3.4.1](assets/badges/substratevm-version.svg)](docs/vm/build.md#graalvm)
 
 [![OS: Linux · macOS · Windows](https://img.shields.io/static/v1?label=OS&message=Linux+%C2%B7+macOS+%C2%B7+Windows&color=64748b&style=flat)](docs/building.md)
 [![CPU: x86-64 · ARM64](https://img.shields.io/static/v1?label=CPU&message=x86-64+%C2%B7+ARM64&color=64748b&style=flat)](docs/building.md)
@@ -21,6 +22,7 @@
 [![Contributor Covenant: 2.0](https://img.shields.io/static/v1?label=Contributor+Covenant&message=2.0&color=007ec6&style=flat&logo=contributorcovenant&logoColor=white)](CODE_OF_CONDUCT.md)
 
 [![docs: read](https://img.shields.io/static/v1?label=docs&message=read&color=007ec6&style=flat)](https://ekmett.github.io/jam/)
+[![Docker: GHCR](https://img.shields.io/badge/Docker-GHCR-2496ED?style=flat&logo=docker&logoColor=white)](https://github.com/ekmett/jam/pkgs/container/jam)
 [![dist: downloads](https://img.shields.io/static/v1?label=dist&message=downloads&color=007ec6&style=flat)](https://github.com/ekmett/jam/releases)
 <!-- badges:end -->
 
