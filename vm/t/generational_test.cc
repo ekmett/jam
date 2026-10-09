@@ -47,6 +47,49 @@ struct heap {
   void trace(uint32_t o) { jam_vm_trace(vm, &o, 1, scan, this, 1); }
   void weak_close() { jam_vm_weak_close(vm, scan, this); jam_vm_weak_finalizers(vm, scan, this); }
 };
+static void candidate_owners() {
+  heap h(4);
+  h.make(true, 999); // Compaction must repair the registry, not preserve raw offsets.
+  auto a = h.make(true, 1), b = h.make(true, 2), live = h.make(true, 3);
+  h.at(a).left = b; h.at(b).left = a;
+  auto ta = jam_vm_candidate_arm(h.vm, a, 11);
+  auto tb = jam_vm_candidate_arm(h.vm, b, 12);
+  auto tc = jam_vm_candidate_arm(h.vm, live, 13);
+  auto w = jam_vm_weak_create(h.vm, a, b, 0);
+  check(ta && tb && tc, "ABI registers candidates");
+  jam_vm_begin(h.vm, 1);
+  jam_vm_weak_roots(h.vm, heap::scan, &h); h.weak_close();
+  check(jam_vm_marked(h.vm, a) && jam_vm_marked(h.vm, b), "minor roots armed owners");
+  check(jam_vm_prepare(h.vm, 0), "candidate minor fits");
+  live = jam_vm_forward(h.vm, live); jam_vm_finish(h.vm);
+  check(!jam_vm_candidate_epoch(h.vm) && !jam_vm_candidate_poll(h.vm, ta, 11), "minor never selects");
+  jam_vm_begin(h.vm, 0);
+  jam_vm_weak_roots(h.vm, heap::scan, &h); h.trace(live); h.weak_close();
+  check(jam_vm_weak_value(h.vm, w), "rescue precedes generalized weak retirement");
+  check(!jam_vm_candidate_epoch(h.vm), "no publication before movement");
+  check(jam_vm_prepare(h.vm, 1), "candidate major fits");
+  jam_vm_finish(h.vm);
+  check(jam_vm_candidate_epoch(h.vm) == 1, "finish publishes the selected batch");
+  a = jam_vm_candidate_poll(h.vm, ta, 11); b = jam_vm_candidate_poll(h.vm, tb, 12);
+  check(a && b && h.at(a).identity == 1 && h.at(b).identity == 2 &&
+        h.at(a).left == b && h.at(b).left == a, "batch rescue and relocation preserve cycle");
+  check(!jam_vm_candidate_poll(h.vm, tc, 13), "ordinarily rooted candidate stays armed");
+  live = jam_vm_candidate_disarm(h.vm, tc, 13);
+  check(live && h.at(live).identity == 3, "normal wake claims relocated armed owner");
+  jam_vm_candidate_complete(h.vm, tc, 13);
+  jam_vm_candidate_complete(h.vm, ta, 99);
+  jam_vm_begin(h.vm, 0); jam_vm_weak_roots(h.vm, heap::scan, &h); h.weak_close();
+  check(jam_vm_marked(h.vm, a) && jam_vm_marked(h.vm, b) && !jam_vm_marked(h.vm, live),
+        "claimed owners survive later GC until exact completion");
+  check(jam_vm_prepare(h.vm, 0), "claimed candidate collection fits"); jam_vm_finish(h.vm);
+  check(!jam_vm_candidate_poll(h.vm, ta, 11) && !jam_vm_candidate_disarm(h.vm, tb, 12), "no duplicate native claim");
+  jam_vm_candidate_complete(h.vm, ta, 11); jam_vm_candidate_complete(h.vm, tb, 12);
+  jam_vm_begin(h.vm, 0); jam_vm_weak_roots(h.vm, heap::scan, &h); h.weak_close();
+  check(!jam_vm_weak_value(h.vm, w), "completed candidate cycle is no longer retained");
+  check(jam_vm_prepare(h.vm, 0), "completed candidate reclaim fits"); jam_vm_finish(h.vm);
+  check(jam_vm_used(h.vm, 0) == h.page / 8 && jam_vm_used(h.vm, 1) == h.page / 8,
+        "all released candidate payloads are reclaimed");
+}
 static void object_starts() {
   heap h(1);
   size_t count = 123;
@@ -250,11 +293,14 @@ static void capacity_and_retry() {
   old = jam_vm_forward(h.vm, old); young = jam_vm_forward(h.vm, young);
   jam_vm_finish(h.vm);
   auto id = jam_vm_weak_create(h.vm, old, young, 0);
+  auto candidate = jam_vm_candidate_arm(h.vm, young, 41);
   jam_vm_begin(h.vm, 1);
   h.weak_close(); // Old key retains the complete young chain without a young root.
   check(!jam_vm_prepare(h.vm, 1), "promotion refuses insufficient old capacity");
   check(jam_vm_weak_value(h.vm, id) == young, "failed prepare does not forward weak registry");
   check(jam_vm_marked(h.vm, young), "failed prepare remains marking phase");
+  check(jam_vm_candidate_disarm(h.vm, candidate, 41) == young,
+        "failed prepare leaves candidate reference unchanged");
   check(jam_vm_prepare(h.vm, 0), "failed promotion retries retaining minor");
   young = jam_vm_forward(h.vm, young);
   jam_vm_finish(h.vm);
@@ -262,6 +308,7 @@ static void capacity_and_retry() {
   auto p = young;
   for (size_t n = count; n; --n) { check(h.at(p).identity == n - 1, "whole chain survived retry"); p = h.at(p).left; }
   check(!p, "chain terminates");
+  jam_vm_candidate_complete(h.vm, candidate, 41);
   // A major can finally reject the unrooted old key; minor conservative liveness is scoped.
   jam_vm_begin(h.vm, 0); h.weak_close();
   check(!jam_vm_weak_value(h.vm, id), "old weak key dies on major");
@@ -427,6 +474,7 @@ static void thread_scopes() {
   check(!jam_vm_thread_current(first.vm), "last scope restores empty TLS");
 }
 int main(int argc, char **) {
+  candidate_owners();
   object_starts();
   exact_remembered_slots();
   retired_remembered_slots();

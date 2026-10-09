@@ -142,6 +142,26 @@ JAM_VM_API uint32_t jam_vm_weak_take(jam_vm *, uint64_t * id);
 JAM_VM_API uint32_t jam_vm_weak_finalize(jam_vm *, uint64_t id);
 JAM_VM_API void jam_vm_weak_complete(jam_vm *, uint64_t id);
 
+/** Optional owner rescue. Serialize with the host heap lock, except epoch().
+ * arm requires a nonnull encoded owner and wait in 1..INT64_MAX; zero means
+ * invalid input or metadata exhaustion, without changing prior registrations.
+ * Minors retain all owners. Majors select unreachable armed owners after weak
+ * closure, rescue the entire batch, then close/retire ordinary weak entries.
+ * poll claims selected owners; disarm claims armed or selected owners. Both
+ * return zero for stale tickets, mismatched waits or an existing claimant.
+ * A claim stays rooted until complete, after ordinary ownership transfer or
+ * terminal cancellation. Completion is idempotent and cannot cancel a rival.
+ * Roots/closure/repair/publication use the existing weak_roots/weak_close and
+ * prepare/finish phases. No Java callback runs during collection. */
+JAM_VM_API uint64_t jam_vm_candidate_arm(jam_vm *, uint32_t owner, uint64_t wait);
+JAM_VM_API uint32_t jam_vm_candidate_poll(jam_vm *, uint64_t ticket, uint64_t wait);
+JAM_VM_API uint32_t jam_vm_candidate_disarm(jam_vm *, uint64_t ticket, uint64_t wait);
+JAM_VM_API void jam_vm_candidate_complete(jam_vm *, uint64_t ticket, uint64_t wait);
+/** Acquire the epoch published after heap repair. Snapshot before scanning;
+ * scan initially and on changes, or always if saturated at INT64_MAX. */
+JAM_VM_API uint64_t jam_vm_candidate_epoch(jam_vm const *);
+
+
 /* Scan callback claims the entire object before declaring fields. Slot indices
  * are absolute four-byte offsets from the compressed-oop base. Batch fields to
  * avoid a foreign call per field. Weak fields are declared with follow=0 and

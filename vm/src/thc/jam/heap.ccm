@@ -18,6 +18,7 @@ module;
 export module thc.jam:heap;
 import jam;
 import :weak;
+import :candidate;
 
 namespace thc::detail {
 [[noreturn]] inline void invalid(char const * message) noexcept {
@@ -72,6 +73,7 @@ private:
   jam::heap storage;
   jam::heap::host host;
   weak_registry registry;
+  candidate_registry candidate_roots;
   std::byte * const base;
   std::size_t const prefix_words;
   std::size_t const words[2];
@@ -244,6 +246,22 @@ public:
   }
   /// \brief Borrow the serialized generalized weak registry.
   template<class Self> [[nodiscard]] auto & weaks(this Self & self) noexcept { return self.registry; }
+  /// \brief Borrow the serialized optional owner-rescue registry.
+  template<class Self> [[nodiscard]] auto & candidates(this Self & self) noexcept { return self.candidate_roots; }
+  /// \brief Retain pending weak finalizers and the candidate roots for this epoch.
+  void weak_roots(auto && trace) noexcept {
+    registry.roots(trace);
+    if (!candidate_roots.empty()) candidate_roots.roots(minor, trace);
+  }
+  /// \brief Rescue major candidates after ordinary closure but before weak retirement.
+  void weak_close(auto && trace) noexcept {
+    auto live = [&](std::uint32_t at) noexcept { return marked(at); };
+    if (!minor && !candidate_roots.empty()) {
+      registry.trace_live(live, trace);
+      candidate_roots.select(live, trace);
+    }
+    registry.close(live, trace);
+  }
   /// \brief Begin major or minor marking, retaining ordinary old liveness in a minor.
   void begin(bool minor_epoch) noexcept {
     minor = minor_epoch;
@@ -324,6 +342,7 @@ public:
   [[nodiscard]] bool prepare(bool promote) noexcept {
     if (!host.prepare(promote)) return false;
     registry.forward([&](std::uint32_t at) noexcept { return forward(at); });
+    candidate_roots.forward([&](std::uint32_t at) noexcept { return forward(at); });
     // Repair the sparse remembered set, not the old heap. Read before root repair.
     decltype(remembered) next;
     if (!(minor && promote)) {
@@ -362,6 +381,7 @@ public:
     host.finish();
     publish(old_moved);
     collecting = false;
+    candidate_roots.publish();
   }
 };
 }

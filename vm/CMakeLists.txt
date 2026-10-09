@@ -4,7 +4,7 @@
 add_library(jam-vm SHARED src/adapter/jam_vm.cc)
 add_library(jam::vm ALIAS jam-vm)
 target_sources(jam-vm PRIVATE FILE_SET CXX_MODULES FILES
-  src/thc_jam.ccm src/thc/jam/heap.ccm src/thc/jam/weak.ccm)
+  src/thc_jam.ccm src/thc/jam/heap.ccm src/thc/jam/weak.ccm src/thc/jam/candidate.ccm)
 target_include_directories(jam-vm PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/adapter>"
   "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
@@ -18,6 +18,10 @@ if(APPLE)
   set_target_properties(jam-vm PROPERTIES BUILD_RPATH "${JAM_VM_RUNTIME}")
 endif()
 if(JAM_BUILD_TESTS)
+  add_executable(jam-candidate-registry-test t/candidate-registry-test.cc)
+  target_sources(jam-candidate-registry-test PRIVATE FILE_SET CXX_MODULES FILES
+    t/candidate-registry.ccm src/thc/jam/candidate.ccm src/thc/jam/weak.ccm)
+  add_test(NAME jam-candidate-registry-test COMMAND jam-candidate-registry-test)
   add_executable(jam-weak-registry-test t/weak-registry-test.cc)
   target_sources(jam-weak-registry-test PRIVATE FILE_SET CXX_MODULES FILES
     t/weak-registry.ccm src/thc/jam/weak.ccm)
@@ -35,7 +39,7 @@ if(JAM_BUILD_TESTS)
     target_link_libraries(jam-generational-test PRIVATE onecore)
   endif()
 
-  set_tests_properties(jam-vm-test jam-generational-test jam-weak-registry-test PROPERTIES LABELS vm)
+  set_tests_properties(jam-vm-test jam-generational-test jam-weak-registry-test jam-candidate-registry-test PROPERTIES LABELS vm)
 endif()
 
 # Runtime tools receive this directory explicitly; standalone wrappers default

@@ -206,3 +206,52 @@ export THC_OPTS="-Xshare:off -Xms256m -Xmx256m -XX:+UnlockExperimentalVMOptions 
 This selects the collector. The thc runtime still needs to lower its weak
 primitives through this API and arrange to pump finalizers. See
 [supported configurations](status.md) for the remaining runtime work.
+
+## Suspended owners
+
+`jam.vm.Candidate` is an optional API for a language runtime that has already
+captured a suspended computation in a heap object. It does not capture stacks,
+wake threads, or execute guest code. The owner contains the saved execution and
+pending operation; the collector need not understand either.
+
+Call `Candidate.arm(owner, waitGeneration)` while ordinary roots still hold the
+owner. Publish the returned ticket and wait generation in an owner-free inventory
+before dropping those roots. A carrier stack, thread attachment or wake callback
+that still retains the owner prevents selection. `Reference.reachabilityFence`
+can keep the owner alive through inventory publication.
+
+Minor collections retain every registered owner. A major first finishes ordinary
+strong tracing and the live-key weak closure, then selects **all** unreachable
+armed owners before tracing any of them. It traces that batch and closes weak
+associations again before retiring dead weak keys. Mutually unreachable suspended
+owners are therefore selected together, while owners reached through ordinary
+live weak associations are not selected.
+
+`Candidate.poll(ticket, waitGeneration)` claims a selected owner. For ordinary
+wakeup or cancellation, `Candidate.disarm(ticket, waitGeneration)` can claim an
+armed or selected owner instead. Both return null for stale generations or an
+existing claimant. A successful claim stays rooted across further collections
+until `Candidate.complete(ticket, waitGeneration)` releases it. Complete only
+after installing an ordinary strong execution root or finishing terminal cleanup;
+a failed scheduling attempt must retain and retry ownership. A null claim cannot
+undo an already committed guest operation. Abandoning a claim leaks its retained
+root rather than losing the suspended execution.
+
+The normal-time service scans once initially, then snapshots `Candidate.epoch()`
+**before** scanning its synchronized inventory. Record that snapshot only after a
+successful scan. The epoch is published after compaction and reference repair;
+a selection during the scan causes another pass. At `Long.MAX_VALUE` it saturates,
+so scan on every poll. A failed collection attempt does not consume a pending
+publication. This API does not trigger collection or promise progress without a
+major collection.
+
+Tickets belong to one JVM or isolate. Slot generations prevent stale ticket reuse;
+the positive caller-owned wait generation distinguishes logical operations. The
+native registry is shared by HotSpot and Native Image. Hosts use the existing
+weak-root, weak-close, preparation and finish phases; heaps without candidates
+keep their existing weak-close path.
+
+This source API requires a provider with the Candidate hooks. Compiling its Java
+class against an older runtime does not add those hooks. JNI reports missing
+optional hooks only when Candidate is used, leaving the existing Weak API usable.
+See the Java API documentation for failure and ownership contracts.
