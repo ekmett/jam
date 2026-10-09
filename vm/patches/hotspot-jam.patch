@@ -2365,13 +2365,14 @@
 +#endif // SHARE_GC_JAM_JAMTHREADLOCALDATA_HPP
 --- a/src/hotspot/share/gc/jam/jamWeak.cpp
 +++ b/src/hotspot/share/gc/jam/jamWeak.cpp
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,172 @@
 +// SPDX-FileCopyrightText: 2026 Edward Kmett
 +// SPDX-License-Identifier: GPL-2.0-only
 +
 +#include "classfile/vmSymbols.hpp"
 +#include "gc/jam/jamHeap.hpp"
 +#include "jvm.h"
++#include "oops/access.inline.hpp"
 +#include "oops/compressedOops.inline.hpp"
 +#include "oops/typeArrayOop.inline.hpp"
 +#include "runtime/handles.inline.hpp"
@@ -2458,6 +2459,69 @@
 +  JamHeap* heap = jam_weak_heap(CHECK);
 +  MutexLocker lock(Heap_lock);
 +  jam_vm_weak_complete(heap->jam(), uint64_t(token));
++JVM_END
++
++JVM_ENTRY(jlong, JVM_JamCandidateArm(JNIEnv* env, jclass ignored,
++                                   jobject owner, jlong wait_generation))
++  JamHeap* heap = jam_weak_heap(CHECK_0);
++  if (owner == nullptr) {
++    THROW_MSG_0(vmSymbols::java_lang_NullPointerException(), "candidate owner");
++  }
++  if (wait_generation <= 0) {
++    THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(), "candidate wait generation must be positive");
++  }
++  uint64_t ticket;
++  {
++    MutexLocker lock(Heap_lock);
++    ticket = jam_vm_candidate_arm(heap->jam(), jam_weak_offset(owner), uint64_t(wait_generation));
++  }
++  if (ticket == 0) {
++    THROW_MSG_0(vmSymbols::java_lang_OutOfMemoryError(), "Jam candidate registration metadata exhausted");
++  }
++  return jlong(ticket);
++JVM_END
++
++static jobject jam_candidate_claim(jclass klass, jlong ticket, jlong wait_generation,
++                                   bool disarm, TRAPS) {
++  JamHeap* heap = jam_weak_heap(CHECK_NULL);
++  if (ticket <= 0 || wait_generation <= 0) return nullptr;
++  // Reserve the return handle before changing ownership; the class is a temporary root.
++  jobject result = JNIHandles::make_local(THREAD, JNIHandles::resolve_non_null(klass),
++                                          AllocFailStrategy::RETURN_NULL);
++  if (result == nullptr) {
++    THROW_MSG_NULL(vmSymbols::java_lang_OutOfMemoryError(), "Jam candidate return handle exhausted");
++  }
++  MutexLocker lock(Heap_lock);
++  uint32_t at = disarm
++    ? jam_vm_candidate_disarm(heap->jam(), uint64_t(ticket), uint64_t(wait_generation))
++    : jam_vm_candidate_poll(heap->jam(), uint64_t(ticket), uint64_t(wait_generation));
++  if (at == 0) {
++    JNIHandles::destroy_local(result);
++    return nullptr;
++  }
++  // Local JNI handles are untagged; this store cannot allocate or safepoint.
++  NativeAccess<>::oop_store(reinterpret_cast<oop*>(result), jam_weak_object(at));
++  return result;
++}
++
++JVM_ENTRY(jobject, JVM_JamCandidatePoll(JNIEnv* env, jclass klass, jlong ticket, jlong wait_generation))
++  return jam_candidate_claim(klass, ticket, wait_generation, false, THREAD);
++JVM_END
++
++JVM_ENTRY(jobject, JVM_JamCandidateDisarm(JNIEnv* env, jclass klass, jlong ticket, jlong wait_generation))
++  return jam_candidate_claim(klass, ticket, wait_generation, true, THREAD);
++JVM_END
++
++JVM_ENTRY(void, JVM_JamCandidateComplete(JNIEnv* env, jclass ignored, jlong ticket, jlong wait_generation))
++  JamHeap* heap = jam_weak_heap(CHECK);
++  if (ticket <= 0 || wait_generation <= 0) return;
++  MutexLocker lock(Heap_lock);
++  jam_vm_candidate_complete(heap->jam(), uint64_t(ticket), uint64_t(wait_generation));
++JVM_END
++
++JVM_ENTRY(jlong, JVM_JamCandidateEpoch(JNIEnv* env, jclass ignored))
++  JamHeap* heap = jam_weak_heap(CHECK_0);
++  return jlong(jam_vm_candidate_epoch(heap->jam()));
 +JVM_END
 +
 +JVM_ENTRY(void, JVM_JamCollect(JNIEnv* env, jclass ignored, jboolean minor, jboolean promote))
@@ -2973,7 +3037,7 @@
    ZGC_ONLY(VM_LONG_CONSTANTS_Z(declare_constant))
 --- a/src/hotspot/share/include/jvm.h
 +++ b/src/hotspot/share/include/jvm.h
-@@ -117,6 +117,29 @@
+@@ -117,6 +117,45 @@
  
  JNIEXPORT void JNICALL
  JVM_GC(void);
@@ -2994,6 +3058,22 @@
 +
 +JNIEXPORT void JNICALL
 +JVM_JamWeakComplete(JNIEnv *env, jclass ignored, jlong token);
++
++/* Optional retention candidates; ticket and wait generation must both match. */
++JNIEXPORT jlong JNICALL
++JVM_JamCandidateArm(JNIEnv *env, jclass ignored, jobject owner, jlong wait_generation);
++
++JNIEXPORT jobject JNICALL
++JVM_JamCandidatePoll(JNIEnv *env, jclass klass, jlong ticket, jlong wait_generation);
++
++JNIEXPORT jobject JNICALL
++JVM_JamCandidateDisarm(JNIEnv *env, jclass klass, jlong ticket, jlong wait_generation);
++
++JNIEXPORT void JNICALL
++JVM_JamCandidateComplete(JNIEnv *env, jclass ignored, jlong ticket, jlong wait_generation);
++
++JNIEXPORT jlong JNICALL
++JVM_JamCandidateEpoch(JNIEnv *env, jclass ignored);
 +
 +JNIEXPORT void JNICALL
 +JVM_JamCollect(JNIEnv *env, jclass ignored, jboolean minor, jboolean promote);

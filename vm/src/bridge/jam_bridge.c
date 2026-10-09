@@ -12,6 +12,7 @@
 #endif
 #include <jni.h>
 #include "jam_vm_Weak.h"
+#include "jam_vm_Candidate.h"
 
 #if defined(_WIN32)
 static FARPROC vm_symbol(char const *name) {
@@ -30,6 +31,19 @@ static jobject (JNICALL *weak_take)(JNIEnv *, jclass, jlongArray);
 static jobject (JNICALL *weak_finalize)(JNIEnv *, jclass, jlong);
 static void (JNICALL *weak_complete)(JNIEnv *, jclass, jlong);
 static jlong (JNICALL *collections)(JNIEnv *, jclass, jint);
+
+static jlong (JNICALL *candidate_arm)(JNIEnv *, jclass, jobject, jlong);
+static jobject (JNICALL *candidate_poll)(JNIEnv *, jclass, jlong, jlong);
+static jobject (JNICALL *candidate_disarm)(JNIEnv *, jclass, jlong, jlong);
+static void (JNICALL *candidate_complete)(JNIEnv *, jclass, jlong, jlong);
+static jlong (JNICALL *candidate_epoch)(JNIEnv *, jclass);
+
+static int candidate_available(JNIEnv *env) {
+  if (candidate_arm && candidate_poll && candidate_disarm && candidate_complete && candidate_epoch) return 1;
+  jclass error = (*env)->FindClass(env, "java/lang/UnsatisfiedLinkError");
+  if (error) (*env)->ThrowNew(env, error, "jam-vm Candidate requires a JVM exporting the Jam candidate hooks");
+  return 0;
+}
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
   (void)reserved;
@@ -55,6 +69,17 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     if (error) (*env)->ThrowNew(env, error, "jam-vm requires a JVM exporting the Jam weak hooks");
     return JNI_ERR;
   }
+  // Candidate is optional: older Jam JVMs must still load the Weak bridge.
+  candidate_arm = (jlong (JNICALL *)(JNIEnv *, jclass, jobject, jlong))
+    vm_symbol("JVM_JamCandidateArm");
+  candidate_poll = (jobject (JNICALL *)(JNIEnv *, jclass, jlong, jlong))
+    vm_symbol("JVM_JamCandidatePoll");
+  candidate_disarm = (jobject (JNICALL *)(JNIEnv *, jclass, jlong, jlong))
+    vm_symbol("JVM_JamCandidateDisarm");
+  candidate_complete = (void (JNICALL *)(JNIEnv *, jclass, jlong, jlong))
+    vm_symbol("JVM_JamCandidateComplete");
+  candidate_epoch = (jlong (JNICALL *)(JNIEnv *, jclass))
+    vm_symbol("JVM_JamCandidateEpoch");
   return JNI_VERSION_1_8;
 }
 
@@ -81,4 +106,32 @@ JNIEXPORT jobject JNICALL Java_jam_vm_Weak_finalizeNow(JNIEnv *env, jclass klass
 
 JNIEXPORT void JNICALL Java_jam_vm_Weak_complete(JNIEnv *env, jclass klass, jlong token) {
   weak_complete(env, klass, token);
+}
+
+JNIEXPORT jlong JNICALL Java_jam_vm_Candidate_arm(JNIEnv *env, jclass klass,
+                                                jobject owner, jlong wait_generation) {
+  if (!candidate_available(env)) return 0;
+  return candidate_arm(env, klass, owner, wait_generation);
+}
+
+JNIEXPORT jobject JNICALL Java_jam_vm_Candidate_poll(JNIEnv *env, jclass klass,
+                                                   jlong ticket, jlong wait_generation) {
+  if (!candidate_available(env)) return NULL;
+  return candidate_poll(env, klass, ticket, wait_generation);
+}
+
+JNIEXPORT jobject JNICALL Java_jam_vm_Candidate_disarm(JNIEnv *env, jclass klass,
+                                                     jlong ticket, jlong wait_generation) {
+  if (!candidate_available(env)) return NULL;
+  return candidate_disarm(env, klass, ticket, wait_generation);
+}
+
+JNIEXPORT void JNICALL Java_jam_vm_Candidate_complete(JNIEnv *env, jclass klass,
+                                                    jlong ticket, jlong wait_generation) {
+  if (candidate_available(env)) candidate_complete(env, klass, ticket, wait_generation);
+}
+
+JNIEXPORT jlong JNICALL Java_jam_vm_Candidate_epoch(JNIEnv *env, jclass klass) {
+  if (!candidate_available(env)) return 0;
+  return candidate_epoch(env, klass);
 }

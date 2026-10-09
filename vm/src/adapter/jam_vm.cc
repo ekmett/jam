@@ -109,10 +109,10 @@ uint64_t jam_vm_weak_create(jam_vm * vm, uint32_t key, uint32_t value, uint32_t 
 }
 uint32_t jam_vm_weak_value(jam_vm const * vm, uint64_t id) { return vm->heap.weaks().value(id); }
 void jam_vm_weak_roots(jam_vm * vm, jam_vm_scan scan, void * context) {
-  vm->heap.weaks().roots(tracer(vm, scan, context));
+  vm->heap.weak_roots(tracer(vm, scan, context));
 }
 void jam_vm_weak_close(jam_vm * vm, jam_vm_scan scan, void * context) {
-  vm->heap.weaks().close([&](uint32_t at) noexcept { return vm->heap.marked(at); }, tracer(vm, scan, context));
+  vm->heap.weak_close(tracer(vm, scan, context));
 }
 void jam_vm_weak_finalizers(jam_vm * vm, jam_vm_scan scan, void * context) {
   vm->heap.weaks().roots(tracer(vm, scan, context));
@@ -120,6 +120,19 @@ void jam_vm_weak_finalizers(jam_vm * vm, jam_vm_scan scan, void * context) {
 uint32_t jam_vm_weak_take(jam_vm * vm, uint64_t * id) { return vm->heap.weaks().take(*id); }
 uint32_t jam_vm_weak_finalize(jam_vm * vm, uint64_t id) { return vm->heap.weaks().finalize(id); }
 void jam_vm_weak_complete(jam_vm * vm, uint64_t id) { vm->heap.weaks().complete(id); }
+uint64_t jam_vm_candidate_arm(jam_vm * vm, uint32_t owner, uint64_t wait) {
+  return vm->heap.candidates().arm(owner, wait);
+}
+uint32_t jam_vm_candidate_poll(jam_vm * vm, uint64_t ticket, uint64_t wait) {
+  return vm->heap.candidates().poll(ticket, wait);
+}
+uint32_t jam_vm_candidate_disarm(jam_vm * vm, uint64_t ticket, uint64_t wait) {
+  return vm->heap.candidates().disarm(ticket, wait);
+}
+void jam_vm_candidate_complete(jam_vm * vm, uint64_t ticket, uint64_t wait) {
+  vm->heap.candidates().complete(ticket, wait);
+}
+uint64_t jam_vm_candidate_epoch(jam_vm const * vm) { return vm->heap.candidates().epoch(); }
 int jam_vm_claim(jam_vm_visit * visit, uint32_t at, size_t words) { return visit->visitor.claim(at, words); }
 void jam_vm_targets(jam_vm_visit * visit, uint32_t const * targets, size_t count) {
   visit->visitor.targets(std::span{targets, count});

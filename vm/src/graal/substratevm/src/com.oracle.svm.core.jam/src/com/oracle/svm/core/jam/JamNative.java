@@ -119,4 +119,14 @@ final class JamNative {
     static native int weakFinalize(Pointer heap, long id);
     @CFunction(value = "jam_vm_weak_complete", transition = NO_TRANSITION)
     static native void weakComplete(Pointer heap, long id);
+    @CFunction(value = "jam_vm_candidate_arm", transition = NO_TRANSITION)
+    static native long candidateArm(Pointer heap, int owner, long waitGeneration);
+    @CFunction(value = "jam_vm_candidate_poll", transition = NO_TRANSITION)
+    static native int candidatePoll(Pointer heap, long ticket, long waitGeneration);
+    @CFunction(value = "jam_vm_candidate_disarm", transition = NO_TRANSITION)
+    static native int candidateDisarm(Pointer heap, long ticket, long waitGeneration);
+    @CFunction(value = "jam_vm_candidate_complete", transition = NO_TRANSITION)
+    static native void candidateComplete(Pointer heap, long ticket, long waitGeneration);
+    @CFunction(value = "jam_vm_candidate_epoch", transition = NO_TRANSITION)
+    static native long candidateEpoch(Pointer heap);
 }

@@ -8,7 +8,7 @@ add_library(jam::vm-static ALIAS jam-vm-static)
 foreach(target jam-vm jam-vm-static)
   target_sources(${target} PRIVATE src/adapter/jam_vm.cc)
   target_sources(${target} PRIVATE FILE_SET CXX_MODULES FILES
-    src/thc_jam.ccm src/thc/jam/heap.ccm src/thc/jam/weak.ccm)
+    src/thc_jam.ccm src/thc/jam/heap.ccm src/thc/jam/weak.ccm src/thc/jam/candidate.ccm)
   target_include_directories(${target} PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/adapter>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
@@ -34,6 +34,10 @@ endif()
 file(GENERATE OUTPUT "${PROJECT_BINARY_DIR}/jam-vm-static-libraries-$<CONFIG>.txt"
   CONTENT "${jam_vm_archives}")
 if(JAM_BUILD_TESTS)
+  add_executable(jam-candidate-registry-test t/candidate-registry-test.cc)
+  target_sources(jam-candidate-registry-test PRIVATE FILE_SET CXX_MODULES FILES
+    t/candidate-registry.ccm src/thc/jam/candidate.ccm src/thc/jam/weak.ccm)
+  add_test(NAME jam-candidate-registry-test COMMAND jam-candidate-registry-test)
   add_executable(jam-weak-registry-test t/weak-registry-test.cc)
   target_sources(jam-weak-registry-test PRIVATE FILE_SET CXX_MODULES FILES
     t/weak-registry.ccm src/thc/jam/weak.ccm)
@@ -55,7 +59,7 @@ if(JAM_BUILD_TESTS)
     target_link_libraries(jam-generational-test PRIVATE onecore)
   endif()
 
-  set_tests_properties(jam-vm-test jam-vm-static-test jam-generational-test jam-weak-registry-test PROPERTIES LABELS vm)
+  set_tests_properties(jam-vm-test jam-vm-static-test jam-generational-test jam-weak-registry-test jam-candidate-registry-test PROPERTIES LABELS vm)
 endif()
 
 # Runtime tools receive this directory explicitly; standalone wrappers default

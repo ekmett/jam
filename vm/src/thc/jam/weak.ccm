@@ -98,10 +98,8 @@ public:
     }
     trace(std::span<std::uint32_t const>{roots});
   }
-  /// \brief Reach the least live-key fixed point, then freeze every dead decision.
-  /// No newly dead finalizer is traced here: the VM first clears Java weak refs.
-  /// An association's own value-to-key cycle cannot activate that association.
-  template<class Marked, class Trace> void close(Marked && marked, Trace && trace) noexcept {
+  /// \brief Trace live-key associations to a fixed point without retiring dead keys.
+  template<class Marked, class Trace> void trace_live(Marked && marked, Trace && trace) noexcept {
     auto & roots = scratch;
     do {
       roots.clear();
@@ -114,6 +112,12 @@ public:
       }
       trace(std::span<std::uint32_t const>{roots});
     } while (!roots.empty());
+  }
+  /// \brief Reach the least live-key fixed point, then freeze every dead decision.
+  /// No newly dead finalizer is traced here: the VM first clears Java weak refs.
+  /// An association's own value-to-key cycle cannot activate that association.
+  template<class Marked, class Trace> void close(Marked && marked, Trace && trace) noexcept {
+    trace_live(marked, trace);
     for (std::size_t slot = 0; slot != live.size();) {
       auto & entry = entries[live[slot]];
       if (entry.status != state::active || entry.activated) { ++slot; continue; }
