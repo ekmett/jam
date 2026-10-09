@@ -1697,8 +1697,10 @@ public:
 // Keep the fixed marking queue's cold synchronization path in this module.
 // Instantiating it in consumers trips Clang's handling of libstdc++ internal
 // thread helpers shared by the Jam and Work global module fragments.
+/// \cond
 extern template void work::detail::state<jam::heap::trace_job>::communicate(lane &) noexcept;
 template void work::detail::state<jam::heap::trace_job>::communicate(lane &) noexcept;
+/// \endcond
 
 namespace jam {
 
