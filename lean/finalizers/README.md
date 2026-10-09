@@ -120,10 +120,9 @@ These are model proofs, not a C++/Java refinement proof. In particular:
    cannot index the permitted entries vector. Each new incarnation starts a
    new lifecycle; the no-rearm theorem concerns an existing token.
 6. **Progress.** No fairness, pump scheduling, guest-context admission, callback
-   termination, or eventual successful cleanup result is claimed. The Java
-   adapter's object-start/card rebuilding walks and filler handling
-   are outside this model; neither their necessity nor their correctness is
-   established by it.
+   termination, or eventual successful cleanup result is claimed. Object
+   enumeration, forwarding, and heap-layout implementation are outside this
+   model; their correctness is not established by these lifecycle proofs.
 
 Native Image's relevant order is visible in `JamGC.java` lines 185–193:
 queued/running roots, weak closure and freeze, early Java-reference processing,
