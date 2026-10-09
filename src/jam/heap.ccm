@@ -1692,6 +1692,16 @@ public:
 
 };
 
+} // namespace jam
+
+// Keep the fixed marking queue's cold synchronization path in this module.
+// Instantiating it in consumers trips Clang's handling of libstdc++ internal
+// thread helpers shared by the Jam and Work global module fragments.
+extern template void work::detail::state<jam::heap::trace_job>::communicate(lane &) noexcept;
+template void work::detail::state<jam::heap::trace_job>::communicate(lane &) noexcept;
+
+namespace jam {
+
 inline heap_scope::heap_scope(heap & arena) noexcept : previous(heap::current()) {
   detail::active_heap = &arena;
 }
