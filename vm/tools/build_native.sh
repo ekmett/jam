@@ -12,6 +12,7 @@ args=(-S "$root/.." -B build-jam -DJAM_BUILD_VM=ON -G Ninja "-DCMAKE_MAKE_PROGRA
       "-DCMAKE_CXX_COMPILER=$compiler" -DCMAKE_BUILD_TYPE=Release)
 if [[ $(uname) == Darwin ]]; then
   args+=("-DCMAKE_OSX_SYSROOT=$(xcrun --show-sdk-path)"
+         "-DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.5}"
          "-DCMAKE_CXX_FLAGS=-nostdinc++ -isystem $library/include/c++/v1"
          "-DCMAKE_EXE_LINKER_FLAGS=-L$library/lib/c++ -Wl,-rpath,$library/lib/c++"
          "-DCMAKE_SHARED_LINKER_FLAGS=-L$library/lib/c++ -Wl,-rpath,$library/lib/c++"

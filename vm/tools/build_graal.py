@@ -38,6 +38,12 @@ def graal_environment(java_home=None):
         raise SystemExit(f'Missing pinned mx checkout: {MX}')
     environment['JAVA_HOME'] = str(base)
     environment.setdefault('MX_CACHE_DIR', str(ROOT / '.toolchains/mx-cache'))
+    if platform.system() == 'Darwin':
+        target = environment.setdefault('MACOSX_DEPLOYMENT_TARGET', '15.5')
+        # Native Image filters the environment; pass the target to its compiler too.
+        environment['EXTRA_IMAGE_BUILDER_ARGUMENTS'] = (
+            environment.get('EXTRA_IMAGE_BUILDER_ARGUMENTS', '') +
+            ' -EMACOSX_DEPLOYMENT_TARGET=' + target).strip()
     if platform.system() == 'Windows':
         # Intermediate mx/jlink images inherit jvm.dll but not Jam's DLL, which
         # is deliberately packaged separately from java.base.jmod.

@@ -27,7 +27,7 @@ download() {
   echo "$digest  $scratch/$name" | sha256sum --check
 }
 
-if [[ ! -f $prefix/native-ready ]]; then
+if [[ ! -f $prefix/native-ready || ! -f $prefix/llvm23/lib/x86_64-unknown-linux-gnu/libc++.a ]]; then
   # Official LLVM and CMake release asset digests.
   download llvm.tar.zst 6382de1c1a210ce5a5cc49d18bc8444d137742e7cbf9b19f4ae602bb1ab52534 \
     https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-X64.tar.zst
@@ -43,7 +43,9 @@ if [[ ! -f $prefix/native-ready ]]; then
     "$archive/lib/clang/23" "$archive/include/c++/v1" \
     "$archive/include/x86_64-unknown-linux-gnu/c++/v1" \
     "$archive/lib/x86_64-unknown-linux-gnu/libc++*.so*" \
-    "$archive/lib/x86_64-unknown-linux-gnu/libunwind.so*"
+    "$archive/lib/x86_64-unknown-linux-gnu/libunwind.so*" \
+    "$archive/lib/x86_64-unknown-linux-gnu/libc++*.a" \
+    "$archive/lib/x86_64-unknown-linux-gnu/libunwind.a"
   rm "$scratch/llvm.tar.zst"
 
   # The binary archive omits the runtime licenses. Pin the corresponding

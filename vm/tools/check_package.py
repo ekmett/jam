@@ -13,12 +13,15 @@ import tempfile
 from package_jdk import check_loaded_libraries, loader_environment, runtime_libraries
 from platform_paths import java_tool, build_flavor, runtime_flavor
 from runtime_probe import run
+from macho_deployment import check_macos_deployment
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--java-home', required=True, type=Path)
 options = parser.parse_args()
 home = options.java_home.resolve()
+if platform.system() == 'Darwin':
+    check_macos_deployment(home, os.environ.get('MACOSX_DEPLOYMENT_TARGET', '15.5'))
 actual = runtime_flavor(home, loader_environment(os.environ))
 recorded = re.findall(r'^JAM_BUILD_FLAVOR="([^"\n]+)"$', (home / 'release').read_text(), re.MULTILINE)
 if recorded != [actual] or actual != build_flavor():

@@ -95,7 +95,7 @@
              registerForeignCall(DEOPT_BLOB_UNPACK_WITH_EXCEPTION_IN_TLS, c.deoptBlobUnpackWithExceptionInTLS, NativeCall);
 --- a/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/replacements/HotSpotSerialWriteBarrierSnippets.java
 +++ b/compiler/src/jdk.graal.compiler/src/jdk/graal/compiler/hotspot/replacements/HotSpotSerialWriteBarrierSnippets.java
-@@ -71,12 +71,19 @@
+@@ -71,12 +71,21 @@
          private final SnippetInfo serialArrayRangeWriteBarrier;
  
          private final SerialWriteBarrierLowerer lowerer;
@@ -106,8 +106,10 @@
              super(options, providers);
              this.lowerer = new SerialWriteBarrierLowerer(factory);
  
++            // libgraal encodes snippets under the builder GC, which need not be Jam.
++            var jamTemplates = new HotSpotJamWriteBarrierSnippets.Templates(options, providers);
 +            if (providers.getConfig().gc == jdk.graal.compiler.hotspot.HotSpotGraalRuntime.HotSpotGC.Jam) {
-+                jam = new HotSpotJamWriteBarrierSnippets.Templates(options, providers);
++                jam = jamTemplates;
 +                serialImpreciseWriteBarrier = serialPreciseWriteBarrier = serialArrayRangeWriteBarrier = null;
 +                return;
 +            }
@@ -115,7 +117,7 @@
              HotSpotSerialWriteBarrierSnippets receiver = new HotSpotSerialWriteBarrierSnippets();
  
              if (Assertions.assertionsEnabled()) {
-@@ -111,10 +118,12 @@
+@@ -111,10 +120,12 @@
          }
  
          public void lower(SerialWriteBarrierNode barrier, LoweringTool tool) {

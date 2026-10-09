@@ -34,10 +34,10 @@ if [[ ! -f $prefix/native-ready ]]; then
     LLVM-23.1.2-macOS-ARM64/bin/llvm-nm LLVM-23.1.2-macOS-ARM64/lib/clang/23
   rm "$scratch/llvm.tar.zst"
 
-  # Homebrew's immutable LLVM 22.1.8 arm64_tahoe bottle supplies the working
+  # Homebrew's immutable LLVM 22.1.8 arm64_sequoia bottle supplies the working
   # libc++/libc++abi/libunwind combination (formulae.brew.sh/api/formula/llvm@22.json).
-  download libcxx.tar.gz a321c5b4ac3657f54fab8fe455146c9f15c0b4f074983c822dba955fb04e0840 \
-    https://ghcr.io/v2/homebrew/core/llvm/22/blobs/sha256:a321c5b4ac3657f54fab8fe455146c9f15c0b4f074983c822dba955fb04e0840 \
+  download libcxx.tar.gz 9705fde2a45b982f91bdfe60d1023fabf12266e67d24ba7bacc963c2950174d1 \
+    https://ghcr.io/v2/homebrew/core/llvm/22/blobs/sha256:9705fde2a45b982f91bdfe60d1023fabf12266e67d24ba7bacc963c2950174d1 \
     --header 'Authorization: Bearer QQ=='
   mkdir -p "$prefix/libcxx22"
   tar -xzf "$scratch/libcxx.tar.gz" -C "$prefix/libcxx22" --strip-components=2 \
@@ -100,6 +100,7 @@ fi
 
 # This file can also be sourced when reproducing a CI job locally.
 {
+  printf 'export MACOSX_DEPLOYMENT_TARGET=%q\n' '15.5'
   printf 'export JAM_CXX=%q\n' "$prefix/llvm23/bin/clang++"
   printf 'export JAM_LIBCXX_PREFIX=%q\n' "$prefix/libcxx22"
   printf 'export JAM_CMAKE=%q\n' "$prefix/cmake/CMake.app/Contents/bin/cmake"
