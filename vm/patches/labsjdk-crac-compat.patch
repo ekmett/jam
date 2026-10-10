@@ -1,0 +1,1995 @@
+--- a/make/autoconf/jvm-features.m4
++++ b/make/autoconf/jvm-features.m4
+@@ -47,6 +47,7 @@
+     cds compiler1 compiler2 dtrace epsilongc g1gc jamgc jfr jni-check \
+     jvmci jvmti link-time-opt management minimal opt-size parallelgc \
+     serialgc services shenandoahgc vm-structs zero zgc \
++    cpu_feature_active \
+ ))
+ 
+ # Deprecated JVM features (these are ignored, but with a warning)
+@@ -366,6 +367,28 @@
+ ])
+ 
+ ################################################################################
++# Check if glibc CPU_FEATURE_ACTIVE is available on this platform.
++#
++AC_DEFUN_ONCE([JVM_FEATURES_CHECK_CPU_FEATURE_ACTIVE],
++[
++  JVM_FEATURES_CHECK_AVAILABILITY(cpu_feature_active, [
++    AC_MSG_CHECKING([if glibc CPU_FEATURE_ACTIVE is supported])
++    AC_COMPILE_IFELSE(
++      [AC_LANG_PROGRAM([[#include <sys/platform/x86.h>]],
++        [[int x = CPU_FEATURE_ACTIVE(SSE2);]])
++      ],
++      [
++        AC_MSG_RESULT([yes])
++      ],
++      [
++        AC_MSG_RESULT([no])
++        AVAILABLE=false
++      ]
++    )
++  ])
++])
++
++################################################################################
+ # Setup JVM_FEATURES_PLATFORM_UNAVAILABLE and JVM_FEATURES_PLATFORM_FILTER
+ # to contain those features that are unavailable, or should be off by default,
+ # for this platform, regardless of JVM variant.
+@@ -380,6 +403,7 @@
+   JVM_FEATURES_CHECK_JVMCI
+   JVM_FEATURES_CHECK_SHENANDOAHGC
+   JVM_FEATURES_CHECK_ZGC
++  JVM_FEATURES_CHECK_CPU_FEATURE_ACTIVE
+ 
+   # Jam has an external C++26 runtime and is enabled explicitly by its host build.
+   JVM_FEATURES_PLATFORM_FILTER="$JVM_FEATURES_PLATFORM_FILTER jamgc"
+--- a/src/hotspot/cpu/x86/vm_version_x86.cpp
++++ b/src/hotspot/cpu/x86/vm_version_x86.cpp
+@@ -38,18 +38,27 @@
+ #include "runtime/stubCodeGenerator.hpp"
+ #include "runtime/vm_version.hpp"
+ #include "utilities/checkedCast.hpp"
++#include "utilities/formatBuffer.hpp"
+ #include "utilities/powerOfTwo.hpp"
+ #include "utilities/virtualizationSupport.hpp"
++#if INCLUDE_CPU_FEATURE_ACTIVE
++# if defined(__clang__) && defined(__STRICT_ANSI__)
++// clang <stdbool.h> is missing this definition compared to gcc
++#  define _Bool bool
++# endif
++# include <sys/platform/x86.h>
++#endif
+ 
+ int VM_Version::_cpu;
+ int VM_Version::_model;
+ int VM_Version::_stepping;
+ bool VM_Version::_has_intel_jcc_erratum;
+ VM_Version::CpuidInfo VM_Version::_cpuid_info = { 0, };
++VM_Version::VM_Features VM_Version::_features_saved;
+ 
+ #define DECLARE_CPU_FEATURE_NAME(id, name, bit) name,
+-const char* VM_Version::_features_names[] = { CPU_FEATURE_FLAGS(DECLARE_CPU_FEATURE_NAME)};
+-#undef DECLARE_CPU_FEATURE_FLAG
++const char* VM_Version::_features_names[] = { CPU_FEATURE_FLAGS(DECLARE_CPU_FEATURE_NAME) };
++#undef DECLARE_CPU_FEATURE_NAME
+ 
+ // Address of instruction which causes SEGV
+ address VM_Version::_cpuinfo_segv_addr = nullptr;
+@@ -87,8 +96,27 @@
+   // up. Assembler::flush calls this routine to check that clflush
+   // is allowed. So, we give the caller a free pass if Universe init
+   // is still in progress.
+-  assert ((!Universe::is_fully_initialized() || _features.supports_feature(CPU_FLUSH)), "clflush should be available");
+-  return true;
++  if (!Universe::is_fully_initialized()) {
++    return true;
++  }
++  if (_features.supports_feature(CPU_FLUSH)) {
++    return true;
++  }
++  if (FLAG_IS_DEFAULT(CPUFeatures)) {
++    vm_exit_during_initialization("clflush should be available");
++  }
++  VM_Features flush;
++  flush.set_feature(CPU_FLUSH);
++  char buf[MAX_CPU_FEATURES];
++  guarantee(flush.print_numbers(buf, sizeof(buf)) >= 0, "buffer too short");
++  vm_exit_during_initialization(err_msg("-XX:CPUFeatures option requires FLUSH flag to be set: %s", buf));
++  return false;
++}
++
++const char *VM_Version::VM_Features::print_numbers() const {
++  char *buf = NEW_RESOURCE_ARRAY(char, MAX_CPU_FEATURES);
++  print_numbers(buf, MAX_CPU_FEATURES);
++  return buf;
+ }
+ 
+ #define CPUID_STANDARD_FN   0x0
+@@ -138,7 +166,7 @@
+     const uint32_t CPU_FAMILY_486 = (4 << CPU_FAMILY_SHIFT);
+     bool use_evex = FLAG_IS_DEFAULT(UseAVX) || (UseAVX > 2);
+ 
+-    Label detect_486, cpu486, detect_586, std_cpuid1, std_cpuid4, std_cpuid24, std_cpuid29;
++    Label detect_486, cpu486, detect_586, std_cpuid1, std_cpuid4, std_cpuid24, std_cpuid29, check_cpuidb;
+     Label sef_cpuid, sefsl1_cpuid, ext_cpuid, ext_cpuid1, ext_cpuid5, ext_cpuid7;
+     Label ext_cpuid8, done, wrapup, vector_save_restore, apx_save_restore_warning, apx_xstate;
+     Label legacy_setup, save_restore_except, legacy_save_restore, start_simd_check;
+@@ -211,6 +239,19 @@
+     __ movl(Address(rsi, 8), rcx);
+     __ movl(Address(rsi,12), rdx);
+ 
++    __ cmpl(rax, 0xc);                  // Is cpuid(0xD) supported?
++    __ jccb(Assembler::belowEqual, check_cpuidb);
++    __ push(rax);
++
++    __ movl(rax, 0xd);
++    __ movl(rcx, 1);     // Packages level
++    __ cpuid();
++
++    __ lea(rsi, Address(rbp, in_bytes(VM_Version::xfs_cpuidD1_offset())));
++    __ movl(Address(rsi, 0), rax);
++
++    __ pop(rax);
++    __ bind(check_cpuidb);
+     __ cmpl(rax, 0xa);                  // Is cpuid(0xB) supported?
+     __ jccb(Assembler::belowEqual, std_cpuid4);
+ 
+@@ -869,11 +910,443 @@
+   };
+ };
+ 
+-void VM_Version::get_processor_features() {
+-
++VM_Version::VM_Features VM_Version::CPUFeatures_parse(const char *str) {
++#ifndef LINUX
++  _ignore_glibc_not_using = true;
++#endif // !LINUX
++  if (str == nullptr || strcmp(str, "native") == 0) {
++    return _features;
++  }
++  if (strcmp(str, "ignore") == 0) {
++    _ignore_glibc_not_using = true;
++    return _features;
++  }
++  if (strcmp(str, "generic") == 0) {
++#ifndef LINUX
++    return _features;
++#else
++    // 32-bit x86 cannot rely on anything.
++    VM_Version::VM_Features retval;
++#ifdef AMD64
++      // The following options are all in /proc/cpuinfo of one of the first 64-bit CPUs - Atom D2700 (and Opteron 1352): https://superuser.com/q/1572306/1015048
++    retval.set_feature(CPU_SSE); // enabled in 'gcc -Q --help=target', used by OpenJDK
++    retval.set_feature(CPU_SSE2); // enabled in 'gcc -Q --help=target', required by OpenJDK
++    retval.set_feature(CPU_FXSR); // enabled in 'gcc -Q --help=target', not used by OpenJDK
++    retval.set_feature(CPU_MMX); // enabled in 'gcc -Q --help=target', used only by 32-bit x86 OpenJDK
++    retval.set_feature(CPU_TSC); // not used by gcc, used by OpenJDK
++    retval.set_feature(CPU_CX8); // gcc detects it to set cpu "pentium" (=32-bit only), used by OpenJDK
++    retval.set_feature(CPU_CMOV); // gcc detects it to set cpu "pentiumpro" (=32-bit only), used by OpenJDK
++    retval.set_feature(CPU_FLUSH); // ="clflush" in cpuinfo, not used by gcc, required by OpenJDK
++    // CPU_MOVBE is disabled in 'gcc -Q --help=target' and for example i7-720QM does not support it
++    // CPU_LAHFSAHF is disabled in 'gcc -Q --help=target' and "Early Intel Pentium 4 CPUs with Intel 64 support ... lacked the LAHF and SAHF instructions"
++#endif // AMD64
++    return retval;
++#endif // LINUX
++  }
++#ifndef LINUX
++  vm_exit_during_initialization("This OS does not support any arch-specific -XX:CPUFeatures options");
++  return {};
++#else // LINUX
++  int count = VM_Version::VM_Features::features_bitmap_element_count();
++  VM_Version::VM_Features retval;
++  const char *str_orig = str;
++  for (int idx = 0;; ++idx) {
++    static_assert(sizeof(uint64_t) == sizeof(unsigned long long), "unexpected arch");
++    char *endptr;
++    errno = 0;
++    uint64_t u64 = strtoull(str, &endptr, 0);
++    if (errno != 0) {
++      break;
++    }
++    bool last = idx + 1 == count;
++    if (*endptr != (last ? 0 : ',')) {
++      break;
++    }
++    retval.set_feature_idx(idx, u64);
++    if (last) {
++      return retval;
++    }
++    str = endptr + 1;
++  }
++  char buf[MAX_CPU_FEATURES];
++  char *s = buf;
++  for (int idx = 0; idx < count; ++idx) {
++    s = stpcpy(s, ",0xNUM");
++  }
++  vm_exit_during_initialization(err_msg("VM option 'CPUFeatures=%s' must be of the form: %s", str_orig, buf + 1));
++  return {};
++#endif // LINUX
++}
++
++bool VM_Version::_ignore_glibc_not_using = false;
++#ifdef LINUX
++const char VM_Version::glibc_prefix[] = ":glibc.cpu.hwcaps=";
++const size_t VM_Version::glibc_prefix_len = strlen(glibc_prefix);
++
++bool VM_Version::glibc_env_set(char *disable_str) {
++#define TUNABLES_NAME "GLIBC_TUNABLES"
++#define REEXEC_NAME "HOTSPOT_GLIBC_TUNABLES_REEXEC"
++  char *env_val = disable_str;
++  const char *env = getenv(TUNABLES_NAME);
++  bool from_reexec = getenv(REEXEC_NAME) != nullptr;
++  if (env && (strcmp(env, env_val) == 0 || (!INCLUDE_CPU_FEATURE_ACTIVE && from_reexec))) {
++    if (!INCLUDE_CPU_FEATURE_ACTIVE) {
++      if (ShowCPUFeatures) {
++        tty->print_cr("Environment variable already set, glibc CPU_FEATURE_ACTIVE is unavailable - re-exec suppressed: " TUNABLES_NAME "=%s", env);
++      }
++      return true;
++    }
++  }
++  {
++    ResourceMark rm;
++    size_t env_buf_size = strlen(disable_str) + (!env ? 0 : strlen(env) + 100);
++    char *env_buf = NEW_RESOURCE_ARRAY(char, env_buf_size);
++    if (env) {
++      if (ShowCPUFeatures) {
++        tty->print_cr("Original environment variable: " TUNABLES_NAME "=%s", env);
++      }
++      const char *hwcaps = strstr(env, glibc_prefix + 1 /* skip ':' */);
++      if (!hwcaps) {
++        strcpy(env_buf, env);
++        strcat(env_buf, disable_str);
++      } else {
++        const char *colon = strchr(hwcaps, ':');
++        if (!colon) {
++          strcpy(env_buf, env);
++          strcat(env_buf, disable_str + glibc_prefix_len);
++        } else {
++          int err = jio_snprintf(env_buf, env_buf_size, "%.*s%s%s", (int)(colon - env), env, disable_str + glibc_prefix_len, colon);
++          assert(err >= 0 && (unsigned) err < env_buf_size, "internal error: " TUNABLES_NAME " buffer overflow");
++        }
++      }
++      env_val = env_buf;
++    }
++    if (ShowCPUFeatures) {
++      tty->print_cr("Re-exec of java with new environment variable: " TUNABLES_NAME "=%s", env_val);
++    }
++    if (setenv(TUNABLES_NAME, env_val, 1)) {
++      vm_exit_during_initialization(err_msg("setenv " TUNABLES_NAME " error: %m"));
++    }
++  }
++
++  if (from_reexec) {
++    vm_exit_during_initialization(err_msg("internal error: " TUNABLES_NAME "=%s failed and " REEXEC_NAME " is set", disable_str));
++  }
++  if (setenv(REEXEC_NAME, "1", 1)) {
++    vm_exit_during_initialization(err_msg("setenv " REEXEC_NAME " error: %m"));
++  }
++  return false;
++}
++
++void VM_Version::glibc_reexec() {
++  char *buf = nullptr;
++  size_t buf_allocated = 0;
++  size_t buf_used = 0;
++#define CMDLINE "/proc/self/cmdline"
++  int fd = open(CMDLINE, O_RDONLY);
++  if (fd == -1)
++    vm_exit_during_initialization(err_msg("Cannot open " CMDLINE ": %m"));
++  ssize_t got;
++  do {
++    if (buf_used == buf_allocated) {
++      buf_allocated = MAX2(size_t(4096), 2 * buf_allocated);
++      buf = (char *)os::realloc(buf, buf_allocated, mtOther);
++      if (buf == nullptr)
++        vm_exit_during_initialization(err_msg(CMDLINE " reading failed allocating %zu bytes", buf_allocated));
++    }
++    got = read(fd, buf + buf_used, buf_allocated - buf_used);
++    if (got == -1)
++      vm_exit_during_initialization(err_msg("Cannot read " CMDLINE ": %m"));
++    buf_used += got;
++  } while (got);
++  if (close(fd))
++    vm_exit_during_initialization(err_msg("Cannot close " CMDLINE ": %m"));
++  char **argv = nullptr;
++  size_t argv_allocated = 0;
++  size_t argv_used = 0;
++  char *s = buf;
++  while (s <= buf + buf_used) {
++    if (argv_used == argv_allocated) {
++      argv_allocated = MAX2(size_t(256), 2 * argv_allocated);
++      argv = (char **)os::realloc(argv, argv_allocated * sizeof(*argv), mtOther);
++      if (argv == nullptr)
++        vm_exit_during_initialization(err_msg(CMDLINE " reading failed allocating %zu pointers", argv_allocated));
++    }
++    if (s == buf + buf_used) {
++      break;
++    }
++    argv[argv_used++] = s;
++    s += strnlen(s, buf + buf_used - s);
++    if (s == buf + buf_used)
++      vm_exit_during_initialization("Missing end of string zero while parsing " CMDLINE);
++    ++s;
++  }
++  argv[argv_used] = nullptr;
++#undef CMDLINE
++
++#define EXEC "/proc/self/exe"
++  execv(EXEC, argv);
++  vm_exit_during_initialization(err_msg("Cannot re-execute " EXEC ": %m"));
++#undef EXEC
++}
++
++// Returns whether we should have got set a GLIBC_TUNABLES environment variables but did not get any.
++bool VM_Version::glibc_not_using() {
++  if (_ignore_glibc_not_using)
++    return true;
++
++  VM_Version::VM_Features features_expected;
++  features_expected.set_all_features();
++  if (!INCLUDE_CPU_FEATURE_ACTIVE) {
++    features_expected = _features;
++  }
++  VM_Version::VM_Features shouldnotuse = features_expected & ~_features;
++
++#ifndef ASSERT
++  if (shouldnotuse.empty())
++    return true;
++#endif
++
++  // glibc: sysdeps/x86/get-isa-level.h:
++  // glibc: if (CPU_FEATURE_USABLE_P (cpu_features, CMOV)
++  // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, CX8)
++  // glibc:     && CPU_FEATURE_CPU_P (cpu_features, FPU)
++  // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, FXSR)
++  // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, MMX)
++  // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, SSE)
++  // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, SSE2))
++  // glibc:     isa_level = GNU_PROPERTY_X86_ISA_1_BASELINE;
++  if (_features.supports_feature(CPU_CMOV) &&
++      _features.supports_feature(CPU_CX8) &&
++      // FPU is always present on i686+: _features.supports_feature(CPU_FPU) &&
++      _features.supports_feature(CPU_SSE2)) {
++    // These cannot be disabled by CPU_TUNABLES.
++    if (shouldnotuse.supports_feature(CPU_FXSR) || shouldnotuse.supports_feature(CPU_MMX) ||
++        shouldnotuse.supports_feature(CPU_SSE)) {
++      assert(!shouldnotuse.supports_feature(CPU_SSE2), "CPU_SSE2 in both _features and shouldnotuse cannot happen");
++      // FIXME: The choice should be based on glibc impact, not the feature age.
++      // CX8 is i586+, CMOV is i686+ 1995+, SSE2 is 2000+
++      shouldnotuse.set_feature(CPU_SSE2);
++    }
++    if (_features.supports_feature(CPU_FXSR) &&
++        _features.supports_feature(CPU_MMX) &&
++        _features.supports_feature(CPU_SSE)) {
++      // glibc: if (CPU_FEATURE_USABLE_P (cpu_features, CMPXCHG16B)
++      // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, LAHF64_SAHF64)
++      // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, POPCNT)
++      // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, SSE3)
++      // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, SSSE3)
++      // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, SSE4_1)
++      // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, SSE4_2))
++      // glibc:     isa_level |= GNU_PROPERTY_X86_ISA_1_V2;
++      if (_features.supports_feature(CPU_POPCNT) &&
++          _features.supports_feature(CPU_SSSE3) &&
++          _features.supports_feature(CPU_SSE4_1) &&
++          _features.supports_feature(CPU_SSE4_2)) {
++        if (shouldnotuse.supports_feature(CPU_SSE3) ||
++            (shouldnotuse.supports_feature(CPU_CMPXCHG16) || shouldnotuse.supports_feature(CPU_LAHFSAHF))) {
++          assert(!shouldnotuse.supports_feature(CPU_SSE4_2), "CPU_SSE4_2 in both _features and shouldnotuse cannot happen");
++          // POPCNT is 2007+, SSSE3 is 2006+, SSE4_1 is 2007+, SSE4_2 is 2008+.
++          shouldnotuse.set_feature(CPU_SSE4_2);
++        }
++        if (_features.supports_feature(CPU_SSE3) &&
++            _features.supports_feature(CPU_CMPXCHG16) &&
++            _features.supports_feature(CPU_LAHFSAHF)) {
++          // glibc: if (CPU_FEATURE_USABLE_P (cpu_features, AVX)
++          // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, AVX2)
++          // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, BMI1)
++          // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, BMI2)
++          // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, F16C)
++          // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, FMA)
++          // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, LZCNT)
++          // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, MOVBE))
++          // glibc:     isa_level |= GNU_PROPERTY_X86_ISA_1_V3;
++          if (_features.supports_feature(CPU_AVX) &&
++              _features.supports_feature(CPU_AVX2) &&
++              _features.supports_feature(CPU_BMI1) &&
++              _features.supports_feature(CPU_BMI2) &&
++              _features.supports_feature(CPU_FMA) &&
++              _features.supports_feature(CPU_LZCNT) &&
++              _features.supports_feature(CPU_MOVBE)) {
++            if (shouldnotuse.supports_feature(CPU_F16C)) {
++              assert(!shouldnotuse.supports_feature(CPU_MOVBE), "CPU_MOVBE in both _features and shouldnotuse cannot happen");
++              // FMA is 2012+, AVX2+BMI1+BMI2+LZCNT are 2013+, MOVBE is 2015+
++              shouldnotuse.set_feature(CPU_MOVBE);
++            }
++            if (_features.supports_feature(CPU_F16C)) {
++              // glibc: if (CPU_FEATURE_USABLE_P (cpu_features, AVX512F)
++              // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, AVX512BW)
++              // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, AVX512CD)
++              // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, AVX512DQ)
++              // glibc:     && CPU_FEATURE_USABLE_P (cpu_features, AVX512VL))
++              // glibc:   isa_level |= GNU_PROPERTY_X86_ISA_1_V4;
++              // All these flags are supported by disable() below.
++            }
++          }
++        }
++      }
++    }
++  }
++
++  static const size_t tunables_size_max = sizeof("AVX_Fast_Unaligned_Load") - 1;
++  char disable_str[MAX_CPU_FEATURES * (1/*','*/ + 1/*'-'*/ + tunables_size_max) + 1/*'\0'*/];
++  strcpy(disable_str, glibc_prefix);
++  char *disable_end = disable_str + glibc_prefix_len;
++  auto disable = [&](const char *tunables) {
++    size_t remains = disable_str + sizeof(disable_str) - disable_end;
++    guarantee(2 + strlen(tunables) < remains, "internal error: disable_str overflow");
++    *disable_end++ = ',';
++    *disable_end++ = '-';
++    disable_end = stpcpy(disable_end, tunables);
++  };
++
++#ifdef ASSERT
++  VM_Version::VM_Features handled;
++#endif
++  auto shouldnotuse_handled = [&](VM_Version::Feature_Flag feature, const char *tunables) {
++    assert(strlen(tunables) <= tunables_size_max, "Too long string %s", tunables);
++    assert(!handled.supports_feature(feature), "already used %s", tunables);
++    DEBUG_ONLY(handled.set_feature(feature));
++  };
++#define EXCESSIVE_HANDLED(tunables) shouldnotuse_handled(PASTE_TOKENS(CPU_, tunables), STR(tunables))
++
++#if INCLUDE_CPU_FEATURE_ACTIVE
++# define FEATURE_ACTIVE(tunables) CPU_FEATURE_ACTIVE(tunables)
++#else
++# define FEATURE_ACTIVE(tunables) true
++#endif
++
++  auto shouldnotuse_set = [&](VM_Version::Feature_Flag feature, const char *tunables, bool feature_active) {
++    shouldnotuse_handled(feature, tunables);
++    if (shouldnotuse.supports_feature(feature) && feature_active) {
++      disable(tunables);
++    }
++  };
++#define EXCESSIVE2(tunables, feature_active) shouldnotuse_set(PASTE_TOKENS(CPU_, tunables), STR(tunables), feature_active)
++#define EXCESSIVE(tunables) EXCESSIVE2(tunables, FEATURE_ACTIVE(tunables))
++  EXCESSIVE(AVX     );
++  EXCESSIVE(CX8     );
++  EXCESSIVE(FMA     );
++  EXCESSIVE(RTM     );
++  EXCESSIVE(AVX2    );
++  EXCESSIVE(BMI1    );
++  EXCESSIVE(BMI2    );
++  EXCESSIVE(CMOV    );
++  EXCESSIVE(ERMS    );
++  EXCESSIVE(SSE2    );
++  EXCESSIVE(LZCNT   );
++  EXCESSIVE(SSSE3   );
++  EXCESSIVE(POPCNT  );
++  EXCESSIVE(SSE4_1  );
++  EXCESSIVE(SSE4_2  );
++  EXCESSIVE(AVX512F );
++  EXCESSIVE(AVX512CD);
++  EXCESSIVE(AVX512BW);
++  EXCESSIVE(AVX512DQ);
++  EXCESSIVE(AVX512ER);
++  EXCESSIVE(AVX512PF);
++  EXCESSIVE(AVX512VL);
++  EXCESSIVE(IBT     );
++  EXCESSIVE(FMA4    );
++  EXCESSIVE(MOVBE   );
++  EXCESSIVE(SHSTK   );
++  EXCESSIVE(XSAVE   );
++  EXCESSIVE(OSXSAVE );
++  EXCESSIVE(HTT     );
++  EXCESSIVE(XSAVEC  );
++  // There is no CPU_FEATURE_ACTIVE() available for this symbol.
++  // The detection is a copy from glibc sysdeps/x86/cpu-features.c .
++  // There is no check for 'xem_xcr0_eax.bits.sse != 0 && xem_xcr0_eax.bits.ymm != 0' but FEATURE_ACTIVE(AVX) depends on it so it can be assumed.
++  EXCESSIVE2(AVX_Fast_Unaligned_Load, FEATURE_ACTIVE(OSXSAVE) && FEATURE_ACTIVE(AVX) && FEATURE_ACTIVE(AVX2));
++#undef EXCESSIVE
++
++#ifdef ASSERT
++  // These cannot be disabled by GLIBC_TUNABLES interface.
++#define GLIBC_UNSUPPORTED(hotspot) EXCESSIVE_HANDLED(hotspot)
++  GLIBC_UNSUPPORTED(3DNOW_PREFETCH   );
++  GLIBC_UNSUPPORTED(SSE4A            );
++  GLIBC_UNSUPPORTED(TSC              );
++  GLIBC_UNSUPPORTED(TSCINV_BIT       );
++  GLIBC_UNSUPPORTED(TSCINV           );
++  GLIBC_UNSUPPORTED(AES              );
++  GLIBC_UNSUPPORTED(CLMUL            );
++  GLIBC_UNSUPPORTED(ADX              );
++  GLIBC_UNSUPPORTED(SHA              );
++  GLIBC_UNSUPPORTED(VZEROUPPER       );
++  GLIBC_UNSUPPORTED(AVX512_VPOPCNTDQ );
++  GLIBC_UNSUPPORTED(AVX512_VPCLMULQDQ);
++  GLIBC_UNSUPPORTED(AVX512_VAES      );
++  GLIBC_UNSUPPORTED(AVX512_VNNI      );
++  GLIBC_UNSUPPORTED(FLUSH            );
++  GLIBC_UNSUPPORTED(FLUSHOPT         );
++  GLIBC_UNSUPPORTED(CLWB             );
++  GLIBC_UNSUPPORTED(AVX512_VBMI2     );
++  GLIBC_UNSUPPORTED(AVX512_VBMI      );
++  GLIBC_UNSUPPORTED(HV               );
++  GLIBC_UNSUPPORTED(SSE3             );
++  GLIBC_UNSUPPORTED(SERIALIZE        );
++  GLIBC_UNSUPPORTED(RDTSCP           );
++  GLIBC_UNSUPPORTED(RDPID            );
++  GLIBC_UNSUPPORTED(FSRM             );
++  GLIBC_UNSUPPORTED(GFNI             );
++  GLIBC_UNSUPPORTED(AVX512_BITALG    );
++  GLIBC_UNSUPPORTED(F16C             );
++  GLIBC_UNSUPPORTED(PKU              );
++  GLIBC_UNSUPPORTED(OSPKE            );
++  GLIBC_UNSUPPORTED(CET_IBT          );
++  GLIBC_UNSUPPORTED(CET_SS           );
++  GLIBC_UNSUPPORTED(AVX512_IFMA      );
++  GLIBC_UNSUPPORTED(AVX_IFMA         );
++  GLIBC_UNSUPPORTED(APX_F            );
++  GLIBC_UNSUPPORTED(SHA512           );
++  GLIBC_UNSUPPORTED(AVX512_FP16      );
++  GLIBC_UNSUPPORTED(AVX10_1          );
++  GLIBC_UNSUPPORTED(AVX10_2          );
++  GLIBC_UNSUPPORTED(HT               );
++  // These are handled as an exception above.
++  GLIBC_UNSUPPORTED(FXSR             );
++  GLIBC_UNSUPPORTED(MMX              );
++  GLIBC_UNSUPPORTED(SSE              );
++  GLIBC_UNSUPPORTED(CMPXCHG16        );
++  GLIBC_UNSUPPORTED(LAHFSAHF         );
++#undef GLIBC_UNSUPPORTED
++
++  VM_Version::VM_Features all_features;
++  all_features.set_all_features();
++  if (handled != all_features) {
++    char buf_handled[MAX_CPU_FEATURES];
++    guarantee(handled.print_numbers(buf_handled, sizeof(buf_handled)) >= 0, "buffer too short");
++    char buf_all_features[MAX_CPU_FEATURES];
++    guarantee(all_features.print_numbers(buf_all_features, sizeof(buf_all_features)) >= 0, "buffer too short");
++    vm_exit_during_initialization(err_msg("internal error: Unsupported disabling of some CPU_* %s != full %s", buf_handled, buf_all_features));
++  }
++#endif // ASSERT
++
++  *disable_end = 0;
++  if (disable_end == disable_str + glibc_prefix_len)
++    return true;
++  if (glibc_env_set(disable_str))
++    return true;
++  return false;
++}
++#undef REEXEC_NAME
++#endif // LINUX
++
++void VM_Version::print_using_features_cr() {
++  if (_ignore_glibc_not_using) {
++    tty->print_cr("CPU features are being kept intact as requested by -XX:CPUFeatures=ignore");
++  } else {
++    char buf[MAX_CPU_FEATURES];
++    guarantee(_features.print_numbers(buf, sizeof(buf)) >= 0, "buffer too short");
++    tty->print_cr("CPU features being used are: -XX:CPUFeatures=%s", buf);
++  }
++}
++
++void VM_Version::get_processor_features_hardware() {
+   _cpu = 4; // 486 by default
+   _model = 0;
+   _stepping = 0;
++  _features = VM_Version::VM_Features();
+   _logical_processors_per_package = 1;
+   // i486 internal cache is both I&D and has a 16-byte line size
+   _L1_data_cache_line_size = 16;
+@@ -902,8 +1375,23 @@
+   _supports_atomic_getset8 = true;
+   _supports_atomic_getadd8 = true;
+ 
++  if (ShowCPUFeatures) {
++    char buf[MAX_CPU_FEATURES];
++    guarantee(_features.print_numbers(buf, sizeof(buf)) >= 0, "buffer too short");
++    tty->print_cr("This machine's CPU features are: -XX:CPUFeatures=%s", buf);
++  }
++}
++
++void VM_Version::get_processor_features_hotspot() {
+   // OS should support SSE for x64 and hardware should support at least SSE2.
+   if (!VM_Version::supports_sse2()) {
++    if (!FLAG_IS_DEFAULT(CPUFeatures)) {
++      VM_Features sse2;
++      sse2.set_feature(CPU_SSE2);
++      char buf[MAX_CPU_FEATURES];
++      guarantee(sse2.print_numbers(buf, sizeof(buf)) >= 0, "buffer too short");
++      vm_exit_during_initialization(err_msg("-XX:CPUFeatures option requires SSE2 flag to be set: %s", buf));
++    }
+     vm_exit_during_initialization("Unknown x64 processor: SSE2 not supported");
+   }
+   // in 64 bit the use of SSE2 is the minimum
+@@ -1129,6 +1617,7 @@
+               "(%u cores per cpu, %u threads per core) family %d model %d stepping %d microcode 0x%x",
+               cores_per_cpu(), threads_per_core(),
+               cpu_family(), _model, _stepping, os::cpu_microcode_revision());
++
+   assert(cpu_info_size > 0, "not enough temporary space allocated");
+ 
+   insert_features_names(_features, buf + cpu_info_size, sizeof(buf) - cpu_info_size);
+@@ -2114,6 +2603,21 @@
+   }
+ }
+ 
++void VM_Version::VM_Features::print_missing_features() const {
++  char buf[MAX_CPU_FEATURES * 16];
++  print_numbers_and_names(buf, sizeof(buf));
++  tty->print_cr("; missing features of this CPU are %s\n"
++                "If you are sure it will not crash you can override this check by -XX:+UnlockExperimentalVMOptions -XX:CheckCPUFeatures=ignore .",
++                buf);
++}
++
++bool VM_Version::cpu_features_binary(VM_Version::VM_Features *data) {
++  *data = _features;
++  // Workaround JDK-8311164: CPU_HT is set randomly on hybrid CPUs like Alder Lake.
++  data->clear_feature(CPU_HT);
++  return true;
++}
++
+ #ifdef COMPILER2
+ // Determine if it's running on Cascade Lake using default options.
+ bool VM_Version::is_default_intel_cascade_lake() {
+@@ -2162,7 +2666,41 @@
+                                      g.generate_detect_virt());
+   clear_apx_test_state_stub = CAST_TO_FN_PTR(clear_apx_test_state_t,
+                                      g.clear_apx_test_state());
+-  get_processor_features();
++
++  assert(_features.empty(), "_features should be zero at startup");
++  get_processor_features_hardware();
++
++  assert(!CPUFeatures == FLAG_IS_DEFAULT(CPUFeatures), "CPUFeatures parsing");
++
++  VM_Features CPUFeatures_parsed = CPUFeatures_parse(CPUFeatures);
++  VM_Features features_missing = CPUFeatures_parsed & ~_features;
++
++  // Workaround JDK-8311164: CPU_HT is set randomly on hybrid CPUs like Alder Lake.
++  features_missing.clear_feature(CPU_HT);
++
++  if (!features_missing.empty()) {
++    char buf_CPUFeatures_parsed[MAX_CPU_FEATURES];
++    guarantee(CPUFeatures_parsed.print_numbers(buf_CPUFeatures_parsed, sizeof(buf_CPUFeatures_parsed)) >= 0, "buffer too short");
++    char buf_features[MAX_CPU_FEATURES];
++    guarantee(_features.print_numbers(buf_features, sizeof(buf_features)) >= 0, "buffer too short");
++    tty->print("Specified -XX:CPUFeatures=%s; this machine's CPU features are %s", buf_CPUFeatures_parsed, buf_features);
++    features_missing.print_missing_features();
++    vm_exit_during_initialization();
++  }
++
++  _features_saved = _features;
++  _features = CPUFeatures_parsed;
++
++  if (ShowCPUFeatures && !CRaCRestoreFrom) {
++    print_using_features_cr();
++  }
++
++#ifdef LINUX
++  if (!glibc_not_using())
++    glibc_reexec();
++#endif
++
++  get_processor_features_hotspot();
+ 
+   Assembler::precompute_instructions();
+ 
+@@ -3123,6 +3661,42 @@
+     vm_features.set_feature(CPU_CET_IBT);
+   }
+ 
++  // glibc-only features.
++  if (std_cpuid1_ecx.bits.movbe != 0) {
++    vm_features.set_feature(CPU_MOVBE);
++  }
++  if (std_cpuid1_ecx.bits.osxsave != 0) {
++    vm_features.set_feature(CPU_OSXSAVE);
++  }
++  if (std_cpuid1_ecx.bits.xsave != 0) {
++    vm_features.set_feature(CPU_XSAVE);
++  }
++  if (std_cpuid1_ecx.bits.cmpxchg16 != 0) {
++    vm_features.set_feature(CPU_CMPXCHG16);
++  }
++  if (ext_cpuid1_ecx.bits.fma4 != 0) {
++    vm_features.set_feature(CPU_FMA4);
++  }
++  if (ext_cpuid1_ecx.bits.LahfSahf != 0) {
++    vm_features.set_feature(CPU_LAHFSAHF);
++  }
++  if (std_cpuid1_edx.bits.ht != 0) {
++    vm_features.set_feature(CPU_HTT);
++  }
++  if (xfs_cpuidD1_eax.bits.xsavec != 0) {
++    vm_features.set_feature(CPU_XSAVEC);
++  }
++  // The detection is a copy from glibc sysdeps/x86/cpu-features.c .
++  if (vm_features.supports_feature(CPU_OSXSAVE)) {
++    if (vm_features.supports_feature(CPU_AVX)) {
++      assert(xem_xcr0_eax.bits.sse != 0, "required by CPU_AVX");
++      assert(xem_xcr0_eax.bits.ymm != 0, "required by CPU_AVX");
++      if (vm_features.supports_feature(CPU_AVX2)) {
++        vm_features.set_feature(CPU_AVX_Fast_Unaligned_Load);
++      }
++    }
++  }
++
+   // Composite features.
+   if (supports_tscinv_bit() &&
+       ((is_amd_family() && !is_amd_Barcelona()) ||
+--- a/src/hotspot/os/linux/os_linux.cpp
++++ b/src/hotspot/os/linux/os_linux.cpp
+@@ -1,6 +1,7 @@
+ /*
+  * Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2015, 2024 SAP SE. All rights reserved.
++ * Copyright (c) 2017, 2022, Azul Systems, Inc. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -23,6 +24,7 @@
+  *
+  */
+ 
++#include "classfile/classLoader.hpp"
+ #include "classfile/vmSymbols.hpp"
+ #include "code/vtableStubs.hpp"
+ #include "compiler/compileBroker.hpp"
+@@ -63,6 +65,7 @@
+ #include "runtime/vm_version.hpp"
+ #include "semaphore_posix.hpp"
+ #include "services/runtimeService.hpp"
++#include "services/writeableFlags.hpp"
+ #include "signals_posix.hpp"
+ #include "utilities/align.hpp"
+ #include "utilities/checkedCast.hpp"
+@@ -82,13 +85,14 @@
+ #endif
+ 
+ // put OS-includes here
++# include <arpa/inet.h>
+ # include <ctype.h>
+ # include <stdlib.h>
+ # include <sys/types.h>
+ # include <sys/mman.h>
+-# include <sys/stat.h>
+ # include <sys/select.h>
+ # include <sys/sendfile.h>
++# include <sys/sysmacros.h>
+ # include <pthread.h>
+ # include <signal.h>
+ # include <endian.h>
+@@ -106,7 +110,6 @@
+ # include <sys/socket.h>
+ # include <pwd.h>
+ # include <poll.h>
+-# include <fcntl.h>
+ # include <string.h>
+ # include <syscall.h>
+ # include <sys/sysinfo.h>
+@@ -115,6 +118,7 @@
+ # include <stdint.h>
+ # include <inttypes.h>
+ # include <sys/ioctl.h>
++# include <libgen.h>
+ # include <linux/elf-em.h>
+ # include <sys/prctl.h>
+ #ifdef __GLIBC__
+@@ -207,6 +211,8 @@
+ typedef int (*malloc_info_func_t)(int options, FILE *stream);
+ static malloc_info_func_t g_malloc_info = nullptr;
+ #endif // __GLIBC__
++
++static int cached_pid = 0;
+ 
+ // If the VM might have been created on the primordial thread, we need to resolve the
+ // primordial thread stack bounds and check if the current thread might be the
+@@ -538,8 +544,13 @@
+                      "Java may be unstable running multithreaded in a chroot "
+                      "environment on Linux when /proc filesystem is not mounted.";
+ 
++void os::Linux::initialize_processor_count() {
++  set_processor_count((int) sysconf(_SC_NPROCESSORS_CONF));
++  assert(processor_count() > 0, "linux error");
++}
++
+ void os::Linux::initialize_system_info() {
+-  set_processor_count((int)sysconf(_SC_NPROCESSORS_CONF));
++  initialize_processor_count();
+   if (processor_count() == 1) {
+     pid_t pid = os::Linux::gettid();
+     char fname[32];
+@@ -552,7 +563,6 @@
+     }
+   }
+   _physical_memory = static_cast<physical_memory_size_type>(sysconf(_SC_PHYS_PAGES)) * static_cast<physical_memory_size_type>(sysconf(_SC_PAGESIZE));
+-  assert(processor_count() > 0, "linux error");
+ }
+ 
+ void os::init_system_properties_values() {
+@@ -1554,8 +1564,16 @@
+ 
+ // thread_id is kernel thread id (similar to Solaris LWP id)
+ intx os::current_thread_id() { return os::Linux::gettid(); }
++
+ int os::current_process_id() {
+-  return ::getpid();
++  // GLIBC < 2.25 caches pid in ::getpid(); we need to be able to reset this
++  // on CRaC restore, therefore we will use our own caching.
++  return cached_pid ? cached_pid : syscall(SYS_getpid);
++}
++
++void os::reset_cached_process_id() {
++  cached_pid = 0;
++  cached_pid = current_process_id();
+ }
+ 
+ // DLL functions
+@@ -4462,6 +4480,7 @@
+ // this is called _before_ most of the global arguments have been parsed
+ void os::init(void) {
+   char dummy;   // used to get a guess on initial stack address
++  cached_pid = current_process_id();
+   int sys_pg_size = checked_cast<int>(sysconf(_SC_PAGESIZE));
+   if (sys_pg_size < 0) {
+     fatal("os_linux.cpp: os::init: sysconf failed (%s)",
+--- a/src/hotspot/os/linux/os_linux.hpp
++++ b/src/hotspot/os/linux/os_linux.hpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 1999, 2024, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2017, 2021, Azul Systems, Inc. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -57,6 +58,7 @@
+   static bool free_memory(physical_memory_size_type& value);
+ 
+ 
++  static void initialize_processor_count();
+   static void initialize_system_info();
+ 
+   static int commit_memory_impl(char* addr, size_t bytes, bool exec);
+@@ -304,6 +306,13 @@
+   static int numa_available() { return _numa_available != nullptr ? _numa_available() : -1; }
+   static int numa_tonode_memory(void *start, size_t size, int node) {
+     return _numa_tonode_memory != nullptr ? _numa_tonode_memory(start, size, node) : -1;
++  }
++
++  static void initialize_cpu_count() {
++    initialize_processor_count();
++    if (cpu_to_node() != nullptr) {
++      rebuild_cpu_to_node_map();
++    }
+   }
+ 
+   static bool is_running_in_interleave_mode() {
+--- a/src/hotspot/os/posix/perfMemory_posix.cpp
++++ b/src/hotspot/os/posix/perfMemory_posix.cpp
+@@ -1,6 +1,7 @@
+ /*
+  * Copyright (c) 2001, 2026, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2026 SAP SE. All rights reserved.
++ * Copyright (c) 2020, 2021, Azul Systems, Inc. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -30,6 +31,7 @@
+ #include "memory/resourceArea.hpp"
+ #include "nmt/memTracker.hpp"
+ #include "oops/oop.inline.hpp"
++//#include "os_linux.inline.hpp"
+ #include "os_posix.inline.hpp"
+ #include "runtime/globals_extension.hpp"
+ #include "runtime/handles.inline.hpp"
+@@ -39,6 +41,10 @@
+ #if defined(LINUX)
+ #include "os_linux.hpp"
+ #endif
++
++#ifdef LINUX
++#include "perfMemory_linux.hpp"
++#endif //LINUX
+ 
+ // put OS-includes here
+ # include <sys/types.h>
+@@ -1343,3 +1349,86 @@
+ 
+   unmap_shared(addr, bytes);
+ }
++
++#ifdef LINUX
++bool PerfMemoryLinux::checkpoint() {
++  if (!backing_store_file_name) {
++    return true;
++  }
++
++  void *anon = ::mmap(nullptr, PerfMemory::capacity(), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  if (anon == MAP_FAILED) {
++    tty->print_cr("Cannot allocate new memory for perfdata: %s", os::strerror(errno));
++    return false;
++  }
++  // Note: we might be losing updates that happen between this copy and mremap
++  // TODO: consider acquiring PeriodicTask_lock around this
++  memcpy(anon, PerfMemory::start(), PerfMemory::used());
++  if (mremap(anon, PerfMemory::capacity(), PerfMemory::capacity(), MREMAP_FIXED | MREMAP_MAYMOVE, PerfMemory::start()) == MAP_FAILED) {
++    tty->print_cr("Cannot remap perfdata memory as anonymous: %s", os::strerror(errno));
++    if (munmap(anon, PerfMemory::capacity())) {
++      tty->print_cr("Cannot unmap unused private perfdata memory: %s", os::strerror(errno));
++    }
++    return false;
++  }
++
++  remove_file(backing_store_file_name);
++  // We cannot keep the filename because some C/R engines might not preserve PID numbers
++  // Also, username might change.
++  FREE_C_HEAP_ARRAY(char, backing_store_file_name);
++  backing_store_file_name = nullptr;
++
++  return true;
++}
++
++bool PerfMemoryLinux::restore() {
++  assert(backing_store_file_name == nullptr, "Should be nil'ed on checkpoint");
++  // With -XX:-UsePerfData the capacity is zero
++  if (PerfDisableSharedMem || PerfMemory::capacity() == 0) {
++    return true;
++  }
++  int vmid = os::current_process_id();
++  char* user_name = get_user_name(geteuid());
++  if (!user_name) {
++    return false;
++  }
++  char* dirname = get_user_tmp_dir(user_name, vmid, -1);
++  if (!make_user_tmp_dir(dirname)) {
++    return false;
++  }
++  backing_store_file_name = get_sharedmem_filename(dirname, vmid, -1);
++
++  int fd;
++  RESTARTABLE(::open(backing_store_file_name, O_RDWR|O_CREAT|O_NOFOLLOW, S_IRUSR|S_IWUSR), fd);
++  if (fd == OS_ERR) {
++    tty->print_cr("Cannot open shared perfdata file: %s", os::strerror(errno));
++    return false;
++  }
++
++  if (::ftruncate(fd, PerfMemory::capacity())) {
++    tty->print_cr("Cannot restore (ftruncate) perfdata file size: %s", os::strerror(errno));
++    ::close(fd);
++    return false;
++  }
++
++  void* shared = ::mmap(nullptr, PerfMemory::capacity(), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
++  if (MAP_FAILED == shared) {
++    tty->print_cr("cannot mmap shared perfdata file: %s", os::strerror(errno));
++    ::close(fd);
++    return false;
++  }
++  ::close(fd);
++
++  // Here is another place where we might lose the update
++  memcpy(shared, PerfMemory::start(), PerfMemory::used());
++  if (::mremap(shared, PerfMemory::capacity(), PerfMemory::capacity(), MREMAP_FIXED | MREMAP_MAYMOVE, PerfMemory::start()) == MAP_FAILED) {
++    tty->print_cr("Cannot remap shared perfdata: %s", os::strerror(errno));
++    if (munmap(shared, PerfMemory::capacity())) {
++      tty->print_cr("Cannot unmap the shared memory: %s", os::strerror(errno));
++    }
++    return false;
++  }
++
++  return true;
++}
++#endif //LINUX
+--- a/src/hotspot/os/windows/os_windows.cpp
++++ b/src/hotspot/os/windows/os_windows.cpp
+@@ -43,6 +43,7 @@
+ #include "prims/jvm_misc.hpp"
+ #include "runtime/arguments.hpp"
+ #include "runtime/atomic.hpp"
++#include "runtime/crac.hpp"
+ #include "runtime/globals.hpp"
+ #include "runtime/globals_extension.hpp"
+ #include "runtime/interfaceSupport.inline.hpp"
+@@ -835,6 +836,7 @@
+ static jlong initial_performance_count;
+ static jlong performance_frequency;
+ static double nanos_per_count; // NANOSECS_PER_SEC / performance_frequency
++static jlong restore_performance_count;
+ 
+ jlong os::elapsed_counter() {
+   LARGE_INTEGER count;
+@@ -842,11 +844,15 @@
+   return count.QuadPart - initial_performance_count;
+ }
+ 
+-
+ jlong os::elapsed_frequency() {
+   return performance_frequency;
+ }
+ 
++jlong os::elapsed_counter_since_restore() {
++  LARGE_INTEGER count;
++  QueryPerformanceCounter(&count);
++  return count.QuadPart - restore_performance_count;
++}
+ 
+ bool os::available_memory(physical_memory_size_type& value) {
+   return win32::available_memory(value);
+@@ -1143,8 +1149,18 @@
+   nanos_per_count = NANOSECS_PER_SEC / (double)performance_frequency;
+   QueryPerformanceCounter(&count);
+   initial_performance_count = count.QuadPart;
+-}
+-
++  restore_performance_count = initial_performance_count;
++}
++
++void os::win32::reset_performance_counters() {
++  LARGE_INTEGER count;
++  QueryPerformanceFrequency(&count);
++  // Until we perform a real C/R on Windows this is safe, performance frequency
++  // should be the same. With real C/R the counters will be probably incomparable.
++  assert(performance_frequency == count.QuadPart, "Performance frequency changed");
++  QueryPerformanceCounter(&count);
++  restore_performance_count = count.QuadPart;
++}
+ 
+ double os::elapsedTime() {
+   return (double) elapsed_counter() / (double) elapsed_frequency();
+@@ -1582,6 +1598,33 @@
+   int n = static_cast<int>(buflen);
+   if (buflen > INT_MAX)  n = INT_MAX;
+   return _getcwd(buf, n);
++}
++
++// NOTE: is_path_absolute() function implementation is mostly a copy from FileSystemSupport_md.c
++// WinAPI has PathIsRelative() function for this purpose, however it causes linkage to Shlwapi.dll.
++static int prefixLength(const char* path) {
++    assert(1 == strlen(os::file_separator()), "the file separator must be a single-char, not a string");
++    char c0, c1;
++
++    int n = (int)strlen(path);
++    if (n == 0) return 0;
++    c0 = path[0];
++    c1 = (n > 1) ? path[1] : 0;
++    if (c0 == *os::file_separator()) {
++        if (c1 == *os::file_separator()) return 2;      /* Absolute UNC pathname "\\\\foo" */
++        return 1;                       /* Drive-relative "\\foo" */
++    }
++    if (::isalpha(c0) && (c1 == ':')) {
++        if ((n > 2) && (path[2] == *os::file_separator()))
++            return 3;           /* Absolute local pathname "z:\\foo" */
++        return 2;                       /* Directory-relative "z:foo" */
++    }
++    return 0;                   /* Completely relative */
++}
++
++bool os::is_path_absolute(const char *path) {
++  int pl = prefixLength(path);
++  return (((pl == 2) && (path[0] == *os::file_separator())) || (pl == 3));
+ }
+ 
+ void os::prepare_native_symbols() {
+@@ -4005,6 +4048,9 @@
+   return (_initial_pid ? _initial_pid : _getpid());
+ }
+ 
++void os::reset_cached_process_id() {
++}
++
+ int                       os::win32::_processor_type            = 0;
+ // Processor level is not available on non-NT systems, use vm_version instead
+ int                       os::win32::_processor_level           = 0;
+@@ -4851,6 +4897,31 @@
+ 
+   return static_cast<wchar_t*>(result); // LPWSTR and wchat_t* are the same type on Windows.
+ }
++
++int os::mkdir(const char *path) {
++  errno_t err;
++  wchar_t* wide_path = wide_abs_unc_path(path, err);
++  if (wide_path == nullptr) {
++    errno = err;
++    return -1;
++  }
++  int res = _wmkdir(wide_path);
++  os::free(wide_path);
++  return res;
++}
++
++int os::rmdir(const char *path) {
++  errno_t err;
++  wchar_t* wide_path = wide_abs_unc_path(path, err);
++  if (wide_path == nullptr) {
++    errno = err;
++    return -1;
++  }
++  int res = _wrmdir(wide_path);
++  os::free(wide_path);
++  return res;
++}
++
+ 
+ int os::stat(const char *path, struct stat *sbuf) {
+   errno_t err;
+@@ -5900,6 +5971,10 @@
+   return (int)exit_code;
+ }
+ 
++int os::execv(const char *path, const char *argv[]) {
++  return _execv(path, argv);
++}
++
+ bool os::find(address addr, outputStream* st) {
+   int offset = -1;
+   bool result = false;
+--- a/src/hotspot/os/windows/os_windows.hpp
++++ b/src/hotspot/os/windows/os_windows.hpp
+@@ -66,6 +66,8 @@
+   // its compressed-oop guard, must survive until all Jam aliases are removed.
+   static char* reserve_jam_heap(char* requested_address, size_t bytes, size_t alignment);
+ #endif
++  static void   initialize_performance_counter();
++  static void   reset_performance_counters();
+   static void   initialize_system_info();
+   static void   setmode_streams();
+   static bool   is_windows_11_or_greater();
+@@ -116,7 +118,6 @@
+ 
+  private:
+ 
+-  static void initialize_performance_counter();
+   static void initialize_windows_version();
+   static DWORD active_processors_in_job_object(DWORD* active_processor_groups = nullptr);
+ 
+--- a/src/hotspot/share/c1/c1_Runtime1.cpp
++++ b/src/hotspot/share/c1/c1_Runtime1.cpp
+@@ -822,7 +822,7 @@
+   Deoptimization::DeoptReason reason = Deoptimization::trap_request_reason(trap_request);
+ 
+   if (action == Deoptimization::Action_make_not_entrant) {
+-    if (nm->make_not_entrant(nmethod::InvalidationReason::C1_DEOPTIMIZE)) {
++    if (nm->make_not_entrant(nmethod::InvalidationReason::C1_DEOPTIMIZE, true)) {
+       if (reason == Deoptimization::Reason_tenured) {
+         MethodData* trap_mdo = Deoptimization::get_method_data(current, method, true /*create_if_missing*/);
+         if (trap_mdo != nullptr) {
+@@ -1114,7 +1114,7 @@
+     // safepoint, but if it's still alive then make it not_entrant.
+     nmethod* nm = CodeCache::find_nmethod(caller_frame.pc());
+     if (nm != nullptr) {
+-      nm->make_not_entrant(nmethod::InvalidationReason::C1_CODEPATCH);
++      nm->make_not_entrant(nmethod::InvalidationReason::C1_CODEPATCH, true);
+     }
+ 
+     Deoptimization::deoptimize_frame(current, caller_frame.id());
+@@ -1362,7 +1362,7 @@
+     // Make sure the nmethod is invalidated, i.e. made not entrant.
+     nmethod* nm = CodeCache::find_nmethod(caller_frame.pc());
+     if (nm != nullptr) {
+-      nm->make_not_entrant(nmethod::InvalidationReason::C1_DEOPTIMIZE_FOR_PATCHING);
++      nm->make_not_entrant(nmethod::InvalidationReason::C1_DEOPTIMIZE_FOR_PATCHING, true);
+     }
+   }
+ 
+@@ -1490,7 +1490,7 @@
+ 
+   nmethod* nm = CodeCache::find_nmethod(caller_frame.pc());
+   assert (nm != nullptr, "no more nmethod?");
+-  nm->make_not_entrant(nmethod::InvalidationReason::C1_PREDICATE_FAILED_TRAP);
++  nm->make_not_entrant(nmethod::InvalidationReason::C1_PREDICATE_FAILED_TRAP, true);
+ 
+   methodHandle m(current, nm->method());
+   MethodData* mdo = m->method_data();
+--- a/src/hotspot/share/ci/ciReplay.cpp
++++ b/src/hotspot/share/ci/ciReplay.cpp
+@@ -802,7 +802,7 @@
+     // Make sure the existence of a prior compile doesn't stop this one
+     nmethod* nm = (entry_bci != InvocationEntryBci) ? method->lookup_osr_nmethod_for(entry_bci, comp_level, true) : method->code();
+     if (nm != nullptr) {
+-      nm->make_not_entrant(nmethod::InvalidationReason::CI_REPLAY);
++      nm->make_not_entrant(nmethod::InvalidationReason::CI_REPLAY, false);
+     }
+     replay_state = this;
+     CompileBroker::compile_method(methodHandle(THREAD, method), entry_bci, comp_level,
+--- a/src/hotspot/share/code/codeCache.cpp
++++ b/src/hotspot/share/code/codeCache.cpp
+@@ -1394,7 +1394,7 @@
+   while(iter.next()) {
+     nmethod* nm = iter.method();
+     if (nm->is_marked_for_deoptimization() && !nm->has_been_deoptimized() && nm->can_be_deoptimized()) {
+-      nm->make_not_entrant(nmethod::InvalidationReason::MARKED_FOR_DEOPTIMIZATION);
++      nm->make_not_entrant(nmethod::InvalidationReason::MARKED_FOR_DEOPTIMIZATION, true);
+       nm->make_deoptimized();
+     }
+   }
+--- a/src/hotspot/share/code/nmethod.cpp
++++ b/src/hotspot/share/code/nmethod.cpp
+@@ -61,6 +61,7 @@
+ #include "prims/methodHandles.hpp"
+ #include "runtime/continuation.hpp"
+ #include "runtime/atomic.hpp"
++#include "runtime/cracRecompiler.hpp"
+ #include "runtime/deoptimization.hpp"
+ #include "runtime/flags/flagSetting.hpp"
+ #include "runtime/frame.inline.hpp"
+@@ -2000,7 +2001,7 @@
+ }
+ 
+ // Invalidate code
+-bool nmethod::make_not_entrant(InvalidationReason invalidation_reason) {
++bool nmethod::make_not_entrant(InvalidationReason invalidation_reason, bool can_schedule_recompilation) {
+   // This can be called while the system is already at a safepoint which is ok
+   NoSafepointVerifier nsv;
+ 
+@@ -2080,6 +2081,10 @@
+     assert(!found, "osr nmethod should have been invalidated");
+   }
+ #endif
++
++  if (can_schedule_recompilation) {
++    CRaCRecompiler::record_decompilation(*this);
++  }
+ 
+   return true;
+ }
+--- a/src/hotspot/share/code/nmethod.hpp
++++ b/src/hotspot/share/code/nmethod.hpp
+@@ -714,8 +714,10 @@
+   // alive.  It is used when an uncommon trap happens.  Returns true
+   // if this thread changed the state of the nmethod or false if
+   // another thread performed the transition.
+-  bool  make_not_entrant(InvalidationReason invalidation_reason);
+-  bool  make_not_used() { return make_not_entrant(InvalidationReason::NOT_USED); }
++  // CRaC records application-driven invalidations for recompilation after restore.
++  // Keep LabsJDK's typed reason and JVMCI invalidation reporting intact.
++  bool make_not_entrant(InvalidationReason invalidation_reason, bool can_schedule_recompilation = false);
++  bool make_not_used() { return make_not_entrant(InvalidationReason::NOT_USED); }
+ 
+   bool  is_marked_for_deoptimization() const { return deoptimization_status() != not_marked; }
+   bool  has_been_deoptimized() const { return deoptimization_status() == deoptimize_done; }
+--- a/src/hotspot/share/compiler/compilationPolicy.cpp
++++ b/src/hotspot/share/compiler/compilationPolicy.cpp
+@@ -931,7 +931,7 @@
+         nmethod* osr_nm = mh->lookup_osr_nmethod_for(bci, CompLevel_simple, false);
+         if (osr_nm != nullptr && osr_nm->comp_level() > CompLevel_simple) {
+           // Invalidate the existing OSR nmethod so that a compile at CompLevel_simple is permitted.
+-          osr_nm->make_not_entrant(nmethod::InvalidationReason::OSR_INVALIDATION_FOR_COMPILING_WITH_C1);
++          osr_nm->make_not_entrant(nmethod::InvalidationReason::OSR_INVALIDATION_FOR_COMPILING_WITH_C1, false);
+         }
+         compile(mh, bci, CompLevel_simple, THREAD);
+       }
+@@ -1529,7 +1529,7 @@
+               int osr_bci = nm->is_osr_method() ? nm->osr_entry_bci() : InvocationEntryBci;
+               print_event(MAKE_NOT_ENTRANT, mh(), mh(), osr_bci, level);
+             }
+-            nm->make_not_entrant(nmethod::InvalidationReason::OSR_INVALIDATION_BACK_BRANCH);
++            nm->make_not_entrant(nmethod::InvalidationReason::OSR_INVALIDATION_BACK_BRANCH, false);
+           }
+         }
+         // Fix up next_level if necessary to avoid deopts
+--- a/src/hotspot/share/gc/g1/g1CollectedHeap.cpp
++++ b/src/hotspot/share/gc/g1/g1CollectedHeap.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 2001, 2025, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2019, 2021, Azul Systems, Inc. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -814,7 +815,11 @@
+   rebuild_region_sets(false /* free_list_only */);
+   abort_refinement();
+   resize_heap_if_necessary(allocation_word_size);
+-  uncommit_regions_if_necessary();
++  if (should_cleanup_unused()) {
++    cleanup_unused_regions(); // Includes uncommitting
++  } else {
++    uncommit_regions_if_necessary();
++  }
+ 
+   // Rebuild the code root lists for each region
+   rebuild_code_roots();
+@@ -937,6 +942,26 @@
+ 
+ bool G1CollectedHeap::gc_overhead_limit_exceeded() {
+   return _gc_overhead_counter >= GCOverheadLimitThreshold;
++}
++
++// The implementation of this should likely be OS-dependent. The current one is verified to have
++// the desired effect on Linux, should probably also be on BSD. On others this may mostly be a
++// useless work.
++void G1CollectedHeap::cleanup_unused_regions() {
++  assert_at_safepoint_on_vm_thread();
++
++  log_debug(gc, heap)("Cleanup unused regions");
++  const size_t orig_capacity = capacity();
++
++  // Uncommit all free regions
++  precond(orig_capacity >= G1HeapRegion::GrainBytes);
++  shrink(orig_capacity - G1HeapRegion::GrainBytes /* leave one region to pass G1HeapRegionManager's asserts */);
++  uncommit_regions(UINT_MAX);
++  assert(capacity() <= orig_capacity, "unexpectedly gained capacity: %zu -> %zu", orig_capacity, capacity());
++
++  // Commit them back
++  expand(orig_capacity - capacity());
++  assert(capacity() >= orig_capacity, "unexpectedly lost capacity: %zu -> %zu", orig_capacity, capacity());
+ }
+ 
+ HeapWord* G1CollectedHeap::satisfy_failed_allocation_helper(size_t word_size,
+--- a/src/hotspot/share/jfr/jfr.cpp
++++ b/src/hotspot/share/jfr/jfr.cpp
+@@ -25,7 +25,9 @@
+ #include "jfr/instrumentation/jfrEventClassTransformer.hpp"
+ #include "jfr/jfr.hpp"
+ #include "jfr/jni/jfrJavaSupport.hpp"
++#include "jfr/jni/jfrUpcalls.hpp"
+ #include "jfr/leakprofiler/leakProfiler.hpp"
++#include "jfr/periodic/jfrOSInterface.hpp"
+ #include "jfr/recorder/jfrRecorder.hpp"
+ #include "jfr/recorder/checkpoint/jfrCheckpointManager.hpp"
+ #include "jfr/recorder/repository/jfrEmergencyDump.hpp"
+@@ -38,9 +40,11 @@
+ #include "jfr/support/jfrThreadLocal.hpp"
+ #include "jfr/support/methodtracer/jfrMethodTracer.hpp"
+ #include "jfr/support/methodtracer/jfrTraceTagging.hpp"
++#include "memory/resourceArea.hpp"
+ #include "oops/instanceKlass.hpp"
+ #include "oops/instanceKlass.inline.hpp"
+ #include "oops/klass.hpp"
++#include "runtime/flags/jvmFlag.hpp"
+ #include "runtime/java.hpp"
+ #include "runtime/javaThread.hpp"
+ 
+@@ -178,3 +182,29 @@
+     JfrRecorderService::emit_leakprofiler_events_on_oom();
+   }
+ }
++
++void Jfr::before_checkpoint() {
++  JfrOSInterface::before_checkpoint();
++}
++
++void Jfr::after_restore() {
++  const char *jfr_flag = "StartFlightRecording";
++  JVMFlag *flag = JVMFlag::find_flag(jfr_flag);
++  if (flag->get_origin() == JVMFlagOrigin::CRAC_RESTORE) {
++    // -XX:StartFlightRecording passed on restore
++    assert(JfrOptionSet::start_flight_recording_options() == nullptr, "should have been released");
++    size_t buf_len = 4 + strlen(jfr_flag) + 1 + strlen(flag->get_ccstr()) + 1;
++    ResourceMark rm;
++    char *buf = NEW_RESOURCE_ARRAY(char, buf_len);
++    snprintf(buf, buf_len, "-XX:%s=%s", jfr_flag, flag->get_ccstr());
++    JavaVMOption option;
++    option.optionString = buf;
++    option.extraInfo = nullptr;
++    const JavaVMOption *option_ptr = &option;
++    JfrOptionSet::parse_start_flight_recording_option(&option_ptr, buf + 4 + strlen(jfr_flag));
++    // We cannot invoke this directly now as DCmdStart command would be blocked
++    // trying to register new file descriptors. Instead we just record a request and
++    // the recording will be started at the right moment from JDKResource.
++    JfrUpcalls::request_start_after_restore();
++  }
++}
+--- a/src/hotspot/share/jfr/jfr.hpp
++++ b/src/hotspot/share/jfr/jfr.hpp
+@@ -76,6 +76,8 @@
+   static bool on_start_flight_recording_option(const JavaVMOption** option, char* delimiter);
+   static void on_backpatching(const Method* callee_method, JavaThread* jt);
+   static void initialize_main_thread(JavaThread* jt);
++  static void before_checkpoint();
++  static void after_restore();
+   static bool has_sample_request(JavaThread* jt);
+   static void check_and_process_sample_request(JavaThread* jt);
+   static void on_report_java_out_of_memory();
+--- a/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp
++++ b/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp
+@@ -1403,7 +1403,7 @@
+ 
+   nmethod* code = method->code();
+   if (code != nullptr) {
+-    code->make_not_entrant(nmethod::InvalidationReason::JVMCI_REPROFILE);
++    code->make_not_entrant(nmethod::InvalidationReason::JVMCI_REPROFILE, false);
+   }
+ 
+   MethodData* method_data = method->method_data();
+@@ -1848,7 +1848,7 @@
+     if (!fst.current()->is_compiled_frame()) {
+       JVMCI_THROW_MSG(IllegalStateException, "compiled stack frame expected");
+     }
+-    fst.current()->cb()->as_nmethod()->make_not_entrant(nmethod::InvalidationReason::JVMCI_MATERIALIZE_VIRTUAL_OBJECT);
++    fst.current()->cb()->as_nmethod()->make_not_entrant(nmethod::InvalidationReason::JVMCI_MATERIALIZE_VIRTUAL_OBJECT, false);
+   }
+   Deoptimization::deoptimize(thread, *fst.current(), Deoptimization::Reason_none);
+   // look for the frame again as it has been updated by deopt (pc, deopt state...)
+--- a/src/hotspot/share/jvmci/jvmciEnv.cpp
++++ b/src/hotspot/share/jvmci/jvmciEnv.cpp
+@@ -1798,7 +1798,7 @@
+ 
+   if (!deoptimize) {
+     // Prevent future executions of the nmethod but let current executions complete.
+-    nm->make_not_entrant(invalidation_reason);
++    nm->make_not_entrant(invalidation_reason, false);
+ 
+     // Do not clear the address field here as the Java code may still
+     // want to later call this method with deoptimize == true. That requires
+@@ -1807,7 +1807,7 @@
+     // Deoptimize the nmethod immediately.
+     DeoptimizationScope deopt_scope;
+     deopt_scope.mark(nm);
+-    nm->make_not_entrant(invalidation_reason);
++    nm->make_not_entrant(invalidation_reason, false);
+     nm->make_deoptimized();
+     deopt_scope.deoptimize_marked();
+ 
+--- a/src/hotspot/share/jvmci/jvmciRuntime.cpp
++++ b/src/hotspot/share/jvmci/jvmciRuntime.cpp
+@@ -2245,7 +2245,7 @@
+               tty->print_cr("Replacing method %s", method_name);
+             }
+             if (old != nullptr) {
+-              old->make_not_entrant(nmethod::InvalidationReason::JVMCI_REPLACED_WITH_NEW_CODE);
++              old->make_not_entrant(nmethod::InvalidationReason::JVMCI_REPLACED_WITH_NEW_CODE, false);
+             }
+ 
+             LogTarget(Info, nmethod, install) lt;
+--- a/src/hotspot/share/oops/instanceKlass.cpp
++++ b/src/hotspot/share/oops/instanceKlass.cpp
+@@ -3493,7 +3493,7 @@
+   for (int l = CompLevel_limited_profile; l < n->comp_level(); l++) {
+     nmethod *inv = lookup_osr_nmethod(n->method(), n->osr_entry_bci(), l, true);
+     if (inv != nullptr && inv->is_in_use()) {
+-      inv->make_not_entrant(nmethod::InvalidationReason::OSR_INVALIDATION_OF_LOWER_LEVEL);
++      inv->make_not_entrant(nmethod::InvalidationReason::OSR_INVALIDATION_OF_LOWER_LEVEL, false);
+     }
+   }
+ }
+--- a/src/hotspot/share/oops/method.cpp
++++ b/src/hotspot/share/oops/method.cpp
+@@ -1028,7 +1028,7 @@
+   // If so, we have to make it not_entrant.
+   nmethod* nm = code(); // Put it into local variable to guard against concurrent updates
+   if (nm != nullptr) {
+-    nm->make_not_entrant(nmethod::InvalidationReason::SET_NATIVE_FUNCTION);
++    nm->make_not_entrant(nmethod::InvalidationReason::SET_NATIVE_FUNCTION, false);
+   }
+ }
+ 
+--- a/src/hotspot/share/prims/whitebox.cpp
++++ b/src/hotspot/share/prims/whitebox.cpp
+@@ -807,7 +807,7 @@
+             if (_make_not_entrant) {
+                 nmethod* nm = CodeCache::find_nmethod(f->pc());
+                 assert(nm != nullptr, "did not find nmethod");
+-                nm->make_not_entrant(nmethod::InvalidationReason::WHITEBOX_DEOPTIMIZATION);
++                nm->make_not_entrant(nmethod::InvalidationReason::WHITEBOX_DEOPTIMIZATION, false);
+             }
+             ++_result;
+           }
+--- a/src/hotspot/share/runtime/deoptimization.cpp
++++ b/src/hotspot/share/runtime/deoptimization.cpp
+@@ -1832,7 +1832,7 @@
+ #if INCLUDE_JVMCI
+ address Deoptimization::deoptimize_for_missing_exception_handler(nmethod* nm) {
+   // there is no exception handler for this pc => deoptimize
+-  nm->make_not_entrant(nmethod::InvalidationReason::MISSING_EXCEPTION_HANDLER);
++  nm->make_not_entrant(nmethod::InvalidationReason::MISSING_EXCEPTION_HANDLER, true);
+ 
+   // Use Deoptimization::deoptimize for all of its side-effects:
+   // gathering traps statistics, logging...
+@@ -2469,7 +2469,7 @@
+ 
+     // Recompile
+     if (make_not_entrant) {
+-      if (!nm->make_not_entrant(nmethod::InvalidationReason::UNCOMMON_TRAP)) {
++      if (!nm->make_not_entrant(nmethod::InvalidationReason::UNCOMMON_TRAP, true)) {
+         return; // the call did not change nmethod's state
+       }
+ 
+--- a/src/hotspot/share/runtime/javaThread.cpp
++++ b/src/hotspot/share/runtime/javaThread.cpp
+@@ -1339,7 +1339,7 @@
+       // it is a Java nmethod
+       nmethod* nm = CodeCache::find_nmethod(fst.current()->pc());
+       assert(nm != nullptr, "did not find nmethod");
+-      nm->make_not_entrant(nmethod::InvalidationReason::ZOMBIE);
++      nm->make_not_entrant(nmethod::InvalidationReason::ZOMBIE, false);
+     }
+   }
+ }
+--- a/src/hotspot/share/services/diagnosticCommand.cpp
++++ b/src/hotspot/share/services/diagnosticCommand.cpp
+@@ -21,6 +21,10 @@
+  * questions.
+  *
+  */
++#include <clocale>
++#ifdef _ALLBSD_SOURCE
++#include <xlocale.h>
++#endif // _ALLBSD_SOURCE
+ 
+ #include "cds/cds_globals.hpp"
+ #include "cds/cdsConfig.hpp"
+@@ -51,6 +55,7 @@
+ #include "oops/oop.inline.hpp"
+ #include "oops/typeArrayOop.inline.hpp"
+ #include "prims/jvmtiAgentList.hpp"
++#include "runtime/crac.hpp"
+ #include "runtime/fieldDescriptor.inline.hpp"
+ #include "runtime/flags/jvmFlag.hpp"
+ #include "runtime/handles.inline.hpp"
+@@ -70,6 +75,11 @@
+ #include "utilities/formatBuffer.hpp"
+ #include "utilities/macros.hpp"
+ #include "utilities/parseInteger.hpp"
++#include "utilities/stringUtils.hpp"
++#if INCLUDE_SERVICES && !defined(_WINDOWS) && !defined(AIX)
++#include "attachListener_posix.hpp"
++#include "posixAttachOperation.hpp"
++#endif // INCLUDE_SERVICES && !defined(_WINDOWS) && !defined(AIX)
+ #ifdef LINUX
+ #include "os_posix.hpp"
+ #include "mallocInfoDcmd.hpp"
+@@ -156,6 +166,8 @@
+   DCmdFactory::register_DCmdFactory(new DCmdFactoryImpl<CompilerDirectivesClearDCmd>(full_export, true, false));
+   DCmdFactory::register_DCmdFactory(new DCmdFactoryImpl<CompilationMemoryStatisticDCmd>(full_export, true, false));
+ 
++  DCmdFactory::register_DCmdFactory(new DCmdFactoryImpl<CheckpointDCmd>(full_export, true,false));
++
+   // Enhanced JMX Agent Support
+   // These commands not currently exported via the DiagnosticCommandMBean
+   uint32_t jmx_agent_export_flags = DCmd_Source_Internal | DCmd_Source_AttachAPI;
+@@ -1076,6 +1088,183 @@
+ }
+ #endif // INCLUDE_CDS
+ 
++CheckpointDCmd::CheckpointDCmd(outputStream* output, bool heap) :
++  DCmdWithParser(output, heap),
++  _metrics("metrics", "Extra image metrics to record (key1=value2,key2=value2,... or @/path/to/file)", "STRING", false),
++  _labels("labels", "Extra labels to record (label1=value1,label2=value2,... or @/path/to/file)", "STRING", false) {
++  _dcmdparser.add_dcmd_option(&_metrics);
++  _dcmdparser.add_dcmd_option(&_labels);
++}
++
++struct LocaleGuard {
++#ifndef _WINDOWS
++  locale_t _new, _old;
++  LocaleGuard(): _new(newlocale(LC_ALL_MASK, "C", 0)), _old(uselocale(_new)) {}
++#else
++  LocaleGuard() {}
++#endif // _WINDOWS
++  ~LocaleGuard() {
++#ifndef _WINDOWS
++    uselocale(_old);
++    freelocale(_new);
++#endif // _WINDOWS
++  }
++};
++
++void CheckpointDCmd::execute(DCmdSource source, TRAPS) {
++  const char *metrics = _metrics.value();
++  if (metrics != nullptr) {
++    if (crac::is_image_score_supported()) {
++      // This guard ensures that we are parsing the floating point values
++      // with '.' as the decimal point (some other locales use ',')
++      LocaleGuard lg;
++      if (metrics[0] == '@') {
++        if (!parse_pairs_from_file("metric", metrics + 1, CheckpointDCmd::accept_metric)) {
++          return;
++        }
++      } else {
++        if (!parse_pairs("metric", metrics, CheckpointDCmd::accept_metric)) {
++          return;
++        }
++      }
++    } else {
++      output()->print_cr("Warning: metrics are not supported by current C/R engine");
++    }
++  }
++  const char *labels = _labels.value();
++  if (labels != nullptr) {
++    if (crac::is_image_constraints_supported()) {
++      if (labels[0] == '@') {
++        if (!parse_pairs_from_file("label", labels + 1, CheckpointDCmd::accept_label)) {
++          return;
++        }
++      } else {
++        if (!parse_pairs("label", labels, CheckpointDCmd::accept_label)) {
++          return;
++        }
++      }
++    } else {
++      output()->print_cr("Warning: labels are not supported by current C/R engine");
++    }
++  }
++
++  Klass* k = SystemDictionary::resolve_or_fail(vmSymbols::jdk_internal_crac_mirror_Core(),
++                                                 true, CHECK);
++  JavaValue result(T_OBJECT);
++  JavaCallArguments args;
++  args.push_long((jlong)output());
++  JavaCalls::call_static(&result, k,
++                         vmSymbols::checkpointRestoreInternal_name(),
++                         vmSymbols::checkpointRestoreInternal_signature(), &args, CHECK);
++  oop str = result.get_oop();
++  if (str != nullptr) {
++    char* out = java_lang_String::as_utf8_string(str);
++    if (out[0] != '\0') {
++      outputStream* stream = output();
++#if INCLUDE_SERVICES && !defined(_WINDOWS) && !defined(AIX)
++      assert(PosixAttachListener::get_current_op(), "should exist");
++      if (PosixAttachListener::get_current_op()->is_effectively_completed()) {
++        stream = tty;
++      }
++#endif // INCLUDE_SERVICES && !defined(_WINDOWS) && !defined(AIX)
++      stream->print_cr("An exception during a checkpoint operation:");
++      stream->print("%s", out);
++    }
++  }
++}
++
++bool CheckpointDCmd::accept_metric(CheckpointDCmd* self, const char* key, char* str) {
++  char *endptr;
++  double value = strtod(str, &endptr);
++  while (isspace(*endptr)) ++endptr;
++  if (*endptr) {
++    self->output()->print_cr("Cannot convert '%s' into double value for metric '%s'", str, key);
++    return false;
++  }
++  if (!crac::record_image_score(key, value)) {
++    self->output()->print_cr("Cannot record metric %s=%f", key, value);
++    return false;
++  }
++  return true;
++}
++
++bool CheckpointDCmd::accept_label(CheckpointDCmd* self, const char* key, char* str) {
++  while (isspace(*str)) ++str;
++  char *end = str + strlen(str) - 1;
++  while (end >= str && isspace(*end)) {
++    *end = '\0';
++    --end;
++  }
++  if (!crac::record_image_label(key, str)) {
++    self->output()->print_cr("Cannot record label %s=%s", key, str);
++    return false;
++  }
++  return true;
++}
++
++bool CheckpointDCmd::parse_pairs(const char* what, const char* str, accept_func accept) {
++  ResourceMark rm;
++  size_t len = strlen(str);
++  char *copy = strcpy(NEW_RESOURCE_ARRAY(char, len + 1), str);
++  char *key_value;
++  while ((key_value = strsep(&copy, ",")) != nullptr) {
++    char *key = strsep(&key_value, "=");
++    if (*key == '\0') {
++      output()->print_cr("Empty %s name", what);
++      return false;
++    }
++    if (key_value == nullptr) {
++      output()->print_cr("Missing value for %s '%s'", what, key);
++      return false;
++    }
++    if (!accept(this, key, key_value)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++bool CheckpointDCmd::parse_pairs_from_file(const char* what, const char* path, accept_func accept) {
++  FILE *file = os::fopen(path, "r");
++  if (file == nullptr) {
++    output()->print_cr("Cannot open %s: %s", path, os::strerror(errno));
++    return false;
++  }
++  struct FileCloser: StackObj {
++    FILE *_file;
++    FileCloser(FILE *f): _file(f) {}
++    ~FileCloser() { fclose(_file); }
++  } closer(file);
++  char linebuf[1024];
++  for (int linenum = 1; fgets(linebuf, sizeof(linebuf), file); ++linenum) {
++    char *line = linebuf;
++    size_t line_length = strlen(line);
++    if (line_length >= sizeof(linebuf) - 1 && line[line_length - 1] != '\n') {
++      output()->print_cr("Line %d starting with '%s' is too long", linenum, line);
++      return false;
++    } else if (line[line_length - 1] == '\n') {
++      // don't print newline in error message
++      line[line_length - 1] = '\0';
++    }
++    char *key = strsep(&line, "=");
++    if (line == nullptr) {
++      output()->print_cr("Invalid line %d in %s (no '=' separator)", linenum, path);
++      return false;
++    }
++    // truncate whitespace in key
++    while (isspace(*key)) ++key;
++    for (char *end = line - 2; end >= key && isspace(*end); --end) *end = '\0';
++    if (*key == '\0') {
++      output()->print_cr("Empty %s name", what);
++      return false;
++    }
++    if (!accept(this, key, line)) {
++      return false;
++    }
++  }
++  return true;
++}
++
+ ThreadDumpToFileDCmd::ThreadDumpToFileDCmd(outputStream* output, bool heap) :
+                                            DCmdWithParser(output, heap),
+   _overwrite("-overwrite", "May overwrite existing file", "BOOLEAN", false, "false"),
+--- a/src/hotspot/share/services/management.cpp
++++ b/src/hotspot/share/services/management.cpp
+@@ -40,6 +40,7 @@
+ #include "oops/oop.inline.hpp"
+ #include "oops/oopHandle.inline.hpp"
+ #include "oops/typeArrayOop.inline.hpp"
++#include "runtime/crac.hpp"
+ #include "runtime/flags/jvmFlag.hpp"
+ #include "runtime/globals.hpp"
+ #include "runtime/handles.inline.hpp"
+@@ -913,7 +914,7 @@
+     return Management::vm_init_done_time();
+ 
+   case JMM_JVM_UPTIME_MS:
+-    return Management::ticks_to_ms(os::elapsed_counter());
++    return Management::ticks_to_ms(os::elapsed_counter_since_restore());
+ 
+   case JMM_COMPILE_TOTAL_TIME_MS:
+     return Management::ticks_to_ms(CompileBroker::total_compilation_ticks());
+@@ -976,6 +977,18 @@
+ 
+   case JMM_OS_MEM_TOTAL_PHYSICAL_BYTES:
+     return static_cast<jlong>(os::physical_memory());
++
++  case JMM_JVM_RESTORE_START_TIME_MS:
++    return crac::restore_start_time();
++
++  case JMM_JVM_UPTIME_SINCE_RESTORE_MS:
++    {
++      jlong ticks = crac::uptime_since_restore();
++      if (ticks == -1) {
++        return -1;
++      }
++      return Management::ticks_to_ms(ticks);
++    }
+ 
+   default:
+     return -1;
+--- a/src/hotspot/share/utilities/ostream.hpp
++++ b/src/hotspot/share/utilities/ostream.hpp
+@@ -300,6 +300,7 @@
+   }
+   int64_t fileSize();
+   void flush();
++  int get_fd() { return fileno(_file); }
+ };
+ 
+ // unlike fileStream, fdStream does unbuffered I/O by calling
+--- a/src/java.base/share/native/libzip/zip_util.h
++++ b/src/java.base/share/native/libzip/zip_util.h
+@@ -291,6 +291,9 @@
+ ZIP_FreeEntry(jzfile *zip, jzentry *ze);
+ jlong ZIP_GetEntryDataOffset(jzfile *zip, jzentry *entry);
+ 
++JNIEXPORT int
++ZIP_GetFD(jzfile *zip);
++
+ JNIEXPORT jboolean
+ ZIP_InflateFully(void *inBuf, jlong inLen, void *outBuf, jlong outLen, char **pmsg);
+ 
+--- a/src/java.base/unix/classes/sun/nio/ch/UnixDispatcher.java
++++ b/src/java.base/unix/classes/sun/nio/ch/UnixDispatcher.java
+@@ -28,12 +28,93 @@
+ import java.io.FileDescriptor;
+ import java.io.IOException;
+ 
++import jdk.internal.crac.mirror.Context;
++import jdk.internal.crac.mirror.Resource;
++import jdk.internal.access.JavaIOFileDescriptorAccess;
++import jdk.internal.access.SharedSecrets;
++import jdk.internal.crac.Core;
++import jdk.internal.crac.JDKResource;
++
+ abstract class UnixDispatcher extends NativeDispatcher {
+     private static final boolean SUPPORTS_PENDING_SIGNALS = NativeThread.supportPendingSignals();
+ 
++    static class ResourceProxy implements JDKResource {
++        @Override
++        public void beforeCheckpoint(Context<? extends Resource> context) throws Exception {
++            UnixDispatcher.beforeCheckpoint();
++        }
++
++        @Override
++        public void afterRestore(Context<? extends Resource> context)
++                throws IOException {
++            UnixDispatcher.afterRestore();
++        }
++    }
++
++    static Object closeLock = new Object();
++    static boolean forceNonDeferedClose;
++    static int closeCnt;
++
++    static ResourceProxy resourceProxy = new ResourceProxy();
++
++
+     @Override
+     void close(FileDescriptor fd) throws IOException {
+-        close0(fd);
++        closeAndMark(fd);
++    }
++
++    void preClose(FileDescriptor fd) throws IOException {
++        boolean doPreclose = true;
++        synchronized (closeLock) {
++            if (forceNonDeferedClose) {
++                doPreclose = false;
++            }
++            if (doPreclose) {
++                ++closeCnt;
++            }
++        }
++
++        if (!doPreclose) {
++            return;
++        }
++
++        try {
++            preClose0(fd);
++        } finally {
++            synchronized (closeLock) {
++                closeCnt--;
++                if (forceNonDeferedClose && closeCnt == 0) {
++                    closeLock.notifyAll();
++                }
++            }
++        }
++    }
++
++    static void beforeCheckpoint() throws InterruptedException {
++        synchronized (closeLock) {
++            forceNonDeferedClose = true;
++            while (closeCnt != 0) {
++                closeLock.wait();
++            }
++            beforeCheckpoint0();
++        }
++    }
++
++    static void afterRestore() throws IOException {
++        synchronized (closeLock) {
++            afterRestore0();
++            forceNonDeferedClose = false;
++        }
++    }
++
++    private static final JavaIOFileDescriptorAccess fdAccess =
++        SharedSecrets.getJavaIOFileDescriptorAccess();
++
++    static void closeAndMark(FileDescriptor fd) throws IOException {
++        // Originally this used fdAccess.markClosed() and close0() but leaving
++        // the FD value set breaks JDKSocketResource (we don't want the extra
++        // test if the FD resource has been marked).
++        fdAccess.close(fd);
+     }
+ 
+     private void signalThreads(long reader, long writer) {
+@@ -60,8 +141,16 @@
+ 
+     static native void init();
+ 
++    static native void beforeCheckpoint0();
++
++    static native void afterRestore0() throws IOException;
++
+     static {
+         IOUtil.load();
+         init();
++        // We cannot register using normal priority because other JDK resources
++        // might read configuration files with this or later priority.
++        // It's difficult to trigger static initialization outside the package.
++        Core.Priority.PRE_FILE_DESCRIPTORS.getContext().register(resourceProxy);
+     }
+ }
+--- a/src/jdk.management/share/classes/com/sun/management/internal/PlatformMBeanProviderImpl.java
++++ b/src/jdk.management/share/classes/com/sun/management/internal/PlatformMBeanProviderImpl.java
+@@ -24,6 +24,7 @@
+  */
+ package com.sun.management.internal;
+ 
++import jdk.crac.management.CRaCMXBean;
+ import com.sun.management.DiagnosticCommandMBean;
+ import com.sun.management.HotSpotDiagnosticMXBean;
+ import com.sun.management.ThreadMXBean;
+@@ -41,6 +42,8 @@
+ import javax.management.DynamicMBean;
+ import jdk.management.HotSpotAOTCacheMXBean;
+ import jdk.management.VirtualThreadSchedulerMXBean;
++
++import jdk.crac.management.internal.CRaCImpl;
+ import sun.management.ManagementFactoryHelper;
+ import sun.management.spi.PlatformMBeanProvider;
+ 
+@@ -52,6 +55,11 @@
+     private final List<PlatformComponent<?>> mxbeanList;
+     private static HotSpotDiagnostic hsDiagMBean = null;
+     private static OperatingSystemMXBean osMBean = null;
++
++    // CRaC
++    private static CRaCMXBean cracMXBean = null;
++    public static final String CRAC_MXBEAN_NAME =
++        "jdk.management:type=CRaC";
+ 
+     static {
+        System.loadLibrary("management_ext");
+@@ -331,6 +339,36 @@
+             });
+         }
+ 
++        /**
++         * CRaC MXBean
++         */
++        initMBeanList.add(new PlatformComponent<CRaCMXBean>() {
++            private final Set<String> cracMXBeanInterfaceNames =
++                Collections.singleton("jdk.crac.management.CRaCMXBean");
++
++            @Override
++            public Set<Class<? extends CRaCMXBean>> mbeanInterfaces() {
++                return Collections.singleton(CRaCMXBean.class);
++            }
++
++            @Override
++            public Set<String> mbeanInterfaceNames() {
++                return cracMXBeanInterfaceNames;
++            }
++
++            @Override
++            public String getObjectNamePattern() {
++                return CRAC_MXBEAN_NAME;
++            }
++
++            @Override
++            public Map<String, CRaCMXBean> nameToMBeanMap() {
++                return Collections.<String, CRaCMXBean>singletonMap(
++                    CRAC_MXBEAN_NAME,
++                    getCRaCMXBean());
++            }
++        });
++
+         initMBeanList.trimToSize();
+         return initMBeanList;
+     }
+@@ -348,4 +386,11 @@
+         }
+         return osMBean;
+     }
++
++    private static synchronized CRaCMXBean getCRaCMXBean() {
++        if (cracMXBean == null) {
++            cracMXBean = new CRaCImpl(ManagementFactoryHelper.getVMManagement());
++        }
++        return cracMXBean;
++    }
+ }
+--- a/test/lib-test/jdk/test/whitebox/CPUInfoTest.java
++++ b/test/lib-test/jdk/test/whitebox/CPUInfoTest.java
+@@ -66,8 +66,7 @@
+                     "hv",           "fsrm",             "avx512_bitalg",     "gfni",
+                     "f16c",         "pku",              "ospke",             "cet_ibt",
+                     "cet_ss",       "avx512_ifma",      "serialize",         "avx_ifma",
+-                    "apx_f",        "avx10_1",          "avx10_2",           "avx512_fp16",
+-                    "sha512",       "hybrid"
++                    "apx_f", "avx10_1", "avx10_2", "avx512_fp16", "sha512", "hybrid", "fma4", "movbe", "osxsave", "ibt", "shstk", "xsave", "cmpxchg16", "lahfsahf", "htt", "xsavec", "avx_fast_unaligned_load"
+                     );
+             // @formatter:on
+             // Checkstyle: resume

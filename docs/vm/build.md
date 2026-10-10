@@ -328,3 +328,6 @@ unexpected local edits are preserved. `--check` verifies without updating it.
 To work inside `upstream/graal25/` instead, stage any new files there, then run
 `python3 tools/export_patches.py --graal` from `vm/`. That writes additions back
 to `src/graal/` and upstream edits back to the patch. Do not edit both copies at once.
+
+The [experimental Linux CRaC provider](crac.md) has a separate source-preparation
+path; it is not included in the regular runtime targets or released packages.
