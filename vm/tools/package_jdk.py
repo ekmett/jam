@@ -289,6 +289,7 @@ def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_li
     native_runtime = [name for name in libraries if not name.startswith(('libjam_bridge.', 'jam_bridge.'))]
     licenses = {
         'LICENSE.md': ROOT.parent / 'LICENSE.md',
+        'LICENSE.spdx': ROOT.parent / 'LICENSE.spdx',
         'LICENSE-BSD-2-Clause.md': ROOT.parent / 'LICENSE-BSD-2-Clause.md',
         'LICENSE-APACHE.md': ROOT.parent / 'LICENSE-APACHE.md',
         'THIRD_PARTY_NOTICES.md': ROOT.parent / 'THIRD_PARTY_NOTICES.md',

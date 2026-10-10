@@ -1,5 +1,3 @@
-SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-
 # Licensing Terms
 
 Original Jam VM code is dual-licensed. You may choose either the
