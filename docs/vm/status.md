@@ -64,9 +64,10 @@ release, with focused HotSpot/GraalVM and Native Image qualification. It does
 not capture stacks or supply a language scheduler; see
 [suspended owners](thc-integration.md#suspended-owners).
 
-[Issue #43](https://github.com/ekmett/jam/issues/43) tracks the HotSpot GC
-management counters reporting zero despite completed collections. Use GC logs
-for collection counts until that reporting defect is fixed.
+HotSpot's GC management bean reports completed collections, elapsed collection
+time and the latest collection's memory usage. Packages through
+`vm-2026.10.09-0e36293` predate the [#43 accounting fix](https://github.com/ekmett/jam/issues/43)
+and report zero counts; use GC logs when measuring those older runtimes.
 
 Whole-nursery promotion is intentional. Selective promotion is a non-goal for
 now. Indexed weak processing, adaptive capacities and parallel VM scanning are

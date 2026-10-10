@@ -915,7 +915,7 @@
 +};
 --- a/src/hotspot/share/gc/jam/jamHeap.cpp
 +++ b/src/hotspot/share/gc/jam/jamHeap.cpp
-@@ -0,0 +1,801 @@
+@@ -0,0 +1,804 @@
 +/*
 + * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
 + * Copyright (c) 2017, 2022, Red Hat, Inc. All rights reserved.
@@ -979,6 +979,7 @@
 +#include "runtime/safepoint.hpp"
 +#include "runtime/threads.hpp"
 +#include "runtime/vmThread.hpp"
++#include "services/memoryService.hpp"
 +#include "utilities/growableArray.hpp"
 +#include "utilities/count_trailing_zeros.hpp"
 +#include "utilities/resizeableResourceHash.hpp"
@@ -1641,6 +1642,8 @@
 +  STWGCTimer timer;
 +  timer.register_gc_start();
 +  GCTraceTime(Info, gc) time(minor ? "Jam minor collection" : "Jam major collection", nullptr, gc_cause(), true);
++  TraceMemoryManagerStats management(&_memory_manager, gc_cause(),
++      minor ? "end of minor GC" : "end of major GC");
 +  increment_total_collections(!minor);
 +  const bool should_verify = total_collections() >= VerifyGCStartAt;
 +  if (should_verify && VerifyBeforeGC) {

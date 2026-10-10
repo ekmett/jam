@@ -19,6 +19,30 @@ public final class CollectorIdentitySmoke {
             throw new AssertionError("JVMCI is missing the selected Jam flag");
         System.out.println("JVMCI runtime initialized with Jam identity");
     }
+    static void checkAccounting(Runnable collect) {
+        var bean = (com.sun.management.GarbageCollectorMXBean)
+            ManagementFactory.getGarbageCollectorMXBeans().getFirst();
+        long beforeCount = bean.getCollectionCount();
+        long beforeTime = bean.getCollectionTime();
+        long beforeNative = JamWeak.collections(0) + JamWeak.collections(2);
+        collect.run();
+        long nativeDelta = JamWeak.collections(0) + JamWeak.collections(2) - beforeNative;
+        long count = bean.getCollectionCount();
+        long elapsed = bean.getCollectionTime();
+        if (nativeDelta <= 0 || count - beforeCount != nativeDelta)
+            throw new AssertionError("GC bean count did not track completed collections: "
+                + beforeCount + " -> " + count + ", native delta=" + nativeDelta);
+        // Millisecond rounding permits a short collection to add zero time.
+        if (beforeTime < 0 || elapsed < beforeTime)
+            throw new AssertionError("GC bean time is unavailable or decreased");
+        var info = bean.getLastGcInfo();
+        if (info == null || info.getId() != count || info.getEndTime() < info.getStartTime()
+                || !info.getMemoryUsageBeforeGc().containsKey("Jam Heap")
+                || !info.getMemoryUsageAfterGc().containsKey("Jam Heap"))
+            throw new AssertionError("GC bean is missing its completed collection record");
+        System.out.println("Jam GC bean: count=" + count + ", time=" + elapsed + "ms");
+    }
+
     public static void main(String[] args) throws ReflectiveOperationException {
         boolean jam = args.length >= 1 && args[0].equals("Jam");
         String expected = jam ? "Jam Heap" : "Epsilon Heap";
@@ -30,9 +54,9 @@ public final class CollectorIdentitySmoke {
         if (pools != 1) throw new AssertionError("missing heap pool: " + expected);
         if (jam) {
             if (args.length > 1 && args[1].equals("JVMCI")) checkJVMCI();
-            long before = JamWeak.collections(2);
-            System.gc();
-            if (JamWeak.collections(2) <= before) throw new AssertionError("Jam collection was not selected");
+            checkAccounting(System::gc);
+            checkAccounting(() -> JamWeak.minor(false));
+            checkAccounting(() -> JamWeak.minor(true));
         } else {
             try {
                 JamWeak.create(new Object(), new Object(), null);
