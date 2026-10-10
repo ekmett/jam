@@ -14,6 +14,8 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+  schedule:
+    - cron: '23 7 * * *'
   workflow_dispatch:
     inputs:
       build_flavor:
@@ -26,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: vm-ci-${{ github.ref }}
+  group: vm-ci-${{ github.event_name }}-${{ github.ref }}-${{ inputs.build_flavor || 'release' }}
   cancel-in-progress: true
 
 env:
@@ -134,7 +136,7 @@ jobs:
 
   hotspot:
     name: HotSpot integration (${{ matrix.platform }})
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'runtime-validation'))
     strategy:
       fail-fast: false
       matrix:
@@ -196,7 +198,7 @@ jobs:
 
   graal_macos:
     name: Build GraalVM (${{ matrix.platform }})
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'runtime-validation'))
     strategy:
       fail-fast: false
       matrix:
@@ -260,7 +262,7 @@ jobs:
 
   graal_linux:
     name: Build GraalVM (${{ matrix.platform }})
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'runtime-validation'))
     strategy:
       fail-fast: false
       matrix:
@@ -360,7 +362,7 @@ jobs:
 
   hotspot_windows:
     name: HotSpot integration (windows)
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'runtime-validation'))
     runs-on: windows-2022
     timeout-minutes: 120
     defaults:
@@ -418,7 +420,7 @@ jobs:
 
   graal_windows:
     name: Build GraalVM (windows)
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name, 'runtime-validation')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'runtime-validation'))
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:
