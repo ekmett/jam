@@ -41,6 +41,17 @@ bridge libraries on `java.library.path`, and the JVMCI hotspot package exported
 to unnamed modules. `-XX:CRaCEngine=simengine` exercises callbacks without taking
 a process image; it cannot establish restore correctness.
 
+CRaC enables informational checkpoint logging on stdout by default. For CLI
+programs whose stdout is a result stream, route those diagnostics to stderr:
+
+```sh
+-Xlog:crac=off:stdout -Xlog:crac=info:stderr
+```
+
+Omit `-Djdk.graal.ShowConfiguration=info` for these runs as well; that diagnostic
+option adds compiler information to program output. Keep stdout and stderr
+separate when checking results, rather than filtering the expected output.
+
 For a focused compiler compatibility check, copy the candidate JDK into an
 isolated directory and add the released Jam provider's unchanged
 `lib/libjvmcicompiler.so` and `lib/jam/`. This is a LabsJDK plus libgraal test
