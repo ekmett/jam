@@ -25,7 +25,7 @@
 [![Contributor Covenant: 2.0](https://img.shields.io/static/v1?label=Contributor+Covenant&message=2.0&color=007ec6&style=flat&logo=contributorcovenant&logoColor=white)](CODE_OF_CONDUCT.md)
 
 [![docs: read](https://img.shields.io/static/v1?label=docs&message=read&color=007ec6&style=flat&logo=pandoc&logoColor=white)](https://ekmett.github.io/jam/)
-[![coverage: report](https://img.shields.io/static/v1?label=coverage&message=report&color=F01F7A&style=flat&logo=codecov&logoColor=white)](https://app.codecov.io/github/ekmett/jam)
+[![coverage percentage](https://img.shields.io/codecov/c/github/ekmett/jam?style=flat&logo=codecov&logoColor=%23ffffff)](https://app.codecov.io/github/ekmett/jam)
 [![Nix: flake](https://img.shields.io/static/v1?label=Nix&message=flake&color=5277C3&style=flat&logo=nixos&logoColor=white)](https://github.com/ekmett/jam/blob/main/flake.nix)
 [![Docker: GHCR](https://img.shields.io/badge/Docker-GHCR-2496ED?style=flat&logo=docker&logoColor=white)](https://github.com/ekmett/jam/pkgs/container/jam)
 [![dist: downloads](https://img.shields.io/static/v1?label=dist&message=downloads&color=007ec6&style=flat)](https://github.com/ekmett/jam/releases)
