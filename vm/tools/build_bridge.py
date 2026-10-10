@@ -66,7 +66,9 @@ def build(java_home):
             elif destination.exists():
                 destination.unlink()
             shutil.move(str(stage / name), destination)
-        shutil.copyfile(ROOT / "LICENSE.md", output / "LICENSE.md")
+        for name in ("LICENSE.md", "LICENSE-BSD-2-Clause.md", "LICENSE-APACHE.md", "THIRD_PARTY_NOTICES.md"):
+            shutil.copyfile(ROOT.parent / name, output / name)
+        shutil.copyfile(ROOT / "NOTICE.md", output / "NOTICE.md")
     print(f"Built guest API, JNI library, headers and Javadoc: {output}")
 
 

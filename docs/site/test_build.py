@@ -20,13 +20,21 @@ class SiteTest(unittest.TestCase):
             (source / 'README.md').write_text('# Demo\n\n[Guide](docs/guide.md#details)\n\n![License](assets/badges/license.svg)\n')
             (source / 'assets/badges').mkdir(parents=True)
             (source / 'assets/badges/license.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
-            (source / 'LICENSE.md').write_text('# License\n')
+            (source / 'LICENSE.md').write_text(
+                '# Licensing Terms\n\n[BSD](LICENSE-BSD-2-Clause.md) or '
+                '[Apache](LICENSE-APACHE.md). [Notices](THIRD_PARTY_NOTICES.md).\n')
+            for name in ('LICENSE-BSD-2-Clause.md', 'LICENSE-APACHE.md', 'THIRD_PARTY_NOTICES.md'):
+                (source / name).write_text('# Terms\n')
             (source / 'docs/guide.md').write_text('# Guide\n\n## Details\n\n[Home](../README.md)\n')
             for name in ('index.html', 'annotated.html', 'files.html'):
                 (api / name).write_text('<html><head><title>API</title></head><body>API</body></html>')
             subprocess.run(['git', 'init', '-q', str(source)], check=True)
             subprocess.run(['git', '-C', str(source), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Fixture', '--allow-empty'], check=True)
             build(source, api, output, 'work', 'pandoc')
+            licensing = (output / 'guides/LICENSE.html').read_text()
+            for name in ('LICENSE-BSD-2-Clause.html', 'LICENSE-APACHE.html', 'THIRD_PARTY_NOTICES.html'):
+                self.assertTrue((output / 'guides' / name).is_file())
+                self.assertIn(f'href="{name}"', licensing)
             home = (output / 'home.html').read_text()
             self.assertIn('guides/docs/guide.html#details', home)
             self.assertIn('src="assets/badges/license.svg"', home)
