@@ -196,9 +196,12 @@ by the finalizer itself. `complete` ends that retention. See
 The registry still scans current associations repeatedly. A key-indexed work
 queue could reduce that cost without changing the laws above.
 
-thc still needs primitive lowering, finalizer scheduling and exception integration.
-GHC C finalizers and weak-thread resurrection require further runtime work.
-This is not yet end-to-end execution of `System.Mem.Weak` through thc.
+THC's weak primitive integration and language-owned handoffs shipped in
+[THC #1200](https://github.com/ekmett/thc/pull/1200), with bounded end-to-end
+weak/ForeignPtr and weak-thread evidence recorded in
+[Jam #7](https://github.com/ekmett/jam/issues/7). This does not establish every
+GHC behavior on every backend, or recovery from arbitrary VM exhaustion.
+Finalizer scheduling and shutdown cleanup remain language-owned policies.
 
 The pinned GHC sources include
 [`System.Mem.Weak`](https://github.com/ghc/ghc/blob/902339d332fb4ce2b3c87dcac1ee6495d41ad886/libraries/base/src/System/Mem/Weak.hs),

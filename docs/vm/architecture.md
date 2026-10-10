@@ -154,7 +154,7 @@ failure into a major at this point would change the liveness question after
 weak decisions had already been frozen.
 
 A successful promotion resets young and clears the exact remembered set: there are no surviving young objects left to remember.
-Selective promotion is not implemented.
+Whole-nursery promotion is deliberate; selective promotion is a non-goal for now.
 
 ## Major collection
 

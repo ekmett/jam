@@ -28,9 +28,12 @@ Windows also supports `tar -xf`; set `$env:JAVA_HOME` to the extracted
 These are preview builds. New archives identify `release` or `fastdebug` in
 the filename and manifest; `release` is the optimized build and `fastdebug`
 retains VM assertions. The first release used fastdebug and predates the
-filename suffix. The initial Linux x86_64 archives need
-glibc 2.38 or newer; macOS arm64 needs macOS 26. Windows x86_64 is tested on
-Windows Server 2022. Read the manifest for each release's actual requirements.
+filename suffix. The `vm-2026.10.09-0e36293` GraalVM release provides
+macOS arm64 packages qualified on macOS 15.5, Linux x86_64 packages qualified on
+glibc 2.35, and Windows x86_64 packages tested on Windows 11/Server 2022.
+Initial packages required macOS 26 or glibc 2.38. Read each release's platform
+manifest for its actual requirements; newer compatibility floors do not apply
+retroactively to older archives.
 Native Image needs the platform C/C++ toolchain, and generated applications may
 need companion Jam libraries; see [deployment](native-image.md).
 

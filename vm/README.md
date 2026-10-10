@@ -69,15 +69,16 @@ low-level claims, native loading and the thc handoff.
 * [Native Image](../docs/vm/native-image.md)
 * [Integrating thc](../docs/vm/thc-integration.md)
 * [Weak-pointer semantics](../docs/vm/weak-pointers.md)
-* [Lifted weak references](https://github.com/ekmett/jam/issues/7) (planned)
+* [Lifted weak references](https://github.com/ekmett/jam/issues/7)
 * [Heap architecture](../docs/vm/architecture.md)
 * [HotSpot integration](../docs/vm/hotspot-integration.md)
 * [Supported configurations](../docs/vm/status.md)
 
-The current targets are macOS 26 arm64, Linux x86_64 and Windows x86_64, using
+The current targets are macOS arm64, Linux x86_64 and Windows x86_64, using
 the patched JDK 25 or [GraalVM 25.3.4.1](../docs/vm/build.md#graalvm), with fixed capacities,
 stop-the-world collection and compressed oops. Native executables use the
 SubstrateVM adapter, selected with `native-image --gc=jam`.
+See the [package platform requirements](../docs/vm/distribution.md) for OS floors.
 
 ## Source and license
 

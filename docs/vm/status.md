@@ -1,10 +1,10 @@
 # Supported configurations
 
-Use the patched JDK 25 or GraalVM 25.3.4.1 on macOS 26 arm64, Linux x86_64 or
-Windows x86_64. The Linux build has been exercised on Ubuntu 22.04 with glibc 2.35;
-the Windows build on Windows 11 with Visual Studio 2022. The distributed CI
-archives have their own [platform requirements](distribution.md), including
-glibc 2.38 for the initial Linux package. Select Jam with
+Use the patched JDK 25 or GraalVM 25.3.4.1 on macOS arm64, Linux x86_64 or
+Windows x86_64. The `vm-2026.10.09-0e36293` GraalVM packages are qualified on
+macOS 15.5, Ubuntu 22.04 with glibc 2.35, and Windows 11/Server 2022.
+Older packages have different [platform requirements](distribution.md).
+Select Jam with
 `-XX:+UnlockExperimentalVMOptions -XX:+UseJamGC` and set equal initial and
 maximum heap sizes. The [build guide](build.md) gives the toolchain and commands.
 Native executables use `native-image --gc=jam` from the patched GraalVM; see
@@ -37,21 +37,37 @@ Use [jam.vm.Weak](thc-integration.md) to register weak associations and install
 JVM runnables. Any caller can pump the shared queue. There is no automatic
 finalizer thread or wakeup notification; the caller supplies the pump schedule.
 
-Tokens are local to a JVM or Native Image isolate and never reused. Retired
-registrations are excluded from collection scans, but their token records still
-retain metadata, so native memory use grows with lifetime registrations. Allocation
-failure while growing that metadata terminates instead of throwing Java
-`OutOfMemoryError`. Keep this in mind for long-running, weak-heavy workloads.
+Tokens are local to a JVM or Native Image isolate. Retired registry slots are
+recycled; generation-tagged tokens reject stale handles. Storage follows the
+concurrent high-water mark rather than lifetime registrations. Registration
+failure is transactional and the Java boundary throws `OutOfMemoryError`.
+This does not promise recovery from arbitrary VM exhaustion. See the
+[registration contract](weak-pointers.md#claiming-a-finalizer).
 
 Use the [packaged runtime](build.md#packaging) when moving an installation
 out of its build checkout.
 
-## Next steps
+## Shipped scope and limits
 
-The thc owner can use the existing Java hooks to
-lower weak primitives and wrap guest finalizers in runnables. GHC C finalizers
-and weak-thread resurrection need additional runtime support.
+Language-owned lifted weak handoffs and THC integration shipped in
+[Jam #7](https://github.com/ekmett/jam/issues/7) and
+[THC #1200](https://github.com/ekmett/thc/pull/1200), including claim ownership,
+capture release, resurrection and one-shot finalization. The
+[handoff measurement](lifted-weak-cost.md) records retention and latency costs.
+These checks do not establish every platform/backend/application combination
+or arbitrary exhausted-VM successor-installation recovery. The language owns
+its shutdown cleanup and callback scheduling; Jam makes no automatic
+finalize-everything-on-exit promise.
 
-Within the collector, the next work includes reclaiming weak metadata, indexed
-weak processing, selective promotion, adaptive capacities and parallel VM
-scanning. Jam's SIMD kernels and work scheduler remain the implementation base.
+The optional `jam.vm.Candidate` API is included in the same three-platform
+release, with focused HotSpot/GraalVM and Native Image qualification. It does
+not capture stacks or supply a language scheduler; see
+[suspended owners](thc-integration.md#suspended-owners).
+
+[Issue #43](https://github.com/ekmett/jam/issues/43) tracks the HotSpot GC
+management counters reporting zero despite completed collections. Use GC logs
+for collection counts until that reporting defect is fixed.
+
+Whole-nursery promotion is intentional. Selective promotion is a non-goal for
+now. Indexed weak processing, adaptive capacities and parallel VM scanning are
+possible future optimizations, not missing parts of the agreed weak contract.

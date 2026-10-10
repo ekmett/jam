@@ -89,8 +89,9 @@ Add the JAR to the host class path and its native directory to the library path:
 For module-path use, enable native access for `jam.vm` instead. Load the API
 from a shared host class loader: the JVM associates a loaded native library
 with its loader. The JAR and shim are a pair for the pinned Jam-enabled JDK,
-not an independently versioned VM extension protocol. The current native
-build supports macOS 26 arm64, Linux x86_64 and Windows x86_64. On Windows,
+not an independently versioned VM extension protocol. Current packages
+support macOS arm64, Linux x86_64 and Windows x86_64; consult their
+[platform requirements](distribution.md). On Windows,
 separate class-path entries with `;` and use `bin/` as the native library
 directory in a packaged JDK.
 
@@ -203,20 +204,21 @@ thc:
 export THC_OPTS="-Xshare:off -Xms256m -Xmx256m -XX:+UnlockExperimentalVMOptions -XX:+UseJamGC"
 ```
 
-This selects the collector. The thc runtime still needs to lower its weak
-primitives through this API and arrange to pump finalizers. See
-[supported configurations](status.md) for the remaining runtime work.
+This selects the collector. THC's weak primitive lowering and finalizer pump
+integration shipped in [THC #1200](https://github.com/ekmett/thc/pull/1200).
+See [supported configurations](status.md) for qualification limits.
 
 ## Suspended owners
 
-This is an **experimental source API**. Published runtime releases through
-`vm-2026.10.09-9392bca-static` do not include it. Private macOS arm64 HotSpot
-provider tests cover registration, claiming, relocation and completion; they do
-not qualify Windows, Linux or Native Image providers. The Native Image
-substitutions are included for integration, with platform qualification tracked
-separately. A matching SDK and provider package is still required before a
-consumer can pin a published binary dependency. Packaging is tracked in
-[issue #36](https://github.com/ekmett/jam/issues/36).
+The optional Candidate API is packaged in
+[`vm-2026.10.09-0e36293`](https://github.com/ekmett/jam/releases/tag/vm-2026.10.09-0e36293)
+for macOS arm64, Linux x86_64 and Windows x86_64. Focused HotSpot/GraalVM and
+Native Image probes passed on all three platforms; full supplier CI passed
+all fifteen jobs. This qualifies the supplier API, not arbitrary language
+scheduler behavior. Use the matching SDK and provider from the release's
+platform manifest. [Issue #36](https://github.com/ekmett/jam/issues/36) records
+the packaging work, and [#38](https://github.com/ekmett/jam/issues/38) records
+the subsequent compiler repair and qualified delivery.
 
 `jam.vm.Candidate` is an optional API for a language runtime that has already
 captured a suspended computation in a heap object. It does not capture stacks,
