@@ -259,7 +259,7 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_QUIET YES)
   file(GLOB jam_vm_guides CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/docs/vm/*.md")
-  set(jam_docs_pages README.md LICENSE.md LICENSE-BSD-2-Clause.md LICENSE-APACHE.md
+  set(jam_docs_pages README.md LICENSE.md
     THIRD_PARTY_NOTICES.md CODE_OF_CONDUCT.md
     docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md docs/finalizers.md
     ${jam_vm_guides} vm/README.md vm/LICENSE.md vm/NOTICE.md
@@ -314,7 +314,7 @@ endif()
 install(TARGETS jam EXPORT jamTargets
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   FILE_SET modules DESTINATION "${CMAKE_INSTALL_LIBDIR}/jam/modules")
-install(FILES LICENSE.md LICENSE.spdx LICENSE-BSD-2-Clause.md LICENSE-APACHE.md
+install(FILES LICENSE.md LICENSE.spdx
   THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATADIR}/jam")
 install(EXPORT jamTargets NAMESPACE jam:: CXX_MODULES_DIRECTORY cxx-modules
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/jam")
