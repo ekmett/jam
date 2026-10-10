@@ -66,9 +66,9 @@ def build(java_home):
             elif destination.exists():
                 destination.unlink()
             shutil.move(str(stage / name), destination)
-        for obsolete in ("LICENSE-BSD-2-Clause.md", "LICENSE-APACHE.md"):
+        for obsolete in ("LICENSE-BSD-2-Clause.md", "LICENSE-APACHE.md", "LICENSE.spdx"):
             (output / obsolete).unlink(missing_ok=True)
-        for name in ("LICENSE.md", "LICENSE.spdx", "THIRD_PARTY_NOTICES.md"):
+        for name in ("LICENSE.md", "THIRD_PARTY_NOTICES.md"):
             shutil.copyfile(ROOT.parent / name, output / name)
         shutil.copyfile(ROOT / "NOTICE.md", output / "NOTICE.md")
     print(f"Built guest API, JNI library, headers and Javadoc: {output}")
