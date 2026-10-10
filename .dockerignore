@@ -3,6 +3,7 @@
 !Dockerfile
 !CMakeLists.txt
 !LICENSE*.md
+!LICENSE.spdx
 !THIRD_PARTY_NOTICES.md
 !src/**
 !etc/**
