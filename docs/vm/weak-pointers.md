@@ -205,3 +205,10 @@ The pinned GHC sources include
 [`MarkWeak.c`](https://github.com/ghc/ghc/blob/902339d332fb4ce2b3c87dcac1ee6495d41ad886/rts/sm/MarkWeak.c)
 and [`Weak.c`](https://github.com/ghc/ghc/blob/902339d332fb4ce2b3c87dcac1ee6495d41ad886/rts/Weak.c).
 See [supported configurations](status.md) for the remaining runtime work.
+
+## Handoff costs
+
+The [lifted weak measurement](lifted-weak-cost.md) compares ordinary weak
+registrations, one handoff, and a short chain, including delayed pumping.
+It records retention and finalizer latency on a packaged runtime; the observed
+collection counts are not API guarantees.
