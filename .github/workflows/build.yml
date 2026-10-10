@@ -23,6 +23,7 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
     env:
+      SCCACHE_GHA_ENABLED: 'true'
       CMAKE_BUILD_PARALLEL_LEVEL: '4'
       CTEST_PARALLEL_LEVEL: '4'
       NINJA_STATUS: '[%f/%t running=%r elapsed=%e] '
@@ -59,6 +60,13 @@ jobs:
         if: runner.os == 'macOS'
       - uses: ekmett/native/.github/actions/setup/windows@main
         if: runner.os == 'Windows'
+      - name: Set up compiler cache
+        id: sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      - name: Set up module cache launcher
+        uses: ekmett/modcache@main
       - name: Install documentation tools
         if: inputs.docs && matrix.platform.runner == 'ubuntu-24.04'
         run: |
@@ -101,6 +109,7 @@ jobs:
           fi
           cmake -S . -B build -G Ninja \
             -DCMAKE_CXX_COMPILER="$compiler" -DCMAKE_BUILD_TYPE=${{ matrix.platform.config }} \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=modcache \
             -DJAM_BUILD_TESTS=ON -DJAM_BUILD_VM=${{ inputs.coverage && 'ON' || 'OFF' }} \
             -DJAM_ENABLE_COVERAGE=${{ inputs.coverage && 'ON' || 'OFF' }} "${extra[@]}"
       - name: Build
@@ -177,6 +186,12 @@ jobs:
         with:
           path: build/site
           retention-days: 1
+      - name: Record compiler cache statistics
+        if: ${{ !cancelled() && steps.sccache.outcome == 'success' }}
+        run: |
+          mkdir -p build
+          sccache --show-stats | tee build/sccache-stats.txt
+          sccache --show-stats --stats-format=json > build/sccache-stats.json
       - name: Retain Ninja timings and graph
         if: ${{ !cancelled() && hashFiles('build/build.ninja') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -188,6 +203,7 @@ jobs:
           path: |
             build/.ninja_log
             build/ci-build.ninja_log
+            build/sccache-stats.*
             build/ci-ninja-graph.dot
             build/build.ninja
             build/CMakeFiles/rules.ninja
