@@ -259,9 +259,10 @@ if(JAM_BUILD_DOCS)
   set(DOXYGEN_QUIET YES)
   file(GLOB jam_vm_guides CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/docs/vm/*.md")
-  set(jam_docs_pages README.md LICENSE.md CODE_OF_CONDUCT.md
+  set(jam_docs_pages README.md LICENSE.md LICENSE-BSD-2-Clause.md LICENSE-APACHE.md
+    THIRD_PARTY_NOTICES.md CODE_OF_CONDUCT.md
     docs/README.md docs/tracing.md docs/lifetimes.md docs/generations.md docs/finalizers.md
-    ${jam_vm_guides} vm/README.md vm/NOTICE.md
+    ${jam_vm_guides} vm/README.md vm/LICENSE.md vm/NOTICE.md
     docs/simd.md docs/collector.md docs/single-base.md docs/hosting.md docs/building.md)
   # Preserve relative page links in a build-tree copy. Doxygen needs linked
   # badges as inline HTML; Pandoc continues to render the original Markdown.
@@ -313,7 +314,8 @@ endif()
 install(TARGETS jam EXPORT jamTargets
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   FILE_SET modules DESTINATION "${CMAKE_INSTALL_LIBDIR}/jam/modules")
-install(FILES LICENSE.md DESTINATION "${CMAKE_INSTALL_DATADIR}/jam")
+install(FILES LICENSE.md LICENSE-BSD-2-Clause.md LICENSE-APACHE.md
+  THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATADIR}/jam")
 install(EXPORT jamTargets NAMESPACE jam:: CXX_MODULES_DIRECTORY cxx-modules
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/jam")
 configure_package_config_file(etc/cmake/jamConfig.cmake.in

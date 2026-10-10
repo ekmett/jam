@@ -26,8 +26,10 @@ def build(source, api, output, name, pandoc):
     revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
     repo = f'https://github.com/ekmett/{name}'
     guides = [Path('README.md'), Path('LICENSE.md')]
+    guides += sorted(source_path.relative_to(source) for pattern in ('LICENSE-*.md', 'THIRD_PARTY_NOTICES.md')
+                     for source_path in source.glob(pattern))
     guides += sorted(p.relative_to(source) for p in (source / 'docs').rglob('*.md'))
-    guides += [p for p in (Path('vm/README.md'), Path('vm/NOTICE.md')) if (source / p).is_file()]
+    guides += [p for p in (Path('vm/README.md'), Path('vm/LICENSE.md'), Path('vm/NOTICE.md')) if (source / p).is_file()]
     routes = {p: Path('home.html') if p == Path('README.md') else Path('guides') / p.with_suffix('.html') for p in guides}
     if output.exists():
         shutil.rmtree(output)

@@ -288,7 +288,10 @@ def package(java_home, output, runtime, runtime_licenses=(), compiler_runtime_li
     archives = static_libraries(NATIVE_BUILD, runtime, system, os.environ.get("JAM_NATIVE_CONFIG", "Release"))
     native_runtime = [name for name in libraries if not name.startswith(('libjam_bridge.', 'jam_bridge.'))]
     licenses = {
-        'LICENSE.md': ROOT / 'LICENSE.md',
+        'LICENSE.md': ROOT.parent / 'LICENSE.md',
+        'LICENSE-BSD-2-Clause.md': ROOT.parent / 'LICENSE-BSD-2-Clause.md',
+        'LICENSE-APACHE.md': ROOT.parent / 'LICENSE-APACHE.md',
+        'THIRD_PARTY_NOTICES.md': ROOT.parent / 'THIRD_PARTY_NOTICES.md',
         'NOTICE.md': ROOT / 'NOTICE.md',
         'jam-LICENSE.md': ROOT.parent / 'LICENSE.md',
         'native-LICENSE.md': NATIVE_BUILD / 'native-LICENSE.md',
