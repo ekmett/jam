@@ -2,7 +2,8 @@
 *
 !Dockerfile
 !CMakeLists.txt
-!LICENSE.md
+!LICENSE*.md
+!THIRD_PARTY_NOTICES.md
 !src/**
 !etc/**
 !t/**

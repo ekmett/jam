@@ -44,7 +44,8 @@
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
-                ./CMakeLists.txt ./LICENSE.md ./src ./etc/cmake ./t/installed
+                ./CMakeLists.txt ./LICENSE.md ./LICENSE-BSD-2-Clause.md ./LICENSE-APACHE.md
+                ./THIRD_PARTY_NOTICES.md ./src ./etc/cmake ./t/installed
               ];
             };
             nativeBuildInputs = [ pkgs.cmake pkgs.ninja llvm.clang-tools ];
