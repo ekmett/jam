@@ -302,10 +302,14 @@ BMI files are build inputs; they are not runtime dependencies.
 
 ## CI
 
-Core and adapter checks run on pull requests. Full HotSpot, GraalVM and
-SubstrateVM builds run on `main`, manual dispatch, or a pull request carrying
-the `runtime-validation` label. They use the same runtime targets above, with
-separate Graal consumers sharing one built distribution per platform. CI defaults
+Native collector and guest bridge checks run on pushes to `main` and pull
+requests. Full HotSpot, GraalVM and SubstrateVM qualification runs daily at
+07:23 UTC, on manual dispatch, or on a pull request carrying the
+`runtime-validation` label. Use manual dispatch to qualify a release.
+Pushes do not cancel scheduled or manually dispatched qualification runs.
+
+Full qualification uses the same runtime targets above, with separate Graal
+consumers sharing one built distribution per platform. CI defaults
 to `release`; manual dispatch also offers `fastdebug`. Artifact names include
 the flavor so the two cannot be confused.
 

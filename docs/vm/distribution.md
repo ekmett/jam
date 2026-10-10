@@ -60,7 +60,9 @@ it does not establish arbitrary application compatibility or complete Haskell
 ## Publishing
 
 The **Publish prebuilt runtimes** workflow takes a successful **Managed runtimes**
-run ID, its build flavor and a new release tag. Its source must belong to this repository and be
+run ID, its build flavor and a new release tag. Use a daily, manually dispatched,
+or `runtime-validation` run with full qualification; ordinary commit checks do
+not produce release packages. Its source must belong to this repository and be
 merged into `main`; all fifteen platform/runtime jobs must have passed. It
 requires all six JDK/GraalVM archives of that flavor, checks their recorded
 `JAM_BUILD_FLAVOR` against the artifact identity, verifies the Actions artifact

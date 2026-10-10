@@ -83,7 +83,13 @@ class ReleaseTests(unittest.TestCase):
         run = dict(status='completed', conclusion='success', event='push', head_branch='main', head_repository={'full_name': 'ekmett/jam'}, path='.github/workflows/vm.yml')
         jobs = [dict(name=f'{s} ({p})', conclusion='success') for p in PLATFORMS for s in
                 ('Build GraalVM', 'HotSpot integration', 'Native and guest bridge', 'GraalVM runtime', 'SubstrateVM')]
-        require_run(run, jobs, {'status': 'ahead'})
+        for event in ('push', 'workflow_dispatch', 'pull_request', 'schedule'):
+            with self.subTest(event=event):
+                require_run({**run, 'event': event}, jobs, {'status': 'ahead'})
+                # A successful smoke-only run cannot qualify a release.
+                smoke = [job for job in jobs if job['name'].startswith('Native and guest bridge')]
+                with self.assertRaises(ValueError):
+                    require_run({**run, 'event': event}, smoke, {'status': 'ahead'})
         for field, value in [('event', 'pull_request_target'), ('head_repository', {'full_name': 'other/fork'}), ('status', 'in_progress'), ('conclusion', 'failure'), ('path', '.github/workflows/ci.yml')]:
             with self.subTest(field=field), self.assertRaises(ValueError):
                 require_run({**run, field: value}, jobs, {'status': 'ahead'})

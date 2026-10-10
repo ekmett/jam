@@ -41,7 +41,7 @@ def sha256(path):
 
 def require_run(run, jobs, comparison):
     if (run['status'] != 'completed' or run['conclusion'] != 'success'
-            or run['event'] not in ('push', 'workflow_dispatch', 'pull_request')
+            or run['event'] not in ('push', 'workflow_dispatch', 'pull_request', 'schedule')
             or run['head_repository']['full_name'] != REPO
             or comparison['status'] not in ('ahead', 'identical')
             or run['path'] != '.github/workflows/vm.yml'):
