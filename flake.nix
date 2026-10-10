@@ -44,7 +44,7 @@
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
-                ./CMakeLists.txt ./LICENSE.md ./LICENSE.spdx ./LICENSE-BSD-2-Clause.md ./LICENSE-APACHE.md
+                ./CMakeLists.txt ./LICENSE.md ./LICENSE.spdx
                 ./THIRD_PARTY_NOTICES.md ./src ./etc/cmake ./t/installed
               ];
             };
