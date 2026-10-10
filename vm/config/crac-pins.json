@@ -18,6 +18,10 @@
       "before_sha256": "b8d208874f81efe171ed8a17f98b7603a2aab6d4d578cbd37203252750b67f8b",
       "after_sha256": "104db3fbdc9289dff904b1a30718de4ce30eaba1123b3d31d90f75c8a81483ab"
     },
+    "src/hotspot/cpu/x86/vm_version_x86.hpp": {
+      "before_sha256": "ccd2788594a5726b2fc592df4183c4aa505a794914134fff801da90da0f521f1",
+      "after_sha256": "44105b0668401684ee64fcc3506334a2eafc9be0ecda4c702f8837b82a9dbdf5"
+    },
     "src/hotspot/os/linux/os_linux.cpp": {
       "before_sha256": "cba31b519e58e0c7c0e77c85f124722952d6d2ecc2f16ace2e3b2f3590a30a4e",
       "after_sha256": "2b9c530a60ef7612a72a416ba8763772772a0de2b802b96c455915e0543b1e48"
@@ -85,6 +89,10 @@
     "src/hotspot/share/jvmci/jvmciRuntime.cpp": {
       "before_sha256": "d9fb3004334ad49f3d0f5ca4854b6f7a4efff68deb8f974f7cfdb1379802a857",
       "after_sha256": "09ba796c45f95d2d0405fe660b34eb7e7499aff7d31b955ac55ea2009b375624"
+    },
+    "src/hotspot/share/jvmci/vmStructs_jvmci.cpp": {
+      "before_sha256": "67cc31ab2fdc5a99755f9e33edb6823e45408ae2bb3032d3949bf680c9cb149e",
+      "after_sha256": "ca465b62f7658a2932a69ad00af622a6f452cae7af81d17ef2cdedb25775d001"
     },
     "src/hotspot/share/oops/instanceKlass.cpp": {
       "before_sha256": "816a29ec9f8600762dc3a2bc16479a153e29cc118b4b6c0bc0b664a0a240a2a9",

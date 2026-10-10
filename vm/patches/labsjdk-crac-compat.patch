@@ -1993,3 +1993,337 @@
                      );
              // @formatter:on
              // Checkstyle: resume
+--- a/src/hotspot/cpu/x86/vm_version_x86.hpp
++++ b/src/hotspot/cpu/x86/vm_version_x86.hpp
+@@ -27,12 +27,15 @@
+ 
+ #include "runtime/abstract_vm_version.hpp"
+ #include "utilities/debug.hpp"
++#include "utilities/formatBuffer.hpp"
+ #include "utilities/macros.hpp"
+ #include "utilities/sizes.hpp"
+ 
+ class VM_Version : public Abstract_VM_Version {
+   friend class VMStructs;
+   friend class JVMCIVMStructs;
++  friend class CracEngine;
++  friend class crac;
+ 
+  public:
+   // cpuid result register layouts.  These are all unions of a uint32_t
+@@ -83,11 +86,12 @@
+                dca      : 1,
+                sse4_1   : 1,
+                sse4_2   : 1,
+-                        : 2,
++                        : 1,
++               movbe    : 1,
+                popcnt   : 1,
+                         : 1,
+                aes      : 1,
+-                        : 1,
++               xsave    : 1,
+                osxsave  : 1,
+                avx      : 1,
+                f16c     : 1,
+@@ -144,6 +148,18 @@
+     } bits;
+   };
+ 
++  union XfsCpuidDEax {
++    uint32_t value;
++    struct {
++      uint32_t xsaveopt     : 1,
++               xsavec       : 1,
++               xgetbv_ecx1  : 1,
++               xss          : 1,
++               xfd          : 1,
++                            : 27;
++    } bits;
++  };
++
+   union ExtCpuid1Ecx {
+     uint32_t value;
+     struct {
+@@ -154,7 +170,9 @@
+                sse4a        : 1,
+                misalignsse  : 1,
+                prefetchw    : 1,
+-                            : 23;
++                            : 7,
++               fma4         : 1,
++                            : 15;
+     } bits;
+   };
+ 
+@@ -373,7 +391,7 @@
+    * src/jdk.internal.vm.ci/share/classes/jdk/vm/ci/amd64/AMD64.java
+    */
+   enum Feature_Flag {
+-#define CPU_FEATURE_FLAGS(decl) \
++#define JVMCI_CPU_FEATURE_FLAGS(decl) \
+     decl(CX8,               "cx8",               0)  /*  next bits are from cpuid 1 (EDX) */ \
+     decl(CMOV,              "cmov",              1)  \
+     decl(FXSR,              "fxsr",              2)  \
+@@ -452,6 +470,25 @@
+     decl(AVX10_1,           "avx10_1",           63) /* AVX10 512 bit vector ISA Version 1 support*/ \
+     decl(AVX10_2,           "avx10_2",           64) /* AVX10 512 bit vector ISA Version 2 support*/
+ 
++// CRaC checks these host features, but the pinned LabsJDK compiler does not
++// expose matching JVMCI enum constants. Keep its exported feature set stable.
++#define CRAC_CPU_FEATURE_FLAGS(decl) \
++    decl(FMA4,              "fma4",              65) \
++    decl(MOVBE,             "movbe",             66) \
++    decl(OSXSAVE,           "osxsave",           67) \
++    decl(IBT,               "ibt",               68) \
++    decl(SHSTK,             "shstk",             69) /* Also known as cet_ss */ \
++    decl(XSAVE,             "xsave",             70) \
++    decl(CMPXCHG16,         "cmpxchg16",         71) /* Also known in cpuinfo as cx16 and in glibc as cmpxchg16b */ \
++    decl(LAHFSAHF,          "lahfsahf",          72) /* Also known in cpuinfo as lahf_lm and in glibc as lahf64_sahf64 */ \
++    decl(HTT,               "htt",               73) /* hotspot calls it 'ht' but that is affected by threads_per_core() */ \
++    decl(XSAVEC,            "xsavec",            74) \
++    decl(AVX_Fast_Unaligned_Load, "avx_fast_unaligned_load", 75)
++
++#define CPU_FEATURE_FLAGS(decl) \
++    JVMCI_CPU_FEATURE_FLAGS(decl) \
++    CRAC_CPU_FEATURE_FLAGS(decl)
++
+ #define DECLARE_CPU_FEATURE_FLAG(id, name, bit) CPU_##id = (bit),
+     CPU_FEATURE_FLAGS(DECLARE_CPU_FEATURE_FLAG)
+ #undef DECLARE_CPU_FEATURE_FLAG
+@@ -463,14 +500,9 @@
+     friend class JVMCIVMStructs;
+ 
+    private:
+-    uint64_t _features_bitmap[(MAX_CPU_FEATURES / BitsPerLong) + 1];
++    uint64_t _features_bitmap[(MAX_CPU_FEATURES + BitsPerLong - 1) / BitsPerLong];
+ 
+     STATIC_ASSERT(sizeof(_features_bitmap) * BitsPerByte >= MAX_CPU_FEATURES);
+-
+-    // Number of 8-byte elements in _bitmap.
+-    constexpr static int features_bitmap_element_count() {
+-      return sizeof(_features_bitmap) / sizeof(uint64_t);
+-    }
+ 
+     constexpr static int features_bitmap_element_shift_count() {
+       return LogBitsPerLong;
+@@ -491,11 +523,46 @@
+     }
+ 
+     static int _features_bitmap_size; // for JVMCI purposes
++
++    static uint64_t index_mask(int idx) {
++      assert(idx < features_bitmap_element_count(), "Features array index out of bounds");
++      if (idx + 1 < features_bitmap_element_count()) {
++        return -1LL;
++      }
++      // It is equivalent to 'bit_mask(MAX_CPU_FEATURES) - 1'.
++      return ((bit_mask((Feature_Flag) ((int) MAX_CPU_FEATURES - 1)) - 1) << 1) | 1;
++    }
++
++    // We do not use std::forward<> as we just call 'func'.
++    template <typename T, typename F>
++    static void apply_to_all_features(T&& t, F&& func) {
++      for (int idx = 0; idx < t.features_bitmap_element_count(); ++idx) {
++        func(t._features_bitmap[idx], idx);
++      }
++    }
++
++    // We do not use std::forward<> as we just call 'func'.
++    template <typename F>
++    void apply_to_all_features(F&& func) {
++      apply_to_all_features(*this, func);
++    }
++
++    // We do not use std::forward<> as we just call 'func'.
++    template <typename F>
++    void apply_to_all_features(F&& func) const {
++      apply_to_all_features(*this, func);
++    }
++
+    public:
+     VM_Features() {
+-      for (int i = 0; i < features_bitmap_element_count(); i++) {
+-        _features_bitmap[i] = 0;
+-      }
++      apply_to_all_features([](uint64_t &u, int idx) {
++        u = 0;
++      });
++    }
++
++    // Number of 8-byte elements in _bitmap.
++    constexpr static int features_bitmap_element_count() {
++      return sizeof(_features_bitmap) / sizeof(uint64_t);
+     }
+ 
+     void set_feature(Feature_Flag feature) {
+@@ -512,10 +579,100 @@
+       int idx = index(feature);
+       return (_features_bitmap[idx] & bit_mask(feature)) != 0;
+     }
++
++    void set_all_features() {
++      apply_to_all_features([](uint64_t &u, int idx) {
++        u = index_mask(idx);
++      });
++    }
++
++    void set_feature_idx(int idx, uint64_t val) {
++      assert(idx < features_bitmap_element_count(), "Features array index out of bounds");
++      _features_bitmap[idx] = val;
++    }
++
++    VM_Features operator ~() const {
++      VM_Features retval = *this;
++      apply_to_all_features(retval, [](uint64_t &u, int idx) {
++        u ^= index_mask(idx);
++      });
++      return retval;
++    }
++
++    VM_Features operator &(const VM_Features &other) const {
++      VM_Features retval = *this;
++      apply_to_all_features(retval, [&other](uint64_t &u, int idx) {
++        u &= other._features_bitmap[idx];
++      });
++      return retval;
++    }
++
++    bool operator ==(const VM_Features &other) const {
++      bool retval = true;
++      apply_to_all_features([&other, &retval](uint64_t u, int idx) {
++        if (u != other._features_bitmap[idx]) {
++          retval = false;
++        }
++      });
++      return retval;
++    }
++
++    bool operator !=(const VM_Features &other) const {
++      return !(*this == other);
++    }
++
++    bool empty() const {
++      VM_Features empty_features;
++      return *this == empty_features;
++    }
++
++    int print_numbers(char *buf_orig, size_t buflen, bool hexonly = false) const {
++      char *buf = buf_orig;
++      const char *format = hexonly ? UINT64_FORMAT_0 : UINT64_FORMAT_X;
++      apply_to_all_features([&](uint64_t u, int idx) {
++        int res = jio_snprintf(buf, buflen, format, u);
++        if (res < 0) {
++          buflen = 0;
++          return;
++        }
++        buf += res;
++        buflen -= res;
++        if (!hexonly && idx + 1 < features_bitmap_element_count() && buflen > 0) {
++          *buf++ = ',';
++          --buflen;
++        }
++      });
++      if (buflen == 0) {
++        return -1;
++      }
++      *buf = 0;
++      return buf - buf_orig;
++    }
++
++    const char *print_numbers() const;
++
++    void print_numbers_and_names(char *buf, size_t buflen) const {
++      int res = print_numbers(buf, buflen);
++      assert(res >= 0, "buffer too short");
++      buf += res;
++      buflen -= res;
++      assert(buflen >= 3, "not enough temporary space allocated");
++      *buf++ = ' ';
++      --buflen;
++      *buf = 0;
++      insert_features_names(*this, buf, buflen);
++
++      // insert_features_names puts ", " at the beginning, make it " = ".
++      if (*buf) {
++        *buf = '=';
++      }
++    }
++
++    void print_missing_features() const;
+   };
+ 
+   // CPU feature flags vector, can be affected by VM settings.
+-  static VM_Features _features;
++  static VM_Features _features, _features_saved;
+ 
+   // Original CPU feature flags vector, not affected by VM settings.
+   static VM_Features _cpu_features;
+@@ -618,6 +775,10 @@
+     uint32_t     tpl_cpuidB2_ecx; // unused currently
+     uint32_t     tpl_cpuidB2_edx; // unused currently
+ 
++    // cpuid function 0xD (xsave features and state components)
++    // ecx = 1
++    XfsCpuidDEax xfs_cpuidD1_eax;
++
+     // cpuid function 0x80000000 // example, unused
+     uint32_t ext_max_function;
+     uint32_t ext_vendor_name_0;
+@@ -713,6 +874,22 @@
+   }
+ 
+   static bool compute_has_intel_jcc_erratum();
++
++  static void get_processor_features_hardware();
++  static void get_processor_features_hotspot();
++
++  static VM_Features CPUFeatures_parse(const char *str);
++#ifdef LINUX
++  static bool glibc_not_using();
++  static bool glibc_env_set(char *disable_str);
++  /*[[noreturn]]*/ static void glibc_reexec();
++  // C++17: Make glibc_prefix and glibc_prefix_len constexpr.
++  static const char glibc_prefix[];
++  static const size_t glibc_prefix_len;
++#endif //LINUX
++  // C++17: Make _ignore_glibc_not_using inline.
++  static bool _ignore_glibc_not_using;
++  static void print_using_features_cr();
+ 
+   static bool os_supports_avx_vectors();
+   static bool os_supports_apx_egprs();
+@@ -735,6 +912,7 @@
+   static ByteSize tpl_cpuidB0_offset() { return byte_offset_of(CpuidInfo, tpl_cpuidB0_eax); }
+   static ByteSize tpl_cpuidB1_offset() { return byte_offset_of(CpuidInfo, tpl_cpuidB1_eax); }
+   static ByteSize tpl_cpuidB2_offset() { return byte_offset_of(CpuidInfo, tpl_cpuidB2_eax); }
++  static ByteSize xfs_cpuidD1_offset() { return byte_offset_of(CpuidInfo, xfs_cpuidD1_eax); }
+   static ByteSize xem_xcr0_offset() { return byte_offset_of(CpuidInfo, xem_xcr0_eax); }
+   static ByteSize ymm_save_offset() { return byte_offset_of(CpuidInfo, ymm_save); }
+   static ByteSize zmm_save_offset() { return byte_offset_of(CpuidInfo, zmm_save); }
+@@ -790,6 +968,14 @@
+ 
+   // Initialization
+   static void initialize();
++  static bool cpu_features_binary(VM_Features *data);
++  static bool ignore_cpu_features() {
++    // This gets triggered by -XX:CPUFeatures=ignore, not writing the features & arch
++    // on checkpoint into the image at all, and skipping the check on restore.
++    // IgnoreCPUFeatures is ignored on checkpoint
++    return _ignore_glibc_not_using;
++  }
++  static void restore_check(const char* str, const char* msg_prefix);
+ 
+   // Override Abstract_VM_Version implementation
+   static void print_platform_virtualization_info(outputStream*);
+--- a/src/hotspot/share/jvmci/vmStructs_jvmci.cpp
++++ b/src/hotspot/share/jvmci/vmStructs_jvmci.cpp
+@@ -1067,7 +1067,7 @@
+ 
+ #define DECLARE_LONG_CPU_FEATURE_CONSTANT(id, name, bit) GENERATE_VM_LONG_CONSTANT_ENTRY(VM_Version::CPU_##id)
+ #define VM_LONG_CPU_FEATURE_CONSTANTS \
+-   CPU_FEATURE_FLAGS(DECLARE_LONG_CPU_FEATURE_CONSTANT)
++   JVMCI_CPU_FEATURE_FLAGS(DECLARE_LONG_CPU_FEATURE_CONSTANT)
+ 
+ #endif
+ 
