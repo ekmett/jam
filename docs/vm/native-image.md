@@ -67,10 +67,11 @@ entering its guest context and executing the finalizer.
 ## Native pointers and isolates
 
 Use Native Image's `PinnedObject` when native code must hold an object address.
-Jam promotes the object before exposing its address. While a pin is open, old
-objects stay put and nursery collection continues. Close pins when the native
-operation finishes: a long-lived pin prevents old-space reclamation and can
-cause `OutOfMemoryError` even when some old objects are dead.
+Jam exposes a stable side mapping of the physical pages containing the object.
+The managed reference can move during collection while the native alias stays
+fixed. Both minor and major collection continue with pins open. Pinned page
+runs constrain packing and can retain padding, so close pins when the native
+operation finishes to release the alias and its retention costs.
 
 The normal isolate entry, attachment and teardown APIs select the corresponding
 Jam heap. A thread enters a `jam::heap_scope` before executing Java or VM work
@@ -86,9 +87,9 @@ and add `--gc=jam` to the build. The runtime compiler uses Jam's allocation and
 exact-slot barriers; collection repairs stack, continuation and installed-code
 references as well as the image heap's writable roots.
 
-The thc owner still needs to lower weak primitives through `jam.vm.Weak` and
-schedule a finalizer pump. Selecting the collector supplies the heap semantics;
-it does not add language primitives to thc.
+THC's weak primitive lowering and finalizer handoffs are integrated through
+`jam.vm.Weak`; see [the shipped scope](status.md#shipped-scope-and-limits).
+Other languages still supply their own primitive lowering and pump policy.
 
 ## Limits
 
@@ -98,9 +99,10 @@ object alignment and ordinary object headers. The permanent image heap begins
 fit below that boundary. The nursery occupies jam's second 16 GiB address
 domain. These are virtual address ranges, not eager physical allocations.
 
-Collection stops Java mutators. Pinning can defer a requested major collection.
+Collection stops Java mutators. Open side-alias pins do not defer major collection.
 Layered images and dynamic class loading are not supported. The shared weak
-registry's [metadata limits](status.md#guest-api) also apply to native images.
+registry's [registration contract](weak-pointers.md#claiming-a-finalizer)
+also applies to native images.
 The experimental AMD64 `MemoryMaskingAndFencing` option is not supported.
 Native Image does not run legacy `Object.finalize` methods. Use the runnable
 finalizers registered through `Weak` for guest finalization.
