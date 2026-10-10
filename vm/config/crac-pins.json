@@ -1,0 +1,146 @@
+{
+  "repo": "openjdk/crac",
+  "commit": "25d6782a1c26965f21b62638213d9a9cedd75004",
+  "base": "c59e44a7aa2aeff0823830b698d524523b996650",
+  "patch_sha256": "2a959ef44b3ab90c1db86e4a05a15a82aeae1a59eaa31d994363bd6e5253312e",
+  "excluded": [
+    ".github/",
+    ".jcheck/conf",
+    "README.md",
+    "make/conf/github-actions.conf"
+  ],
+  "compat_files": {
+    "make/autoconf/jvm-features.m4": {
+      "before_sha256": "850953bb31097a4d886066a8432a95df55d3616a71bc365df5e1fc79662e6bdb",
+      "after_sha256": "d2e253aa1a29f866fdefe75ee034d6b4a1d786cb59553f6a1de8864ea027edfa"
+    },
+    "src/hotspot/cpu/x86/vm_version_x86.cpp": {
+      "before_sha256": "b8d208874f81efe171ed8a17f98b7603a2aab6d4d578cbd37203252750b67f8b",
+      "after_sha256": "104db3fbdc9289dff904b1a30718de4ce30eaba1123b3d31d90f75c8a81483ab"
+    },
+    "src/hotspot/cpu/x86/vm_version_x86.hpp": {
+      "before_sha256": "ccd2788594a5726b2fc592df4183c4aa505a794914134fff801da90da0f521f1",
+      "after_sha256": "44105b0668401684ee64fcc3506334a2eafc9be0ecda4c702f8837b82a9dbdf5"
+    },
+    "src/hotspot/os/linux/os_linux.cpp": {
+      "before_sha256": "cba31b519e58e0c7c0e77c85f124722952d6d2ecc2f16ace2e3b2f3590a30a4e",
+      "after_sha256": "2b9c530a60ef7612a72a416ba8763772772a0de2b802b96c455915e0543b1e48"
+    },
+    "src/hotspot/os/linux/os_linux.hpp": {
+      "before_sha256": "cfabe40c90fca3eeab6c5d09738e7a48314a87f525360226146b282920d494c2",
+      "after_sha256": "2a24c65add3c836f7450b0a5a3cc4a1208d52e1c0316a8e4dfb63bd4898aa44d"
+    },
+    "src/hotspot/os/posix/perfMemory_posix.cpp": {
+      "before_sha256": "48077bf7930bedf8cb104088f7d73c7ebd26101d406bde442b7d3f331e314aea",
+      "after_sha256": "27ed63b4c828823d558605ae3b82e02731799087b48ca6da9a19ada531fa916f"
+    },
+    "src/hotspot/os/windows/os_windows.cpp": {
+      "before_sha256": "9a0144c5cc8be5490053eaf5a6c59465605eb0a94d81c0bc45e8f469fe9d486f",
+      "after_sha256": "828b9272ec5badd12083bb30dcbcf3dae14b7ef8d504b545154f8befe38b33fd"
+    },
+    "src/hotspot/os/windows/os_windows.hpp": {
+      "before_sha256": "6654b94b59cb89f030f8e62cc79474b78d00431b8e223f205610dd30f0452f44",
+      "after_sha256": "64b2f9cadc9796d76ce846b6bbe30c26185cb80132ff99f277fad69c888186a7"
+    },
+    "src/hotspot/share/c1/c1_Runtime1.cpp": {
+      "before_sha256": "896f33e01a45d74d654165870c106c51ffbdfcb57363e182f9cd8412dc5cfd28",
+      "after_sha256": "bb9849d0b786b1de92f3bb25583c6cdfb47fa6245ad8b3034390384b9b168541"
+    },
+    "src/hotspot/share/ci/ciReplay.cpp": {
+      "before_sha256": "d04dbe20088f9e8475cfac136b9673b9f9d55cd538f1c63ae1e8a05f1872870a",
+      "after_sha256": "a7c4354c94ddce4d301a4a3f127c42eb37934530e68e870f908536f1587664ee"
+    },
+    "src/hotspot/share/code/codeCache.cpp": {
+      "before_sha256": "15164d22374bcf25ef24b5615d35d0c1ccd7ca6c991ec0feb4ecf1167648b487",
+      "after_sha256": "b195cc74b38b7cf75a26b29c9e2d82a75e64218409cce703825ee719aa3c4f2a"
+    },
+    "src/hotspot/share/code/nmethod.cpp": {
+      "before_sha256": "70e829084c5916ae5b76bc88479141dc3c16e4de50e10174d499ca5478bf39c2",
+      "after_sha256": "d3386cdffb3d2fae0fea962f38eb2e85098da06c05a5f21a1154f9d553c1f165"
+    },
+    "src/hotspot/share/code/nmethod.hpp": {
+      "before_sha256": "4ded87053ae0c94e1eeebbdca37fc0d4befe8a8f55e21ab0047286a4cc867999",
+      "after_sha256": "308b2658010a3d0ef7b6d9879e6369620a3df6c72a14f7349eff40736ddbf178"
+    },
+    "src/hotspot/share/compiler/compilationPolicy.cpp": {
+      "before_sha256": "ddf53e16008e95be0758c891599220bc5910c4cf55fd27b585cb07d8c00ad3e6",
+      "after_sha256": "cf4a421d55bdddd03dfd8da1660a9d451c3e304c86db51dc6c88516e0e95a0dd"
+    },
+    "src/hotspot/share/gc/g1/g1CollectedHeap.cpp": {
+      "before_sha256": "84369daea931c137488cc91954f69a85b2586eedf68b04c56eabe0b17d961169",
+      "after_sha256": "67da629f6cceb171425fa638e35c9f47e56acf099c4ea9494ed5e63c41c2ae21"
+    },
+    "src/hotspot/share/jfr/jfr.cpp": {
+      "before_sha256": "8d12ada9260d55ab93d21271deb3de96c4447c150e6ebdb94c0867b5a418c8f7",
+      "after_sha256": "586f2a674df6e298a0efbe75adaaf3aea00fd140132178f6eba1f7f980555fc9"
+    },
+    "src/hotspot/share/jfr/jfr.hpp": {
+      "before_sha256": "bf501b44b5b83e3563eb8216da759cffe8f5ac716ed68a3c50d4fdd0d6802f2e",
+      "after_sha256": "6307f35394e6ecee17d62f96293ae2de1edae6be23c0d92018864d36fb47a516"
+    },
+    "src/hotspot/share/jvmci/jvmciCompilerToVM.cpp": {
+      "before_sha256": "92ccdfe89794e6a3df6afbfe38d9868a93142dda099a4175254f88438b8ef815",
+      "after_sha256": "23364765b26d2c30f9108fbeefd5236aa4978cc71dfbaa61d3da1763bc7210b2"
+    },
+    "src/hotspot/share/jvmci/jvmciEnv.cpp": {
+      "before_sha256": "506a96395305d5c19e8a8983690c90e084b2d1df435a40bd75928231af0d20cc",
+      "after_sha256": "d4ed41942e3ce57e3a47fec7eea1ab59c5a357b57c45add57d34b4ea7b2c4644"
+    },
+    "src/hotspot/share/jvmci/jvmciRuntime.cpp": {
+      "before_sha256": "d9fb3004334ad49f3d0f5ca4854b6f7a4efff68deb8f974f7cfdb1379802a857",
+      "after_sha256": "09ba796c45f95d2d0405fe660b34eb7e7499aff7d31b955ac55ea2009b375624"
+    },
+    "src/hotspot/share/jvmci/vmStructs_jvmci.cpp": {
+      "before_sha256": "67cc31ab2fdc5a99755f9e33edb6823e45408ae2bb3032d3949bf680c9cb149e",
+      "after_sha256": "ca465b62f7658a2932a69ad00af622a6f452cae7af81d17ef2cdedb25775d001"
+    },
+    "src/hotspot/share/oops/instanceKlass.cpp": {
+      "before_sha256": "816a29ec9f8600762dc3a2bc16479a153e29cc118b4b6c0bc0b664a0a240a2a9",
+      "after_sha256": "1c3f1cc41ca1abb20d8de4cbacf948221f58ed545d433f4ea67ed4271c83fd75"
+    },
+    "src/hotspot/share/oops/method.cpp": {
+      "before_sha256": "15e07342ea9bf9eb4a2a63cc0727ba2d8017ce6a2c8f6ecb5e2cdefba1abfa40",
+      "after_sha256": "3843bb159e0a7f27eb6c8dbffb88e1fd8db0943b84baeaa27dd314f620b42e97"
+    },
+    "src/hotspot/share/prims/whitebox.cpp": {
+      "before_sha256": "65c4e3ccfeffc81ed1b73a666a48286909cd94942804b00d2dc0084338e72460",
+      "after_sha256": "5d1db8e91fe6c399a8cd445e9bcc916daec11bdf11e4fe02b897c42ca7bebd22"
+    },
+    "src/hotspot/share/runtime/deoptimization.cpp": {
+      "before_sha256": "c59207827087edc73c966b96e190986e5450738b2c1c0b16b350489429e4de00",
+      "after_sha256": "ffa0c202672077d147958ed3315674dbed40013f86c16a6ba1609ee26d5342c1"
+    },
+    "src/hotspot/share/runtime/javaThread.cpp": {
+      "before_sha256": "74111bc613375f0dc0506c6f01485e438f642231ed562274ad5651fb82fb2be1",
+      "after_sha256": "70b989485a4f2303c24dc8d9435e17eebc31a576c6c2f94aa39acdf8eeef0b16"
+    },
+    "src/hotspot/share/services/diagnosticCommand.cpp": {
+      "before_sha256": "79bed432d02ff1d3d24059cfd3c3b7e81ed9f6bdca575f885d2a11f82a884159",
+      "after_sha256": "92a7287b106600412ab9e86080bf06bd541d0fe70440abbd05e71093940b4ebe"
+    },
+    "src/hotspot/share/services/management.cpp": {
+      "before_sha256": "c45a6a82c3330eb514cb6fc3c8762a039d133160733b9430ff3d98e0bcef04fe",
+      "after_sha256": "78db07bb9606aff0f8c3d6b0fc4a0a63d422d63f91a94f10d84815e108e032a3"
+    },
+    "src/hotspot/share/utilities/ostream.hpp": {
+      "before_sha256": "02d3aad8c6b0951f3d1bd3f4a98c520a57ae4ce8bd978e2c8659bc936a2fa866",
+      "after_sha256": "d9a84a0f614a0f9e5cdc759744e07de6d1b6c69f4441e5514136f7d5567d3985"
+    },
+    "src/java.base/share/native/libzip/zip_util.h": {
+      "before_sha256": "6da286455c35b7086572fbcc7c110c1230c10d051be6e532eeea263925760760",
+      "after_sha256": "6ca67fb4b7137d77624ade6f336c50edf0c32a3a8bb3df0a973f62bac41e1825"
+    },
+    "src/java.base/unix/classes/sun/nio/ch/UnixDispatcher.java": {
+      "before_sha256": "782a94def97940653acdbcb5f15443d1545254e307e07d5472ebfdffce95b91c",
+      "after_sha256": "6bd65337441027342d9b9e43189acce4f1e22b344a1ed57bc0f97dd49b388780"
+    },
+    "src/jdk.management/share/classes/com/sun/management/internal/PlatformMBeanProviderImpl.java": {
+      "before_sha256": "db0c1e09984d9f06323c0718daf0b0160614c1ad13ac1baf8591b649941009cf",
+      "after_sha256": "b2d4e8755ea861403a15db8db270e12644b6d9752e165b599b40639245314374"
+    },
+    "test/lib-test/jdk/test/whitebox/CPUInfoTest.java": {
+      "before_sha256": "4c00aee6a548818a61ca6bafd04fd7fd91b19644cba2a3d640a27bb6fd315762",
+      "after_sha256": "4be666c8377dade92fc62bdcc2d265e93f344b3eba9553a8cd8a7c77c255aefb"
+    }
+  }
+}
