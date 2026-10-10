@@ -32,7 +32,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  JAM_JOBS: '3'
+  JAM_JOBS: '4'
+  CMAKE_BUILD_PARALLEL_LEVEL: '4'
+  CTEST_PARALLEL_LEVEL: '4'
+  NINJA_STATUS: '[%f/%t running=%r elapsed=%e] '
   JAM_BUILD_FLAVOR: ${{ inputs.build_flavor || 'release' }}
 
 defaults:
@@ -89,6 +92,26 @@ jobs:
             -cp 'build-bridge-test;build/bridge/jam-vm.jar' WeakBridgeSmoke unavailable
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
+      - name: Capture Ninja dependency graph
+        if: ${{ !cancelled() && hashFiles('vm/build-jam/build.ninja') != '' }}
+        run: |
+          . "$env:JAM_CI_TOOLS/env.ps1"
+          & $env:JAM_NINJA -C build-jam -t graph > build-jam/ci-ninja-graph.dot
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Retain native Ninja timings and graph
+        if: ${{ !cancelled() && hashFiles('vm/build-jam/build.ninja') != '' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ninja-vm-windows
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            vm/build-jam/.ninja_log
+            vm/build-jam/ci-ninja-graph.dot
+            vm/build-jam/build.ninja
+            vm/build-jam/CMakeFiles/rules.ninja
+
   native:
     name: Native and guest bridge (${{ matrix.platform }})
     strategy:
@@ -133,6 +156,25 @@ jobs:
           "$JAM_BOOT_JDK/bin/java" -Xshare:off --enable-native-access=ALL-UNNAMED \
             "-Djava.library.path=$PWD/build/bridge/lib" \
             -cp build-bridge-test:build/bridge/jam-vm.jar WeakBridgeSmoke unavailable
+
+      - name: Capture Ninja dependency graph
+        if: ${{ !cancelled() && hashFiles('vm/build-jam/build.ninja') != '' }}
+        run: |
+          source "$JAM_CI_TOOLS/env.sh"
+          "$JAM_NINJA" -C build-jam -t graph > build-jam/ci-ninja-graph.dot
+      - name: Retain native Ninja timings and graph
+        if: ${{ !cancelled() && hashFiles('vm/build-jam/build.ninja') != '' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ninja-vm-${{ matrix.platform }}
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            vm/build-jam/.ninja_log
+            vm/build-jam/ci-ninja-graph.dot
+            vm/build-jam/build.ninja
+            vm/build-jam/CMakeFiles/rules.ninja
 
   hotspot:
     name: HotSpot integration (${{ matrix.platform }})

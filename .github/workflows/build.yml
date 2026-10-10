@@ -22,6 +22,10 @@ jobs:
       id-token: write
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+      CTEST_PARALLEL_LEVEL: '4'
+      NINJA_STATUS: '[%f/%t running=%r elapsed=%e] '
     defaults:
       run:
         shell: bash
@@ -101,11 +105,19 @@ jobs:
             -DJAM_ENABLE_COVERAGE=${{ inputs.coverage && 'ON' || 'OFF' }} "${extra[@]}"
       - name: Build
         id: build
-        run: cmake --build build --parallel 2
+        run: cmake --build build --parallel 4
+      - name: Capture primary build timings and graph
+        if: ${{ !cancelled() && hashFiles('build/build.ninja') != '' }}
+        run: |
+          # Later coverage/docs invocations restart Ninja's relative clock.
+          if [[ -f build/.ninja_log ]]; then
+            cp build/.ninja_log build/ci-build.ninja_log
+          fi
+          cmake --build build -- -t graph > build/ci-ninja-graph.dot
       - name: Test
         id: test
         run: >-
-          ctest --test-dir build --no-tests=error --output-on-failure
+          ctest --test-dir build --parallel 4 --no-tests=error --output-on-failure
           --output-junit "$GITHUB_WORKSPACE/build/tests.xml"
       - name: Upload test results to Codecov
         if: ${{ !cancelled() && hashFiles('build/tests.xml') != '' }}
@@ -165,3 +177,17 @@ jobs:
         with:
           path: build/site
           retention-days: 1
+      - name: Retain Ninja timings and graph
+        if: ${{ !cancelled() && hashFiles('build/build.ninja') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ninja-${{ matrix.platform.runner }}-${{ matrix.platform.config }}-${{ inputs.coverage && 'coverage' || 'build' }}
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            build/.ninja_log
+            build/ci-build.ninja_log
+            build/ci-ninja-graph.dot
+            build/build.ninja
+            build/CMakeFiles/rules.ninja
