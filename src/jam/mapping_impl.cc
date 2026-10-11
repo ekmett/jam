@@ -176,6 +176,14 @@ void heap_mapping::finish_aliases() noexcept {
 #endif
 }
 
+void heap_mapping::discard_unused(std::size_t start, std::size_t live) const noexcept {
+  auto const page = page_size();
+  if (!address || start >= capacity || start % page || live > capacity)
+    heap_failure("invalid circular discard range");
+  auto const retained = ((live + page - 1) / page) * page;
+  discard_gap(start, retained);
+}
+
 void heap_mapping::discard_gap(std::size_t start, std::size_t live) const noexcept {
 #if defined(_WIN32)
   // Advisory discard releases dead physical pages; a partially retained section
