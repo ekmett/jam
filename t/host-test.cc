@@ -269,6 +269,7 @@ void publication() {
       p = f.host.forward(p); old = f.host.forward(old); f.host.finish();
       f.host.publish(generation::young, target, page_words, page_words * 9);
       if (!minor) f.host.publish(generation::old, old_target, page_words, page_words * 9);
+      f.host.discard_unused();
       published = reinterpret_cast<node *>(target + ((p & ~young_bit) - page_words) * 8);
       check(published->id == 84, "republished alias follows rotated backing");
       check(reinterpret_cast<node *>(old_target + (old - page_words) * 8)->id == 123,

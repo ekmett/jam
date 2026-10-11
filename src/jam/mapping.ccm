@@ -83,6 +83,12 @@ public:
   hint_inline hint_pure std::byte * data() const noexcept { return address; }
   /// \brief Capacity of one view, in bytes.
   hint_inline hint_pure std::size_t bytes() const noexcept { return capacity; }
+  /// \brief Discard whole backing pages outside a live circular arc.
+  /// \pre Stopped users; start is page aligned and live does not exceed capacity.
+  /// All aliases of discarded pages lose their contents. The final partial live
+  /// page survives; capacity and virtual addresses are unchanged. Release is
+  /// best effort and its physical-memory effect depends on the operating system.
+  void discard_unused(std::size_t start, std::size_t live) const noexcept;
   /// \brief Native OS page size, also the mapping granularity.
   static std::size_t page_size() noexcept;
   /// \brief Publish a logical arc into a caller-owned, page-aligned reservation.

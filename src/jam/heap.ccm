@@ -18,6 +18,7 @@ module;
 #include <compare>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <map>
 #include <tuple>
 #include <type_traits>
@@ -1297,6 +1298,13 @@ public:
     /// window and count is in eight-byte cells. The reservation survives this call.
     /// \post The window is inaccessible; on Windows it is one placeholder.
     void unpublish(void * target, std::size_t count) const noexcept;
+    /// \brief Release unused backing without changing generation capacity or addresses.
+    /// \pre Idle phase, stopped mutators; finish relocation and repair published
+    /// aliases first. Allocated extents, guards, partial pages and live pins survive.
+    /// \details Discards only whole pages beyond each generation's allocation
+    /// cursor, without scanning objects. Linux removes their shared backing;
+    /// other platforms may retain it. Ordinary collection does not call this.
+    void discard_unused() const noexcept;
     /// \brief Allocate raw cells in either generation, preserving the tag bit.
     /// A host may subdivide the extent; scanner claims determine record boundaries.
     /// \pre Positive extent fits the selected generation; no active collection.
@@ -2370,6 +2378,12 @@ void heap::host::publish(generation which, void * target, std::size_t skip, std:
 #endif
   g.storage.publish(((g.origin + skip) % g.capacity()) * 8,
     static_cast<std::byte *>(target), count * 8);
+}
+
+void heap::host::discard_unused() const noexcept {
+  if (state != phase::idle) detail::heap_failure("discard during host collection");
+  for (auto const * g : {&owner.arena, &owner.nursery})
+    g->storage.discard_unused(g->origin * sizeof(word), g->cursor * sizeof(word));
 }
 
 void heap::host::unpublish(void * target, std::size_t count) const noexcept {

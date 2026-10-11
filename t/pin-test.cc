@@ -3,6 +3,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +37,41 @@ void mapping_aliases() {
   auto wrapped = destination.alias_run(3 * page, 2 * page);
   check(wrapped.data()[0] == std::byte{7} && wrapped.data()[page + 17] == std::byte{44},
         "side alias supports a circular source run");
+}
+
+void discard_mapping() {
+  using jam::detail::heap_mapping;
+  auto const page = heap_mapping::page_size();
+  auto const capacity = 4 * page;
+  for (auto start : {std::size_t{0}, 3 * page}) {
+    for (auto live : {std::size_t{0}, std::size_t{1}, page + 17, capacity}) {
+      heap_mapping mapping{capacity};
+      auto * const base = mapping.data();
+      std::memset(base, 42, capacity);
+      auto alias = mapping.alias_run(start, capacity);
+      auto const retained = (live + page - 1) / page * page;
+      mapping.discard_unused(start, live);
+      mapping.discard_unused(start, live); // Repeated checkpoint preparation is harmless.
+      check(mapping.data() == base && mapping.bytes() == capacity, "discard preserves mapping and capacity");
+      for (std::size_t i = 0; i != capacity; ++i) {
+        auto const physical = (start + i) % capacity;
+        if (i < retained) {
+          check(base[physical] == std::byte{42} && alias.data()[i] == std::byte{42},
+                "discard preserves complete live pages through all aliases");
+        }
+#if defined(__linux__)
+        else check(base[physical] == std::byte{0} && base[capacity + physical] == std::byte{0}
+                   && alias.data()[i] == std::byte{0}, "discard removes dead shared backing through every alias");
+#endif
+      }
+      if (retained != capacity) {
+        auto const physical = (start + retained) % capacity;
+        alias.data()[retained] = std::byte{73};
+        check(base[physical] == std::byte{73} && base[capacity + physical] == std::byte{73},
+              "discarded backing remains writable and coherent on reuse");
+      }
+    }
+  }
 }
 
 using offset = jam::heap::offset;
@@ -88,6 +124,7 @@ void pinned_collection(bool minor, bool promote, bool tracking = false) {
     }
     auto const next = host.forward(p->position()), next_other = host.forward(q->position());
     host.finish();
+    host.discard_unused();
     if (tracking) {
       unsigned count = 0;
       for (auto which : {generation::old, generation::young})
@@ -141,6 +178,7 @@ void pinned_boundaries() {
     check(host.prepare(pass == 2), "cross-page pin collection fits");
     for (auto & at : roots) at = host.forward(at);
     host.finish();
+    host.discard_unused();
     for (unsigned i = 0; i < roots.size(); ++i) if (roots[i]) {
       check(storage[roots[i]] == lengths[i], "record length survives adjacent page remaps");
       for (std::size_t j = 1; j < lengths[i]; ++j)
@@ -185,6 +223,7 @@ void pinned_retry() {
 }
 int main() {
   mapping_aliases();
+  discard_mapping();
   pinned_boundaries();
   pinned_retry();
   pinned_collection(false, false, true);
